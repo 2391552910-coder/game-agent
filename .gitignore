@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+
+# 环境变量
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# RAG 本地缓存
+rag_storage/
+
+# 日志
+logs/
+*.log
+
+# 测试
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
