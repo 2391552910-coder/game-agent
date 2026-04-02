@@ -209,54 +209,93 @@ game-agent-platform/
 
 ### 4.1 LangGraph Agent 系统
 
-#### 4.1.1 主协调图 (Orchestrator)
+#### 4.1.1 状态设计（重叠键自动映射）
+
+子图状态是主状态的子集，利用 LangGraph 的自动 state mapping：
 
 ```python
-class AnalysisState(TypedDict):
-    user_id: str
-    snapshot: PlayerSnapshot
-    behavior_report: str
-    reasoned_actions: list[dict]
-    final_output: PlayerAnalysisOutput
-    errors: list[str]
-
-# 图结构：顺序执行
-START → fetch_snapshot → behavior_analysis → action_reasoning → merge_output → END
-```
-
-#### 4.1.2 行为分析子图 (BehaviorGraph)
-
-```python
+# 子图只声明自己需要的字段
 class BehaviorState(TypedDict):
     snapshot: PlayerSnapshot
     rag_context: str
-    analysis: str
+    analysis: str  # JSON 格式的行为分析报告
 
-# 图结构
-START → retrieve_rules(LightRAG) → analyze(LLM快速模型) → END
-```
-
-#### 4.1.3 推理子图 (ReasonerGraph)
-
-```python
 class ReasonerState(TypedDict):
     behavior_report: str
     snapshot: PlayerSnapshot
     rag_context: str
-    actions: list[dict]
+    actions: list[dict]  # 行动序列
 
+# 主状态包含所有子图字段 + 自己的字段
+# 重叠的键（snapshot, rag_context 等）自动映射到子图
+class AnalysisState(TypedDict):
+    user_id: str
+    tenant_id: str
+    snapshot: PlayerSnapshot           # 与子图重叠 → 自动传递
+    rag_context: str                   # 与子图重叠 → 自动传递
+    behavior_report: str               # 行为分析输出
+    reasoned_actions: list[dict]       # 推理输出
+    final_output: dict[str, Any]       # 最终 JSON 输出
+    errors: list[str]                  # 错误收集
+```
+
+#### 4.1.2 主协调图 (Orchestrator) — 带条件边
+
+```python
+# 图结构：带错误短路
+START → fetch_snapshot → behavior_analysis → [条件边] → action_reasoning → merge_output → END
+                                              ↓
+                                         error → merge_output（跳过推理）
+
+# 条件边实现
+def check_behavior(state):
+    if state.get("errors"):
+        return "merge_output"  # 跳过推理，直接合并已有数据
+    return "action_reasoning"
+
+builder.add_conditional_edges("behavior_analysis", check_behavior, {
+    "action_reasoning": "action_reasoning",
+    "merge_output": "merge_output",
+})
+```
+
+#### 4.1.3 行为分析子图 (BehaviorGraph)
+
+```python
+# 图结构
+START → retrieve_rules(LightRAG) → analyze(LLM快速模型) → END
+```
+
+#### 4.1.4 推理子图 (ReasonerGraph)
+
+```python
 # 图结构
 START → retrieve_rules(LightRAG) → reason(LLM主力模型+extended_thinking) → END
 ```
 
-#### 4.1.4 持久化
+#### 4.1.5 持久化
 
 - **Checkpointer**: `PostgresSaver` — Agent 状态持久化，支持时间旅行
 - **Store**: `PostgresStore` — 跨会话记忆（玩家历史画像）
 
 ### 4.2 LightRAG 集成
 
-#### 4.2.1 初始化
+#### 4.2.1 存储后端架构
+
+LightRAG 使用混合存储：PostgreSQL 承担 KV + 向量存储，Neo4j 承担图存储。这样 PostgreSQL 同时服务业务数据和 RAG 基础设施，减少运维组件。
+
+```
+┌─────────────────────────────────────────┐
+│           LightRAG Storage              │
+├─────────────┬─────────────┬─────────────┤
+│ KV Storage  │   Vector    │   Graph     │
+│ (PGKV)      │ (PGVector)  │ (Neo4j)     │
+│ 文档元数据   │  向量索引    │ 实体+关系    │
+│ 文档状态    │  语义检索    │  图谱查询    │
+└─────────────┴─────────────┴─────────────┘
+```
+
+#### 4.2.2 初始化
 
 ```python
 from lightrag import LightRAG, QueryParam
@@ -264,17 +303,49 @@ from lightrag.utils import EmbeddingFunc
 
 rag = LightRAG(
     working_dir="./rag_storage",
+    # PostgreSQL 统一后端（KV + 向量）
+    kv_storage="PGKVStorage",
+    vector_storage="PGVectorStorage",
+    doc_status_storage="PGDocStatusStorage",
+    # Neo4j 图存储
+    graph_storage="Neo4JStorage",
+    # LLM 配置
     llm_model_func=openai_complete_if_cache,
-    llm_model_name=settings.OPENAI_DEFAULT_MODEL,
-    llm_model_kwargs={"api_key": settings.OPENAI_API_KEY, "base_url": settings.OPENAI_BASE_URL},
+    llm_model_name=settings.openai_default_model,
+    llm_model_kwargs={
+        "api_key": settings.openai_api_key,
+        "base_url": settings.openai_base_url,
+    },
+    # Embedding 配置
     embedding_func=EmbeddingFunc(
         embedding_dim=1024,  # BGE-M3 维度
         max_token_size=8192,
-        func=lambda texts: embed_bge_m3(texts),
+        func=lambda texts: embed_func(texts),  # 可切换 provider
     ),
-    graph_storage="Neo4JStorage",
+    # 向量检索阈值
+    vector_db_storage_cls_kwargs={
+        "cosine_better_than_threshold": 0.2,
+    },
 )
 await rag.initialize_storages()
+```
+
+#### 4.2.3 Embedding Provider 策略
+
+通过配置切换 embedding provider，支持本地 BGE-M3 和云端 API：
+
+```python
+# src/config.py 新增
+embedding_provider: str = Field(default="openai", description="Embedding 提供商标识")
+
+# src/core/engine/rag.py
+async def get_embedding_func():
+    providers = {
+        "openai": openai_embed,
+        "bge_m3_local": bge_m3_local_embed,
+        "jina": jina_embed,
+    }
+    return providers.get(settings.embedding_provider, openai_embed)
 ```
 
 #### 4.2.2 检索模式
@@ -364,16 +435,33 @@ settings = Settings()
 | **Agent 图** | LangGraph 内置 | `interrupt()` 暂停 + 人工干预 |
 | **API 层** | 熔断器 | Redis 计数器 + 自动恢复 |
 
-### 5.2 熔断器
+### 5.2 熔断器（线程安全）
 
 ```python
 class CircuitBreaker:
-    """防止级联故障"""
+    """防止级联故障 — asyncio.Lock 保证并发安全"""
     def __init__(self, name: str, failure_threshold: int = 5, recovery_timeout: float = 30.0):
-        ...
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self._lock = asyncio.Lock()
+        self._failures = 0
+        self._last_failure_time = 0.0
+        self._state = "closed"
 
     async def execute(self, func: Callable, *args, **kwargs) -> Any:
-        ...
+        async with self._lock:
+            if self.state == "open":
+                raise CircuitBreakerOpen(f"Circuit breaker '{self.name}' is open")
+        try:
+            result = await func(*args, **kwargs)
+            async with self._lock:
+                self.record_success()
+            return result
+        except Exception:
+            async with self._lock:
+                self.record_failure()
+            raise
 ```
 
 ---
@@ -393,17 +481,31 @@ class CircuitBreaker:
 ### 6.2 限流（Redis 滑动窗口）
 
 ```python
-# 每分钟最多 100 次请求
+# 每分钟最多 100 次请求 — Redis ZSET 滑动窗口
 async def rate_limit_middleware(request: Request, call_next):
     key = f"rate:{request.client.host}"
-    # Redis ZSET 滑动窗口实现
+    now = time.time()
+    window = 60
+    max_requests = 100
+
+    pipe = redis.pipeline()
+    pipe.zremrangebyscore(key, 0, now - window)  # 清理过期
+    pipe.zcard(key)                               # 当前窗口计数
+    _, count = await pipe.execute()
+
+    if count >= max_requests:
+        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+
+    await redis.zadd(key, {f"{now}:{uuid4()}": now})
+    await redis.expire(key, window)
+    return await call_next(request)
 ```
 
 ### 6.3 Token 配额
 
 - 月度配额控制
-- Redis 快速检查 + PostgreSQL 持久化
-- 超额返回 429 Too Many Requests
+- **AuthMiddleware 完整验证链**：API Key 存在性 → Redis 缓存 → PostgreSQL 验证 → 配额检查 → 通过/拒绝（429）
+- TokenUsageCallback 记录每次 LLM 调用的 token 消耗，定期同步到 PostgreSQL
 
 ---
 
@@ -462,7 +564,33 @@ async def rate_limit_middleware(request: Request, call_next):
 |------|------|------|
 | Agent 框架 | LangGraph 1.0 | 事实标准，subgraph 原生支持，持久化完善 |
 | RAG 框架 | LightRAG | 知识图谱 RAG，实体关系提取，比传统向量 RAG 准确率高 30%+ |
+| RAG 存储 | PGKV + PGVector + Neo4J | PostgreSQL 统一后端（KV+向量），Neo4j 专注图存储，减少运维 |
+| 子图状态 | 重叠键自动映射 | 利用 LangGraph 自动 state mapping，避免手动构造子图状态 |
 | 图数据库 | Neo4j 5.x | LightRAG 原生支持，Cypher 查询语言成熟 |
 | 包管理 | uv | 比 pip/poetry 快 10-100 倍 |
 | ORM | SQLAlchemy 2.0 async | Python 异步 ORM 事实标准 |
 | 保留 Prefect | Prefect 3.4 | 已验证成熟，防抖 + 限流逻辑完善 |
+| 依赖注入 | FastAPI Depends() | 替代全局单例，支持测试和 worker 隔离 |
+| Embedding | 策略模式可切换 | 支持 openai / bge_m3_local / jina 等 provider |
+| 错误处理 | 条件边短路 | 子图失败时跳过后续节点，避免浪费 LLM 调用 |
+| 熔断器 | asyncio.Lock | 保证 async 并发安全 |
+| 配额执行 | 中间件完整验证链 | AuthMiddleware 完成 Key 验证 + 配额检查，路由无需重复 |
+
+## 11. 架构审查修复记录
+
+| # | 严重度 | 问题 | 修复方案 |
+|---|--------|------|----------|
+| 1 | Critical | LightRAG 只设 graph_storage，KV/向量退化为 JSON 文件 | 使用 PGKVStorage + PGVectorStorage + Neo4JStorage 混合后端 |
+| 2 | Critical | 子图状态手动构造空 dict，违背 LangGraph 设计 | 子图状态作为主状态子集，利用重叠键自动映射 |
+| 3 | Critical | 线性图无错误分支，失败后继续浪费 LLM 调用 | 添加条件边 check_behavior，失败时跳过推理直接 merge |
+| 4 | Critical | AuthMiddleware 只做存在性检查，每个路由重复验证 | 中间件完成完整验证链（Key → DB → 配额），tenant 存入 request.state |
+| 5 | Important | 全局单例在 async 多 worker 下脆弱 | 使用 FastAPI Depends() 依赖注入 |
+| 6 | Important | CircuitBreaker 无并发安全保护 | 添加 asyncio.Lock 保护状态变更 |
+| 7 | Important | Embedding 函数名与实际 provider 不符 | 策略模式 + embedding_provider 配置 |
+| 8 | Important | Prefect Flow 与 LangGraph 重复获取 snapshot | Prefect 传入 snapshot，orchestrator 跳过 fetch 节点 |
+| 9 | Important | RateLimitMiddleware 是空实现 | 完整 Redis ZSET 滑动窗口实现 |
+| 10 | Important | 缺少 Dockerfile | 添加多阶段构建 Dockerfile |
+| 11 | Minor | Prompt 硬编码在 Python 文件 | 保留 prompts.yaml 集中管理 |
+| 12 | Minor | LLM 缓存无上限 | 使用 cachetools.TTLCache 限制大小和 TTL |
+| 13 | Minor | Neo4j healthcheck 可能不工作 | 改用 HTTP API 检查（curl localhost:7474） |
+| 14 | Minor | Token 配额有跟踪无执行 | 在 AuthMiddleware 中加入配额检查 |

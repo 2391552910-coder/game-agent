@@ -61,6 +61,76 @@ services:
       retries: 10
       start_period: 30s
 
+  # ==================== Milvus ====================
+  # Milvus 独立部署（standalone 模式），含 etcd + MinIO 依赖
+  # 向量存储供 LightRAG 使用，与业务 PostgreSQL 完全独立
+
+  # ── etcd（Milvus 元数据存储） ──
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    container_name: myagent_dev_etcd
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd_dev_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── MinIO（Milvus 对象存储） ──
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: myagent_dev_minio
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - minio_dev_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Milvus Standalone ──
+  milvus:
+    image: milvusdb/milvus:v2.5.4
+    container_name: myagent_dev_milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "19530:19530"   # gRPC
+      - "9091:9091"     # Metrics
+    volumes:
+      - milvus_dev_data:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # ==================== Prefect ====================
   prefect:
     image: prefecthq/prefect:3-latest
@@ -83,3 +153,7 @@ volumes:
   redis_dev_data:
   neo4j_dev_data:
   neo4j_dev_logs:
+  etcd_dev_data:
+  minio_dev_data:
+  milvus_dev_data:
+  rag_storage:
