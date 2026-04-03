@@ -11,14 +11,12 @@ import os
 from functools import partial
 from typing import Any
 
-import numpy as np
-from lightrag import LightRAG, QueryParam
+from lightrag import LightRAG
 from lightrag.llm.openai import openai_complete_if_cache, openai_embed
 from lightrag.rerank import ali_rerank
-from lightrag.utils import EmbeddingFunc, wrap_embedding_func_with_attrs
+from lightrag.utils import EmbeddingFunc
 
 from src.config import settings
-
 
 # 工作目录
 
