@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.config import settings
 
-
 # 创建异步引擎
 # echo=True 在开发环境下打印所有 SQL 语句，方便调试
 # pool_pre_ping=True 每次从连接池取连接前先 ping，自动剔除失效连接
