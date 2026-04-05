@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.middleware import AuthMiddleware, RateLimitMiddleware
-from src.api.routes import analysis, quota, tenants, webhooks
+from src.api.routes import analysis, providers, quota, tenants, webhooks
 from src.config import settings
 from src.core.infrastructure.db import close_db, init_db
 from src.core.infrastructure.redis import close_redis, init_redis
@@ -25,6 +25,9 @@ async def lifespan(app: FastAPI):
     logger.info("服务启动中...")
     await init_db()
     await init_redis()
+    from src.core.llm.balancer import balancer
+
+    await balancer.initialize()
     logger.info("所有服务初始化完成")
     yield
     logger.info("服务关闭中...")
@@ -58,6 +61,7 @@ app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["analysis"])
 app.include_router(tenants.router, prefix="/api/v1/tenants", tags=["tenants"])
 app.include_router(quota.router, prefix="/api/v1/quota", tags=["quota"])
+app.include_router(providers.router, prefix="/api/v1/providers", tags=["providers"])
 
 
 @app.get("/health")
