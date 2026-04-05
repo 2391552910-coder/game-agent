@@ -22,3 +22,8 @@ class PlayerAnalysisOutput(BaseModel):
     """最终输出"""
     player_profile: BehaviorProfile
     recommended_actions: list[RecommendedAction]
+
+
+class ActionList(BaseModel):
+    """行动推理输出包装。用于 with_structured_output，避免 list[...] 不兼容。"""
+    actions: list[RecommendedAction] = Field(description="推荐行动列表")

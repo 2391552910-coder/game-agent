@@ -4,11 +4,16 @@
 tenant_id 全程透传，确保多租户隔离。
 """
 
+import asyncio
 import logging
 
 from prefect import flow, task
 
 logger = logging.getLogger(__name__)
+
+# ── 防卡死常量 ──
+# 图执行总超时（秒）: 覆盖所有节点，防止整个流程无限挂起
+_GRAPH_TOTAL_TIMEOUT = 300
 
 
 @task(retries=2, retry_delay_seconds=10)
@@ -43,19 +48,27 @@ async def run_analysis(
 
     graph = await create_orchestrator()
 
-    result = await graph.ainvoke(
-        {
-            "user_id": user_id,
-            "tenant_id": tenant_id,
-            "snapshot": snapshot,
-            "rag_context": "",
-            "behavior_report": "",
-            "reasoned_actions": [],
-            "final_output": {},
-            "errors": [],
-        },
-        {"configurable": {"thread_id": f"{tenant_id}:{user_id}"}},
-    )
+    try:
+        result = await asyncio.wait_for(
+            graph.ainvoke(
+                {
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "snapshot": snapshot,
+                    "rag_context": "",
+                    "enriched_context": "",
+                    "behavior_report": "",
+                    "reasoned_actions": [],
+                    "final_output": {},
+                    "errors": [],
+                },
+                {"configurable": {"thread_id": f"{tenant_id}:{user_id}"}},
+            ),
+            timeout=_GRAPH_TOTAL_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error("[run_analysis] 图执行超时 (%ds), user_id=%s", _GRAPH_TOTAL_TIMEOUT, user_id)
+        return {"final_output": {}, "errors": [f"分析超时 ({_GRAPH_TOTAL_TIMEOUT}s)"]}
 
     errors = result.get("errors", [])
     if errors:
