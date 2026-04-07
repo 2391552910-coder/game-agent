@@ -20,21 +20,20 @@ _GRAPH_TOTAL_TIMEOUT = 300
 async def fetch_player_data(user_id: str) -> dict:
     """获取玩家快照数据。
 
-    当前返回 Mock 数据，后续对接游戏数据库时替换。
+    调用游戏方实现的 connector 获取当前状态。
     """
-    # TODO: 对接 src/game_specific/connector.py
-    snapshot = {
-        "user_id": user_id,
-        "player_name": f"Player_{user_id[:6]}",
-        "level": 25,
-        "guild": "测试公会",
-        "stats": {
-            "play_hours": 120,
-            "quests_completed": 45,
-        },
-    }
-    logger.info("获取玩家数据完成, user_id=%s", user_id)
-    return snapshot
+    from src.game_specific import fetch_player_snapshot, PlayerNotFoundError
+
+    try:
+        snapshot = await fetch_player_snapshot(user_id)
+        logger.info("获取玩家数据完成, user_id=%s", user_id)
+        return snapshot
+    except PlayerNotFoundError:
+        logger.error("玩家不存在, user_id=%s", user_id)
+        raise
+    except Exception as e:
+        logger.error("获取玩家数据失败, user_id=%s: %s", user_id, e)
+        raise
 
 
 @task(retries=1, retry_delay_seconds=5)

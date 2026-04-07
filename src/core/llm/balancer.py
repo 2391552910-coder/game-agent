@@ -8,7 +8,7 @@ import logging
 import time
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.core.llm.models import LLMProviderConfig
 
@@ -37,8 +37,8 @@ class LoadBalancer:
         self._rr_sequences: dict[str, list[str]] = {}
         # model_type -> 当前轮询索引
         self._rr_counters: dict[str, int] = {}
-        # provider_id + temperature -> ChatOpenAI 实例缓存
-        self._llm_cache: dict[str, ChatOpenAI] = {}
+        # provider_id + temperature -> BaseChatModel 实例缓存
+        self._llm_cache: dict[str, BaseChatModel] = {}
 
     async def initialize(self) -> None:
         """预加载所有 model_type 的 provider 缓存。"""
@@ -48,8 +48,15 @@ class LoadBalancer:
             except Exception as e:
                 logger.warning("[balancer] 预加载 model_type=%s 失败: %s", mt, e)
 
-    async def select(self, model_type: str = "default", temperature: float = 0.1) -> ChatOpenAI:
-        """选择一个健康的 provider 并返回 ChatOpenAI 实例。
+    async def select(self, model_type: str = "default", temperature: float = 0.1) -> BaseChatModel:
+        """选择一个健康的 provider 并返回 LangChain Chat Model 实例。
+
+        Args:
+            model_type: "default" 或 "fast"
+            temperature: 生成温度
+
+        Returns:
+            LangChain BaseChatModel 实例
 
         Raises:
             NoProviderAvailable: 没有任何可用的 provider。
@@ -212,20 +219,15 @@ class LoadBalancer:
             # Redis 不可用时默认健康
             return True
 
-    def _get_or_create_llm(self, config: LLMProviderConfig, temperature: float) -> ChatOpenAI:
-        """创建或复用 ChatOpenAI 实例。"""
+    def _get_or_create_llm(self, config: LLMProviderConfig, temperature: float) -> BaseChatModel:
+        """创建或复用 LangChain Chat Model 实例。"""
+        from src.core.llm.factory import create_llm_from_config
+
         cache_key = f"{config.id}_{temperature}"
         if cache_key in self._llm_cache:
             return self._llm_cache[cache_key]
 
-        llm = ChatOpenAI(
-            model=config.model,
-            temperature=temperature,
-            api_key=config.api_key,
-            base_url=config.base_url,
-            streaming=False,
-            max_retries=2,
-        )
+        llm = create_llm_from_config(config, temperature)
         self._llm_cache[cache_key] = llm
         return llm
 

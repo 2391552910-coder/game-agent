@@ -5,14 +5,17 @@
 - 图存储：Neo4j（知识图谱）
 - 向量存储：Milvus（语义检索）
 - 业务数据：PostgreSQL（租户/配额/分析结果，不走 LightRAG）
+
+LLM 集成：使用统一 LLM 工厂，支持多提供商。
 """
 
 import os
 from functools import partial
 from typing import Any
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from lightrag import LightRAG
-from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+from lightrag.llm.openai import openai_embed
 from lightrag.rerank import ali_rerank
 from lightrag.utils import EmbeddingFunc
 
@@ -44,7 +47,7 @@ os.environ.setdefault("NEO4J_PASSWORD", settings.neo4j_password)
 os.environ.setdefault("NEO4J_DATABASE", settings.neo4j_database)
 
 
-# LLM 函数（DeepSeek / OpenAI 兼容端点）
+# LLM 函数（使用统一 LLM 工厂）
 
 
 async def llm_model_func(
@@ -54,16 +57,40 @@ async def llm_model_func(
     keyword_extraction: bool = False,
     **kwargs: Any,
 ) -> str:
-    """调用 DeepSeek（或任意 OpenAI 兼容端点）完成文本生成。"""
-    return await openai_complete_if_cache(
-        settings.openai_default_model,
-        prompt,
-        system_prompt=system_prompt,
-        history_messages=history_messages or [],
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-        **kwargs,
-    )
+    """调用统一 LLM 工厂完成文本生成。
+
+    支持 OpenAI、Anthropic、DeepSeek 等多种提供商，
+    通过配置动态切换。
+    """
+    from src.core.llm.factory import get_llm
+
+    # 构建 LangChain 消息列表
+    messages: list[HumanMessage | SystemMessage | AIMessage] = []
+
+    if system_prompt:
+        messages.append(SystemMessage(content=system_prompt))
+
+    # 添加历史消息（如果有）
+    if history_messages:
+        for msg in history_messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(content=content))
+            elif role == "system":
+                messages.append(SystemMessage(content=content))
+
+    # 添加当前提示
+    messages.append(HumanMessage(content=prompt))
+
+    # 调用统一 LLM 工厂
+    llm = await get_llm(model_type="default")
+    response = await llm.ainvoke(messages, **kwargs)
+
+    # 返回文本内容
+    return response.content
 
 
 # Embedding 函数（Qwen text-embedding-v4）

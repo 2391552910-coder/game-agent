@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +20,11 @@ class LLMProviderConfig(BaseModel):
     base_url: str
     weight: int = Field(gt=0)
     model_type: str = "default"
+    # 新增字段
+    provider_type: str = Field(default="openai", description="提供商类型：openai, anthropic, deepseek, qwen, zhipu, grok")
+    max_tokens: int | None = Field(default=None, description="最大生成 token 数")
+    timeout: int = Field(default=60, description="请求超时时间（秒）")
+    extra_params: dict[str, Any] = Field(default_factory=dict, description="额外参数（JSON 格式）")
 
 
 class LLMProviderCreate(BaseModel):
@@ -31,6 +37,15 @@ class LLMProviderCreate(BaseModel):
     base_url: str = Field(min_length=1, max_length=500)
     weight: int = Field(default=1, gt=0)
     model_type: str = Field(default="default", pattern=r"^(default|fast)$")
+    # 新增字段
+    provider_type: str = Field(
+        default="openai",
+        description="提供商类型：openai, anthropic, deepseek, qwen, zhipu, grok",
+        pattern=r"^(openai|anthropic|deepseek|qwen|zhipu|grok)$",
+    )
+    max_tokens: int | None = Field(default=None, ge=1, le=1000000, description="最大生成 token 数")
+    timeout: int = Field(default=60, ge=1, le=600, description="请求超时时间（秒）")
+    extra_params: dict[str, Any] = Field(default_factory=dict, description="额外参数（JSON 格式）")
 
 
 class LLMProviderUpdate(BaseModel):
@@ -42,6 +57,11 @@ class LLMProviderUpdate(BaseModel):
     weight: int | None = Field(default=None, gt=0)
     is_active: bool | None = None
     model_type: str | None = Field(default=None, pattern=r"^(default|fast)$")
+    # 新增字段
+    provider_type: str | None = Field(default=None, pattern=r"^(openai|anthropic|deepseek|qwen|zhipu|grok)$")
+    max_tokens: int | None = Field(default=None, ge=1, le=1000000)
+    timeout: int | None = Field(default=None, ge=1, le=600)
+    extra_params: dict[str, Any] | None = Field(default=None)
 
 
 class LLMProviderResponse(BaseModel):
@@ -55,5 +75,10 @@ class LLMProviderResponse(BaseModel):
     weight: int
     is_active: bool
     model_type: str
+    # 新增字段
+    provider_type: str
+    max_tokens: int | None
+    timeout: int
+    extra_params: dict[str, Any]
     created_at: datetime
     updated_at: datetime
