@@ -85,9 +85,9 @@ async def llm_model_func(
     # 添加当前提示
     messages.append(HumanMessage(content=prompt))
 
-    # 调用统一 LLM 工厂
+    # 调用统一 LLM 工厂（忽略 LightRAG 传入的内部 kwargs 如 hashing_kv）
     llm = await get_llm(model_type="default")
-    response = await llm.ainvoke(messages, **kwargs)
+    response = await llm.ainvoke(messages)
 
     # 返回文本内容
     return response.content

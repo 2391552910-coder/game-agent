@@ -20,18 +20,50 @@ from httpx import ASGITransport, AsyncClient
 def _mock_settings():
     """覆盖 settings，避免读取 .env 导致必填校验失败。"""
     mock = MagicMock()
-    mock.postgres_dsn = "postgresql+asyncpg://test:test@localhost/test"
-    mock.redis_url = "redis://localhost:6379/0"
+    # App
+    mock.env = "test"
     mock.log_level = "WARNING"
+    mock.app_workers = 1
+    mock.cors_allowed_origins = ["http://localhost:3000"]
+    # LLM
+    mock.llm_provider = "test"
     mock.openai_api_key = "sk-test-key"
     mock.openai_base_url = "https://api.test.com/v1"
     mock.openai_default_model = "test-model-default"
     mock.openai_fast_model = "test-model-fast"
-    mock.llm_provider = "test"
-    mock.cors_allowed_origins = ["http://localhost:3000"]
-    mock.admin_api_key = "admin-test-key"
-    mock.default_monthly_tokens = 100000
+    # Embedding
+    mock.embedding_api_key = "sk-test-key"
+    mock.embedding_base_url = "https://api.test.com/v1"
+    mock.embedding_model = "text-embedding-v3"
+    mock.embedding_dim = 1536
+    # Rerank
+    mock.rerank_api_key = "sk-test-key"
+    mock.rerank_model = "gte-rerank"
+    # PostgreSQL
+    mock.postgres_dsn = "postgresql+asyncpg://test:test@localhost/test"
+    # Neo4j
+    mock.neo4j_uri = "bolt://localhost:7687"
+    mock.neo4j_username = "neo4j"
+    mock.neo4j_password = "test"
+    mock.neo4j_database = "neo4j"
+    # Redis
+    mock.redis_url = "redis://localhost:6379/0"
+    # Milvus
+    mock.milvus_uri = "http://localhost:19530"
+    mock.milvus_user = "root"
+    mock.milvus_password = ""
+    mock.milvus_db_name = "lightrag"
+    # Game DB
+    mock.game_db_dsn = None
+    # RAG
+    mock.rag_working_dir = "/tmp/rag_storage"
+    mock.rag_default_strategy = "hybrid"
+    # 调度
+    mock.max_concurrent_analyses = 20
     mock.offline_trigger_minutes = 5
+    # Token 配额
+    mock.default_monthly_tokens = 100000
+    mock.quota_warning_threshold = 0.8
     with patch("src.config.settings", mock):
         yield mock
 
@@ -89,15 +121,39 @@ def _mock_redis_module(mock_redis):
 def mock_session():
     """Mock SQLAlchemy 异步 session。"""
     session = AsyncMock()
-    session.execute = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.close = AsyncMock()
 
+    # Mock result fetch - 需要支持链式调用
+    mock_row = MagicMock()
+    mock_row.id = "test-tenant-id"
+    mock_row.is_active = True
+    mock_row.is_admin = False
+
+    mock_result = MagicMock()
+    mock_result.first = MagicMock(return_value=mock_row)
+    mock_result.fetchone = MagicMock(return_value=mock_row)
+    mock_result.scalars = MagicMock(return_value=mock_result)
+    mock_result.all = MagicMock(return_value=[])
+
+    session.execute = AsyncMock(return_value=mock_result)
+
     # 支持 async with get_session() as session
-    ctx = AsyncMock()
-    ctx.__aenter__ = AsyncMock(return_value=session)
-    ctx.__aexit__ = AsyncMock(return_value=False)
+    class MockSessionContext:
+        def __await__(self):
+            # 使对象可以被 await
+            async def _():
+                return self
+            return _()
+
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *args):
+            return False
+
+    ctx = MockSessionContext()
 
     return session, ctx
 
@@ -260,3 +316,73 @@ def make_provider_row(
     row.created_at = datetime.now(UTC)
     row.updated_at = datetime.now(UTC)
     return row
+
+
+# ---------------------------------------------------------------------------
+# Mock 游戏连接器
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def mock_game_connector():
+    """Mock 游戏连接器 fetch_player_snapshot 函数。"""
+    from tests.mocks.mock_connector import fetch_player_snapshot as mock_fetch
+
+    with patch("src.game_specific.connector.fetch_player_snapshot", side_effect=mock_fetch):
+        yield mock_fetch
+
+
+@pytest.fixture
+def clear_mock_players():
+    """清理模拟玩家数据的 fixture。"""
+    from tests.mocks.mock_connector import clear_mock_players
+
+    clear_mock_players()
+    yield
+    clear_mock_players()
+
+
+# ---------------------------------------------------------------------------
+# Mock LightRAG 引擎
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def mock_lightrag():
+    """Mock LightRAG 引擎。"""
+    rag = AsyncMock()
+    rag.aquery = AsyncMock(
+        return_value="""
+        根据游戏规则：
+        - PVP评分低于2000时，建议参与日常竞技场
+        - 装备评分不足时，建议挑战副本获取装备
+        - 体力不足时，建议使用体力药水或等待恢复
+        """
+    )
+    rag.ainsert = AsyncMock()
+    rag.adelete = AsyncMock()
+
+    with patch("src.core.engine.lightrag_engine.get_rag", return_value=rag):
+        yield rag
+
+
+# ---------------------------------------------------------------------------
+# 测试辅助函数
+# ---------------------------------------------------------------------------
+
+
+def create_test_player_event(
+    user_id: str = "test_player",
+    event_type: str = "offline",
+    timestamp: float | None = None,
+    snapshot: dict | None = None,
+) -> dict:
+    """创建测试玩家事件数据。"""
+    import time
+
+    return {
+        "user_id": user_id,
+        "event_type": event_type,
+        "timestamp": timestamp or time.time(),
+        "snapshot": snapshot,
+    }

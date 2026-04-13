@@ -275,10 +275,20 @@ class PlayerSnapshot(TypedDict, total=False):
     }
 """
 
+import os
+import random
+import time
 from datetime import datetime
 from typing import Any
 
 from src.core.infrastructure.db import get_session
+
+_TEMPLATE_NAMES = ("competitive", "explorer", "casual", "social", "whale")
+
+
+def _stable_index(user_id: str, count: int) -> int:
+    """基于 user_id 的稳定索引，避免 hash() 负值和跨进程不一致问题。"""
+    return abs(hash(user_id)) % count
 
 
 async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
@@ -286,6 +296,9 @@ async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
 
     平台在玩家离线时调用此函数获取当前状态。
     游戏厂商需连接自己的数据库实现此函数。
+
+    当环境变量 SIMULATE_GAME_SERVER=1 时，使用内置模拟数据，
+    用于无真实游戏服务器的测试环境。
 
     参数
     ----
@@ -303,75 +316,99 @@ async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
         当 user_id 不存在时抛出
     DatabaseError
         当数据库连接或查询失败时抛出
-
-    实现示例
-    --------
-    # MySQL 实现
-    import aiomysql
-
-    async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
-        pool = await aiomysql.create_pool(
-            host="game-db.example.com",
-            port=3306,
-            user="game_app",
-            password="xxx",
-            db="game_server_1",
-        )
-        async with pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    "SELECT * FROM players WHERE user_id = %s",
-                    (user_id,)
-                )
-                row = await cur.fetchone()
-        pool.close()
-
-        if not row:
-            raise PlayerNotFoundError(f"玩家不存在: {user_id}")
-
-        return PlayerSnapshot(
-            user_id=str(row["user_id"]),
-            player_name=row["player_name"],
-            level=row["level"],
-            vip_level=row["vip_level"] or 0,
-            guild_name=row.get("guild_name", ""),
-            guild_id=str(row.get("guild_id", "")) or "",
-            currencies={
-                "gold": row["gold"],
-                "diamond": row["diamond"],
-                "honor": row["honor"],
-            },
-            stamina=row["stamina"],
-            exp=row["exp"],
-            play_hours=row["play_hours"],
-            login_days=row["login_days"],
-            last_login_at=row["last_login_at"].timestamp(),
-            last_offline_at=row["last_offline_at"].timestamp(),
-            ...
-        )
-
-    # PostgreSQL 实现（如果游戏用 pg）
-    async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
-        async with get_session() as session:
-            result = await session.execute(
-                text("SELECT * FROM players WHERE user_id = :user_id"),
-                {"user_id": user_id}
-            )
-            row = result.fetchone()
-
-        if not row:
-            raise PlayerNotFoundError(f"玩家不存在: {user_id}")
-
-        return PlayerSnapshot(
-            user_id=str(row.user_id),
-            player_name=row.player_name,
-            ...
-        )
     """
+    if os.environ.get("SIMULATE_GAME_SERVER", "").lower() in ("1", "true", "yes"):
+        return await _fetch_simulated_snapshot(user_id)
+
     raise NotImplementedError(
         "游戏厂商需实现 fetch_player_snapshot 函数。\n"
-        "参考 src/game_specific/connector.py 中的文档和示例。"
+        "参考 src/game_specific/connector.py 中的文档和示例。\n"
+        "测试环境可设置 SIMULATE_GAME_SERVER=1 使用模拟数据。"
     )
+
+
+async def _fetch_simulated_snapshot(user_id: str) -> PlayerSnapshot:
+    """模拟数据获取，用于测试环境。"""
+    pt = _TEMPLATE_NAMES[_stable_index(user_id, len(_TEMPLATE_NAMES))]
+
+    templates = {
+        "competitive": {
+            "level": random.randint(70, 90),
+            "vip_level": random.randint(8, 15),
+            "pvp_rating": random.randint(2200, 3000),
+            "play_hours": random.randint(800, 2000),
+            "pve_difficulty": "mythic",
+        },
+        "explorer": {
+            "level": random.randint(50, 80),
+            "vip_level": random.randint(3, 8),
+            "pvp_rating": random.randint(1200, 1800),
+            "play_hours": random.randint(500, 1500),
+            "pve_difficulty": "heroic",
+        },
+        "casual": {
+            "level": random.randint(10, 40),
+            "vip_level": random.randint(0, 3),
+            "pvp_rating": random.randint(800, 1400),
+            "play_hours": random.randint(20, 200),
+            "pve_difficulty": "normal",
+        },
+        "social": {
+            "level": random.randint(30, 60),
+            "vip_level": random.randint(2, 6),
+            "pvp_rating": random.randint(1000, 1600),
+            "play_hours": random.randint(300, 800),
+            "pve_difficulty": "hard",
+        },
+        "whale": {
+            "level": random.randint(60, 90),
+            "vip_level": random.randint(12, 20),
+            "pvp_rating": random.randint(2000, 3200),
+            "play_hours": random.randint(1000, 3000),
+            "pve_difficulty": "mythic",
+        },
+    }
+
+    t = templates[pt]
+    uid_hash = _stable_index(user_id, 1000)
+
+    return PlayerSnapshot({
+        "user_id": user_id,
+        "player_name": f"模拟玩家_{user_id[-4:]}",
+        "level": t["level"],
+        "vip_level": t["vip_level"],
+        "guild_name": f"测试公会_{uid_hash % 100}",
+        "guild_id": f"guild_{uid_hash}",
+        "currencies": {"gold": random.randint(100000, 20000000), "diamond": random.randint(500, 50000)},
+        "stamina": random.randint(50, 200),
+        "exp": t["level"] * 100000 + random.randint(0, 99999),
+        "equipment_count": random.randint(20, 80),
+        "item_count": random.randint(50, 500),
+        "rare_items": [],
+        "play_hours": t["play_hours"],
+        "login_days": random.randint(100, 1000),
+        "last_login_at": time.time() - random.randint(0, 86400),
+        "last_offline_at": time.time() - random.randint(600, 7200),
+        "session_count": random.randint(1, 10),
+        "online_today_hours": random.uniform(1, 8),
+        "main_quest_id": f"chapter_{random.randint(1, 20)}",
+        "main_quest_progress": random.randint(10, 100),
+        "side_quest_count": random.randint(50, 500),
+        "daily_quest_remaining": random.randint(0, 10),
+        "pvp_rating": t["pvp_rating"],
+        "pve_difficulty": t["pve_difficulty"],
+        "boss_kill_count": random.randint(50, 1000),
+        "dungeon_clear_count": random.randint(100, 2000),
+        "pvp_win_count": random.randint(100, 2000),
+        "pvp_lose_count": random.randint(100, 1500),
+        "pvp_rank": random.randint(1, 5000),
+        "pvp_rating_change": random.randint(-50, 100),
+        "friend_count": random.randint(10, 200),
+        "guild_member_count": random.randint(10, 100),
+        "chat_message_count": random.randint(5, 100),
+        "trade_count": random.randint(5, 100),
+        "game_specific": {"player_type": pt, "simulated": True},
+    })
 
 
 class PlayerNotFoundError(Exception):

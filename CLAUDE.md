@@ -9,6 +9,9 @@ myAgent v2.0 是一个多租户游戏玩家行为分析与预测平台。游戏�
 ## Common Commands
 
 ```bash
+# 复制环境配置文件
+cp .env.example .env
+
 # 启动基础设施（PostgreSQL, Redis, Neo4j, Milvus+etcd+MinIO, Prefect）
 docker-compose -f docker-compose.dev.yml up -d
 
@@ -18,8 +21,11 @@ uv sync
 # 数据库迁移
 alembic upgrade head
 
-# 运行测试
+# 运行所有测试
 pytest tests/ -v
+
+# 运行单个测试文件
+pytest tests/test_specific_file.py -v
 
 # LightRAG 集成测试（需要基础设施全部启动 + .env 配置）
 python -m scripts.tests.test_lightrag
@@ -47,6 +53,14 @@ FastAPI (API 层) → Prefect (调度层) → LangGraph (Agent 层) → LightRAG
 - `AnalysisState` (state.py): 有状态图的状态定义，包含 user_id, tenant_id, snapshot, rag_context, behavior_report, reasoned_actions, final_output, errors
 - `BehaviorProfile` / `RecommendedAction` / `PlayerAnalysisOutput` (models.py): Pydantic 结构化输出模型
 - 节点 (nodes.py): behavior_analysis, action_reasoning, merge_output（待实现）
+
+### LLM 提供商抽象层 (core/llm/)
+
+多提供商加权轮询负载均衡 + 健康降级机制:
+- `base.py`: `LLMProvider` 基类，定义 `invoke()` / `stream()` 接口
+- `balancer.py`: `LLMBalancer` 加权轮询，支持按 provider 权重和健康状态动态调度
+- `factory.py`: `LLMFactory` 工厂，按名称创建 provider 实例
+- `providers/`: 具体实现（DeepSeek 等 OpenAI 兼容端点）
 
 ### LightRAG 引擎 (lightrag_engine.py)
 
@@ -87,8 +101,8 @@ SQLAlchemy 2.0 异步引擎，使用 `get_session()` 上下文管理器自动处
 
 ## Module Status
 
-已实现: config, db infrastructure, LightRAG engine, agent state/models, database migration, docker-compose dev environment
-待实现: API routes/middleware, LangGraph agent nodes/edges, Prefect scheduling flows, multi-tenant auth, rate limiting, game connectors
+已实现: config, db infrastructure, LightRAG engine, agent state/models, LLM provider abstraction/load balancer, database migration, docker-compose dev environment, core API routes (analysis/quota/webhooks/tenants/providers)
+待实现: LangGraph agent nodes/edges, Prefect scheduling flows, multi-tenant auth middleware, rate limiting, game connectors
 
 ## Design Docs
 
