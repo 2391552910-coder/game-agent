@@ -27,7 +27,7 @@ services:
     image: redis:7-alpine
     container_name: myagent_dev_redis
     restart: unless-stopped
-    command: redis-server --requirepass myagent --appendonly yes
+    command: redis-server --requirepass myagent --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
     volumes:
