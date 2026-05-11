@@ -4,10 +4,11 @@
 START
     → fetch_snapshot          获取玩家快照
     → retrieve_rag_context    主图统一 RAG 检索（一次检索，两节点共享）
-    → gather_context          工具收集额外上下文（历史趋势等）
+    → gather_context          工具收集额外上下文（历史趋势、行动追踪、异常检测）
     → behavior_analysis       行为分析（读 rag_context + enriched_context）
-    → action_reasoning        行动推理（读 rag_context + enriched_context）
+    → action_reasoning        行动推理（读 rag_context + enriched_context + tracking_summary + anomalies）
     → merge_output            组装最终结构化输出
+    → tracking_update         更新行动追踪记录（监督机制）
 END
 """
 
@@ -138,7 +139,7 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
     snapshot_text = json.dumps(snapshot, ensure_ascii=False) if isinstance(snapshot, dict) else str(snapshot)
     rag_context = state.get("rag_context", "") or "（无额外规则上下文）"
 
-    tools = create_tools(state["tenant_id"], state["user_id"])
+    tools = create_tools(state["tenant_id"], state["user_id"], state.get("snapshot"))
     llm = await get_llm(model_type="fast")
     llm_with_tools = llm.bind_tools(tools)
 
@@ -148,6 +149,8 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
     ]
 
     enriched_parts: list[str] = []
+    tracking_summary: str = ""
+    anomalies_found: list[str] = []
     total_tool_calls = 0
 
     try:
@@ -198,9 +201,22 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
                 enriched_parts.append(f"[{tool_name}] {result}")
                 messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
 
+                # 监督机制工具结果同步写入 state 专用字段，供 action_reasoning 直接读取
+                if tool_name == "get_action_tracking":
+                    tracking_summary = str(result)
+                elif tool_name == "detect_anomaly" and str(result) != "无异常":
+                    anomaly_lines = [line for line in str(result).splitlines() if line.strip()]
+                    if anomaly_lines:
+                        anomalies_found.extend(anomaly_lines)
+
         enriched_context = "\n\n".join(enriched_parts) if enriched_parts else ""
         logger.info("[gather_context] 上下文收集完成, 轮次=%d", iteration_count)
-        return {"enriched_context": enriched_context}
+        result: dict[str, Any] = {"enriched_context": enriched_context}
+        if tracking_summary:
+            result["tracking_summary"] = tracking_summary
+        if anomalies_found:
+            result["anomalies"] = anomalies_found
+        return result
 
     except Exception as e:
         logger.error("[gather_context] 上下文收集失败: %s", e)
@@ -261,12 +277,16 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
     """使用主力模型进行深度推理，输出 list[RecommendedAction]。
 
     同样使用 with_structured_output，返回已验证的 Pydantic 列表。
+    读取 tracking_summary 和 anomalies，让 LLM 感知上次行动完成情况和当前异常。
     """
     snapshot = state.get("snapshot", {})
     snapshot_text = json.dumps(snapshot, ensure_ascii=False) if isinstance(snapshot, dict) else str(snapshot)
     rag_context = state.get("rag_context", "") or "（无额外规则上下文）"
     enriched_context = state.get("enriched_context", "") or "（无额外历史信息）"
     behavior_report = state.get("behavior_report", "")
+    tracking_summary = state.get("tracking_summary", "") or "（无行动追踪记录，首次分析）"
+    anomalies = state.get("anomalies", [])
+    anomaly_text = "\n".join(anomalies) if anomalies else "（无异常）"
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", ACTION_REASONING_SYSTEM),
@@ -286,10 +306,12 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
                 "snapshot_text": snapshot_text,
                 "rag_context": rag_context,
                 "enriched_context": enriched_context,
+                "tracking_summary": tracking_summary,
+                "anomaly_text": anomaly_text,
             }),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
-        if action_list is None or not hasattr(action_list, 'actions'):
+        if action_list is None or not hasattr(action_list, "actions"):
             logger.warning("[action_reasoning] LLM 返回空结果，返回空列表")
             return {"reasoned_actions": [], "errors": ["行动推理返回空结果"]}
         logger.info(
@@ -335,3 +357,141 @@ async def merge_output_node(state: AnalysisState) -> dict[str, Any]:
             "final_output": {},
             "errors": [f"输出组装失败: {e}"],
         }
+
+
+# 节点7 更新行动追踪记录（监督机制）
+async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
+    """更新行动追踪记录。
+
+    两个职责：
+    1. 将上次追踪中已完成/超时的行动状态持久化到数据库
+    2. 将本次 final_output 中有 goal_metric 的行动写入新追踪记录
+
+    只处理有 goal_metric 的行动，无法量化完成条件的行动不追踪。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import text
+
+    from src.core.infrastructure.db import get_session
+    from src.core.agents.tools import _extract_metric
+
+    user_id = state["user_id"]
+    tenant_id = state["tenant_id"]
+    snapshot = state.get("snapshot", {})
+    final_output = state.get("final_output", {})
+    actions = final_output.get("recommended_actions", [])
+
+    now = datetime.now(timezone.utc)
+
+    try:
+        async with get_session() as session:
+            # ── 步骤1：更新旧追踪记录状态 ──
+            # 查询所有进行中的追踪记录
+            result = await session.execute(
+                text("""
+                    SELECT id, goal_metric, goal_value, baseline_value, deadline
+                    FROM action_tracking
+                    WHERE user_id = :user_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'tracking'
+                """),
+                {"user_id": user_id, "tenant_id": tenant_id},
+            )
+            old_rows = result.fetchall()
+
+            for row in old_rows:
+                new_status = None
+                completed_at = None
+                completion_snapshot = None
+
+                # 指标对比判断完成
+                if row.goal_metric and row.goal_value is not None:
+                    current_val = _extract_metric(snapshot, row.goal_metric)
+                    if current_val is not None and current_val >= row.goal_value:
+                        new_status = "completed"
+                        completed_at = now
+                        completion_snapshot = {row.goal_metric: current_val}
+
+                # 截止时间判断超时
+                if new_status is None and row.deadline:
+                    deadline_dt = (
+                        row.deadline
+                        if row.deadline.tzinfo
+                        else row.deadline.replace(tzinfo=timezone.utc)
+                    )
+                    if now > deadline_dt:
+                        new_status = "timeout"
+
+                if new_status:
+                    await session.execute(
+                        text("""
+                            UPDATE action_tracking
+                            SET status = :status,
+                                completed_at = :completed_at,
+                                completion_snapshot = :completion_snapshot,
+                                updated_at = :now
+                            WHERE id = :id
+                        """),
+                        {
+                            "status": new_status,
+                            "completed_at": completed_at,
+                            "completion_snapshot": completion_snapshot,
+                            "now": now,
+                            "id": row.id,
+                        },
+                    )
+
+            # ── 步骤2：写入本次可追踪行动 ──
+            trackable = [a for a in actions if a.get("goal_metric")]
+            inserted = 0
+            for action in trackable:
+                goal_metric = action["goal_metric"]
+                goal_value = action.get("goal_value")
+                expected_hours = action.get("expected_hours")
+                baseline_value = _extract_metric(snapshot, goal_metric)
+
+                # 计算截止时间
+                deadline = None
+                if expected_hours:
+                    deadline = now + timedelta(hours=expected_hours)
+
+                await session.execute(
+                    text("""
+                        INSERT INTO action_tracking (
+                            tenant_id, user_id, action_type, action_desc,
+                            goal_metric, goal_value, baseline_value,
+                            expected_hours, deadline, status, created_at, updated_at
+                        ) VALUES (
+                            :tenant_id, :user_id, :action_type, :action_desc,
+                            :goal_metric, :goal_value, :baseline_value,
+                            :expected_hours, :deadline, 'tracking', :now, :now
+                        )
+                    """),
+                    {
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                        "action_type": action.get("action_type", ""),
+                        "action_desc": action.get("reason", ""),
+                        "goal_metric": goal_metric,
+                        "goal_value": goal_value,
+                        "baseline_value": baseline_value,
+                        "expected_hours": expected_hours,
+                        "deadline": deadline,
+                        "now": now,
+                    },
+                )
+                inserted += 1
+
+        logger.info(
+            "[tracking_update] 完成, user_id=%s, 旧记录更新=%d, 新记录写入=%d",
+            user_id,
+            len(old_rows),
+            inserted,
+        )
+        return {}
+
+    except Exception as e:
+        logger.error("[tracking_update] 追踪记录更新失败: %s", e)
+        # 追踪失败不影响主流程，只记录错误
+        return {"errors": [f"追踪记录更新失败: {e}"]}

@@ -24,8 +24,14 @@ def _debounce_key(user_id: str) -> str:
     return f"{DEBOUNCE_KEY_PREFIX}{user_id}"
 
 
-async def schedule_offline_analysis(user_id: str, tenant_id: str) -> str | None:
+async def schedule_offline_analysis(user_id: str, tenant_id: str, snapshot: dict | None = None) -> str | None:
     """调度离线分析（带去重）。
+
+    Args:
+        user_id:   玩家 ID
+        tenant_id: 租户 ID
+        snapshot:  游戏服务器推送的玩家快照（可选）。
+                   有值时 analysis_flow 直接使用，无需再从游戏数据库拉取。
 
     Returns:
         flow_run_id 如果成功调度，None 如果已有待处理的任务。
@@ -50,7 +56,7 @@ async def schedule_offline_analysis(user_id: str, tenant_id: str) -> str | None:
 
         flow_run = await run_deployment(
             name="analysis_flow/offline-analysis",
-            parameters={"user_id": user_id, "tenant_id": tenant_id},
+            parameters={"user_id": user_id, "tenant_id": tenant_id, "snapshot": snapshot},
             timeout=0,  # 不等待执行完成，立即返回
         )
         flow_run_id = str(flow_run.id)

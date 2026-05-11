@@ -2,7 +2,7 @@
 
 图结构:
 START → fetch_snapshot → retrieve_rag_context → gather_context
-→ behavior_analysis → action_reasoning → merge_output → END
+→ behavior_analysis → action_reasoning → merge_output → tracking_update → END
 
 Checkpointer: PostgresSaver，状态持久化到 PostgreSQL。
 """
@@ -18,6 +18,7 @@ from src.core.agents.nodes import (
     gather_context_node,
     merge_output_node,
     retrieve_rag_context_node,
+    tracking_update_node,
 )
 from src.core.agents.state import AnalysisState
 
@@ -35,6 +36,7 @@ def build_orchestrator() -> StateGraph:
     builder.add_node("behavior_analysis", behavior_analysis_node)
     builder.add_node("action_reasoning", action_reasoning_node)
     builder.add_node("merge_output", merge_output_node)
+    builder.add_node("tracking_update", tracking_update_node)
 
     # 线性边
     builder.add_edge(START, "fetch_snapshot")
@@ -43,7 +45,8 @@ def build_orchestrator() -> StateGraph:
     builder.add_edge("gather_context", "behavior_analysis")
     builder.add_edge("behavior_analysis", "action_reasoning")
     builder.add_edge("action_reasoning", "merge_output")
-    builder.add_edge("merge_output", END)
+    builder.add_edge("merge_output", "tracking_update")
+    builder.add_edge("tracking_update", END)
 
     return builder
 

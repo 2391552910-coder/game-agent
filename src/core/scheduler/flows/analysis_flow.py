@@ -2,7 +2,7 @@
 
 Flow 结构:
     analysis_flow
-        └── fetch_snapshot_task   获取玩家快照
+        └── fetch_snapshot_task   获取玩家快照（游戏服务器已推送时跳过）
         └── run_agent_task        执行 LangGraph 分析
         └── store_result_task     持久化分析结果
 
@@ -57,6 +57,8 @@ async def run_agent_task(user_id: str, tenant_id: str, snapshot: dict) -> dict:
             "reasoned_actions": [],
             "final_output": {},
             "errors": [],
+            "tracking_summary": "",
+            "anomalies": [],
         }),
         timeout=300,
     )
@@ -86,15 +88,26 @@ async def store_result_task(tenant_id: str, user_id: str, snapshot: dict, output
     retry_delay_seconds=30,
     log_prints=True,
 )
-async def analysis_flow(user_id: str, tenant_id: str) -> None:
+async def analysis_flow(user_id: str, tenant_id: str, snapshot: dict | None = None) -> None:
     """玩家离线分析主流程。
 
     由 Prefect Worker 执行，FastAPI 进程通过 run_deployment() 提交。
+
+    Args:
+        user_id:   玩家 ID
+        tenant_id: 租户 ID
+        snapshot:  游戏服务器推送的快照（可选）。
+                   有值时直接使用，无需再从游戏数据库拉取。
     """
     logger = get_run_logger()
     logger.info("分析流程启动, user_id=%s, tenant_id=%s", user_id, tenant_id)
 
-    snapshot = await fetch_snapshot_task(user_id=user_id)
+    if snapshot:
+        logger.info("使用游戏服务器推送的快照, user_id=%s", user_id)
+    else:
+        logger.info("快照未推送，主动拉取, user_id=%s", user_id)
+        snapshot = await fetch_snapshot_task(user_id=user_id)
+
     output = await run_agent_task(user_id=user_id, tenant_id=tenant_id, snapshot=snapshot)
     await store_result_task(tenant_id=tenant_id, user_id=user_id, snapshot=snapshot, output=output)
 

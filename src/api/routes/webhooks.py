@@ -32,6 +32,7 @@ async def handle_player_event(event: PlayerEvent, request: Request):
         run_id = await schedule_offline_analysis(
             user_id=event.user_id,
             tenant_id=tenant_id,
+            snapshot=event.snapshot,
         )
         if run_id is None:
             return {"status": "debounced", "user_id": event.user_id}

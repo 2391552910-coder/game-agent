@@ -6,7 +6,8 @@
 import asyncio
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from httpx import AsyncClient
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 # 测试数据
