@@ -70,7 +70,7 @@ def create_provider(config: LLMProviderConfig, temperature: float = 0.1) -> Base
         "temperature": temperature,
         "api_key": config.api_key,
         "base_url": config.base_url,
-        "streaming": False,
+        "streaming": True,   # 兼容强制返回 SSE 的代理服务器
         "max_retries": 2,
     }
 

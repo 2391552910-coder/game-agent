@@ -50,6 +50,10 @@ async def list_providers(request: Request):
             weight=row.weight,
             is_active=row.is_active,
             model_type=row.model_type,
+            provider_type=row.provider_type,
+            max_tokens=row.max_tokens,
+            timeout=row.timeout,
+            extra_params=row.extra_params or {},
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -86,6 +90,10 @@ async def create_provider(req: LLMProviderCreate, request: Request):
         weight=row.weight,
         is_active=row.is_active,
         model_type=row.model_type,
+        provider_type=row.provider_type,
+        max_tokens=row.max_tokens,
+        timeout=row.timeout,
+        extra_params=row.extra_params or {},
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -137,6 +145,10 @@ async def update_provider(provider_id: str, req: LLMProviderUpdate, request: Req
         weight=row.weight,
         is_active=row.is_active,
         model_type=row.model_type,
+        provider_type=row.provider_type,
+        max_tokens=row.max_tokens,
+        timeout=row.timeout,
+        extra_params=row.extra_params or {},
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(git -C \"d:/Projects/myAgent2\" log --oneline)",
+      "Bash(git -C \"d:/Projects/myAgent2\" status)"
+    ]
+  }
+}

@@ -35,7 +35,7 @@ class TestPlayerEvent:
         data = response.json()
         assert data["status"] == "scheduled"
         assert data["flow_run_id"] == "run-123"
-        mock_schedule.assert_called_once_with(user_id="user-001", tenant_id="t-001")
+        mock_schedule.assert_called_once_with(user_id="user-001", tenant_id="t-001", snapshot=None)
 
     @pytest.mark.asyncio
     async def test_offline_event_debounced(self, client, mock_redis):

@@ -1,8 +1,11 @@
 """主协调图 — Orchestrator。
 
 图结构:
-START → fetch_snapshot → retrieve_rag_context → gather_context
-→ behavior_analysis → action_reasoning → merge_output → tracking_update → END
+START → fetch_snapshot → retrieve_rag_context
+      → intent_inference → goal_evaluation
+      → gather_context
+      → behavior_analysis → action_reasoning → merge_output
+      → tracking_update → memory_update → END
 
 Checkpointer: PostgresSaver，状态持久化到 PostgreSQL。
 """
@@ -20,33 +23,44 @@ from src.core.agents.nodes import (
     retrieve_rag_context_node,
     tracking_update_node,
 )
+from src.core.agents.decision_nodes import (
+    goal_evaluation_node,
+    intent_inference_node,
+    memory_update_node,
+)
 from src.core.agents.state import AnalysisState
 
 logger = logging.getLogger(__name__)
 
 
 def build_orchestrator() -> StateGraph:
-    """构建主协调图(不含checkpointer)"""
+    """构建主协调图（不含 checkpointer）"""
     builder = StateGraph(AnalysisState)
 
     # 注册节点
     builder.add_node("fetch_snapshot", fetch_snapshot_node)
     builder.add_node("retrieve_rag_context", retrieve_rag_context_node)
+    builder.add_node("intent_inference", intent_inference_node)
+    builder.add_node("goal_evaluation", goal_evaluation_node)
     builder.add_node("gather_context", gather_context_node)
     builder.add_node("behavior_analysis", behavior_analysis_node)
     builder.add_node("action_reasoning", action_reasoning_node)
     builder.add_node("merge_output", merge_output_node)
     builder.add_node("tracking_update", tracking_update_node)
+    builder.add_node("memory_update", memory_update_node)
 
     # 线性边
     builder.add_edge(START, "fetch_snapshot")
     builder.add_edge("fetch_snapshot", "retrieve_rag_context")
-    builder.add_edge("retrieve_rag_context", "gather_context")
+    builder.add_edge("retrieve_rag_context", "intent_inference")
+    builder.add_edge("intent_inference", "goal_evaluation")
+    builder.add_edge("goal_evaluation", "gather_context")
     builder.add_edge("gather_context", "behavior_analysis")
     builder.add_edge("behavior_analysis", "action_reasoning")
     builder.add_edge("action_reasoning", "merge_output")
     builder.add_edge("merge_output", "tracking_update")
-    builder.add_edge("tracking_update", END)
+    builder.add_edge("tracking_update", "memory_update")
+    builder.add_edge("memory_update", END)
 
     return builder
 

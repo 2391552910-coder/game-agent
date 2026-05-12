@@ -17,17 +17,21 @@ class TestBuildOrchestrator:
         assert isinstance(graph, StateGraph)
 
     def test_all_nodes_registered(self):
-        """验证所有 6 个节点都已注册。"""
+        """验证所有 10 个节点都已注册。"""
         builder = build_orchestrator()
         # StateGraph 内部 _nodes 存储注册的节点
         node_names = set(builder.nodes.keys())
         expected = {
             "fetch_snapshot",
             "retrieve_rag_context",
+            "intent_inference",
+            "goal_evaluation",
             "gather_context",
             "behavior_analysis",
             "action_reasoning",
             "merge_output",
+            "tracking_update",
+            "memory_update",
         }
         assert expected == node_names
 
@@ -52,9 +56,13 @@ class TestBuildOrchestrator:
         for name in [
             "fetch_snapshot",
             "retrieve_rag_context",
+            "intent_inference",
+            "goal_evaluation",
             "gather_context",
             "behavior_analysis",
             "action_reasoning",
             "merge_output",
+            "tracking_update",
+            "memory_update",
         ]:
             assert name in nodes, f"缺少节点: {name}"

@@ -61,10 +61,19 @@ ACTION_REASONING_SYSTEM = """你是一个策略推理专家。
 监督机制要求：
 - 如果上次行动已完成（tracking_summary 中有 completed），推荐下一阶段更高难度的目标
 - 如果上次行动超时（timeout），推荐降低难度的替代方案，并分析原因
+- 如果上次行动已放弃（tracking_summary 中有 abandoned），说明实体发生了目标漂移，
+  需要识别新的行为方向，推荐与当前状态一致的目标，不要重复已放弃的方向
 - 如果检测到异常（anomaly_text 不为"无异常"），必须将异常处理行动设为 high 优先级
 - 对于可量化完成条件的行动，必须填写 goal_metric（对应快照字段名）、goal_value（目标值）
   和 expected_hours（预计完成小时数），以便后续追踪
-- goal_metric 必须是快照中实际存在的数值字段，如 learning_courses、shopping_count、play_hours"""
+- goal_metric 必须是快照中实际存在的数值字段，如 learning_courses、shopping_count、play_hours
+
+决策对齐要求：
+- 如果 goal_evaluation_result 中 decision=continue，推荐行动应与现有目标方向一致，帮助玩家继续推进
+- 如果 decision=downgrade，推荐更容易达成的子目标，降低难度和代价
+- 如果 decision=switch，推荐与 suggested_goal 对齐的新方向，不再推进原目标
+- 如果 decision=new，结合 intent_result 中的 next_likely 和玩家历史记忆推荐起始目标
+- intent_result 中 next_likely 排名第一的意图应优先体现在推荐行动中"""
 
 ACTION_REASONING_USER = """行为分析报告：
 {behavior_report}
@@ -82,4 +91,10 @@ ACTION_REASONING_USER = """行为分析报告：
 {tracking_summary}
 
 当前异常检测结果：
-{anomaly_text}"""
+{anomaly_text}
+
+意图推断结果（玩家本次想做什么 / 下次最可能做什么）：
+{intent_result}
+
+目标校验决策（continue / downgrade / switch / new）：
+{goal_evaluation_result}"""

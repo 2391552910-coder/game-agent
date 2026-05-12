@@ -151,6 +151,7 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
     enriched_parts: list[str] = []
     tracking_summary: str = ""
     anomalies_found: list[str] = []
+    abandoned_ids_found: list[str] = []
     total_tool_calls = 0
 
     try:
@@ -204,6 +205,19 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
                 # 监督机制工具结果同步写入 state 专用字段，供 action_reasoning 直接读取
                 if tool_name == "get_action_tracking":
                     tracking_summary = str(result)
+                    # 提取 LLM 判断的冲突 ID（附加在返回文本末尾）
+                    result_str = str(result)
+                    marker = "\n\nCONFLICT_IDS:"
+                    if marker in result_str:
+                        try:
+                            conflict_json = result_str[result_str.index(marker) + len(marker):]
+                            parsed = json.loads(conflict_json)
+                            if isinstance(parsed, list):
+                                abandoned_ids_found.extend(parsed)
+                            # 从 tracking_summary 中去掉 CONFLICT_IDS 行，保持可读性
+                            tracking_summary = result_str[:result_str.index(marker)]
+                        except Exception:
+                            pass
                 elif tool_name == "detect_anomaly" and str(result) != "无异常":
                     anomaly_lines = [line for line in str(result).splitlines() if line.strip()]
                     if anomaly_lines:
@@ -216,6 +230,8 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
             result["tracking_summary"] = tracking_summary
         if anomalies_found:
             result["anomalies"] = anomalies_found
+        if abandoned_ids_found:
+            result["abandoned_tracking_ids"] = abandoned_ids_found
         return result
 
     except Exception as e:
@@ -287,6 +303,10 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
     tracking_summary = state.get("tracking_summary", "") or "（无行动追踪记录，首次分析）"
     anomalies = state.get("anomalies", [])
     anomaly_text = "\n".join(anomalies) if anomalies else "（无异常）"
+    intent_result = state.get("intent_result") or {}
+    goal_evaluation_result = state.get("goal_evaluation_result") or {}
+    intent_text = json.dumps(intent_result, ensure_ascii=False) if intent_result else "（无意图推断数据）"
+    goal_eval_text = json.dumps(goal_evaluation_result, ensure_ascii=False) if goal_evaluation_result else "（无目标校验数据）"
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", ACTION_REASONING_SYSTEM),
@@ -308,6 +328,8 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
                 "enriched_context": enriched_context,
                 "tracking_summary": tracking_summary,
                 "anomaly_text": anomaly_text,
+                "intent_result": intent_text,
+                "goal_evaluation_result": goal_eval_text,
             }),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
@@ -381,13 +403,14 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
     snapshot = state.get("snapshot", {})
     final_output = state.get("final_output", {})
     actions = final_output.get("recommended_actions", [])
+    abandoned_tracking_ids = set(state.get("abandoned_tracking_ids", []))
 
     now = datetime.now(timezone.utc)
 
+    # ── 步骤1：更新旧追踪记录状态（独立事务）──
+    old_rows_count = 0
     try:
         async with get_session() as session:
-            # ── 步骤1：更新旧追踪记录状态 ──
-            # 查询所有进行中的追踪记录
             result = await session.execute(
                 text("""
                     SELECT id, goal_metric, goal_value, baseline_value, deadline
@@ -399,21 +422,26 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
                 {"user_id": user_id, "tenant_id": tenant_id},
             )
             old_rows = result.fetchall()
+            old_rows_count = len(old_rows)
 
             for row in old_rows:
                 new_status = None
                 completed_at = None
                 completion_snapshot = None
 
+                # LLM 判断目标已放弃（优先级最高）
+                if str(row.id) in abandoned_tracking_ids:
+                    new_status = "abandoned"
+
                 # 指标对比判断完成
-                if row.goal_metric and row.goal_value is not None:
+                elif row.goal_metric and row.goal_value is not None:
                     current_val = _extract_metric(snapshot, row.goal_metric)
                     if current_val is not None and current_val >= row.goal_value:
                         new_status = "completed"
                         completed_at = now
                         completion_snapshot = {row.goal_metric: current_val}
 
-                # 截止时间判断超时
+                # 截止时间判断超时（abandoned 和 completed 不再检查）
                 if new_status is None and row.deadline:
                     deadline_dt = (
                         row.deadline
@@ -441,17 +469,21 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
                             "id": row.id,
                         },
                     )
+    except Exception as e:
+        logger.error("[tracking_update] 旧记录状态更新失败: %s", e)
+        return {"errors": [f"追踪记录状态更新失败: {e}"]}
 
-            # ── 步骤2：写入本次可追踪行动 ──
+    # ── 步骤2：写入本次可追踪行动（独立事务）──
+    inserted = 0
+    try:
+        async with get_session() as session:
             trackable = [a for a in actions if a.get("goal_metric")]
-            inserted = 0
             for action in trackable:
                 goal_metric = action["goal_metric"]
                 goal_value = action.get("goal_value")
                 expected_hours = action.get("expected_hours")
                 baseline_value = _extract_metric(snapshot, goal_metric)
 
-                # 计算截止时间
                 deadline = None
                 if expected_hours:
                     deadline = now + timedelta(hours=expected_hours)
@@ -482,16 +514,14 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
                     },
                 )
                 inserted += 1
-
-        logger.info(
-            "[tracking_update] 完成, user_id=%s, 旧记录更新=%d, 新记录写入=%d",
-            user_id,
-            len(old_rows),
-            inserted,
-        )
-        return {}
-
     except Exception as e:
-        logger.error("[tracking_update] 追踪记录更新失败: %s", e)
-        # 追踪失败不影响主流程，只记录错误
-        return {"errors": [f"追踪记录更新失败: {e}"]}
+        logger.error("[tracking_update] 新追踪记录写入失败: %s", e)
+        return {"errors": [f"新追踪记录写入失败: {e}"]}
+
+    logger.info(
+        "[tracking_update] 完成, user_id=%s, 旧记录更新=%d, 新记录写入=%d",
+        user_id,
+        old_rows_count,
+        inserted,
+    )
+    return {}

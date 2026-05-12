@@ -201,10 +201,10 @@ def create_tools(tenant_id: str, user_id: str, snapshot: dict | None = None) -> 
 
 | 规则 | 判断条件 | 示例输出 |
 |------|---------|---------|
-| 行动超时 | `action_tracking` 中有超过 `deadline` 的记录 | `行动超时: 2 条追踪行动已超过截止时间未完成` |
-| 流失风险 | 本次 `play_hours` 增量 < 上次增量的 30% | `流失风险: 本次游戏时长增量 0.5h，仅为上次增量 5.0h 的 10%` |
-| 活跃度骤降 | 上次 `engagement_level=high`，本次增量 < 1h | `活跃度骤降: 上次分析为 high，本次游戏时长增量仅 0.2h` |
-| 重复卡关 | 当前 `bottlenecks` 与上次分析完全相同 | `重复卡关: 瓶颈与上次分析完全相同 — 缺乏社交互动, 资金不足` |
+| 行动超时 | `action_tracking` 中有超过 `deadline` 的进行中记录 | `行动超时: 2 条追踪行动已超过截止时间未完成` |
+| 重复卡关 | 当前快照 `bottlenecks` 与上次分析结果完全相同 | `重复卡关: 瓶颈与上次分析完全相同 — 缺乏社交互动, 资金不足` |
+
+> 注：流失风险和活跃度骤降规则依赖历史快照中的 `play_hours` 数据，但 `analysis_results` 表只存储分析输出（`PlayerAnalysisOutput`），不存储原始快照，因此这两条规则无法可靠实现，已移除。
 
 #### 4.4 辅助函数：`_extract_metric()`
 
@@ -288,7 +288,7 @@ chain.ainvoke({
 - 根据 `expected_hours` 计算 `deadline`
 - `INSERT INTO action_tracking ...`
 
-**容错设计：** 追踪失败只记录错误，不影响主流程返回结果。
+**事务隔离：** 步骤1和步骤2使用独立事务。步骤2的 INSERT 失败不会回滚步骤1已提交的 UPDATE，两者互不影响。追踪失败只记录错误，不影响主流程返回结果。
 
 ---
 

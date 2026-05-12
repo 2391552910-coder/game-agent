@@ -144,7 +144,7 @@ async def _get_action_tracking(user_id: str, tenant_id: str, snapshot: dict) -> 
     完成判断优先级：
     1. 指标对比（主要）：snapshot[goal_metric] >= goal_value → completed
     2. 截止时间（兜底）：now > deadline 且指标未达成 → timeout
-    3. 状态字段（已持久化的 completed/abandoned）直接使用
+    3. LLM 冲突判断：当前快照行为方向与追踪目标冲突 → abandoned（写入 conflict_ids 字段）
     """
     from sqlalchemy import text
 
@@ -174,6 +174,7 @@ async def _get_action_tracking(user_id: str, tenant_id: str, snapshot: dict) -> 
     tracking_items = []
     for row in rows:
         item: dict = {
+            "id": str(row.id),
             "action_type": row.action_type,
             "action_desc": row.action_desc or "",
             "created_at": row.created_at.isoformat(),
@@ -209,17 +210,93 @@ async def _get_action_tracking(user_id: str, tenant_id: str, snapshot: dict) -> 
         item["progress"] = progress_desc
         tracking_items.append(item)
 
+    # ── LLM 冲突判断：检测目标漂移 ──
+    # 只对仍在进行中的行动做冲突判断，已完成/超时的不需要
+    in_progress_items = [t for t in tracking_items if t["status"] == "tracking"]
+    conflict_ids: list[str] = []
+
+    if in_progress_items:
+        conflict_ids = await _detect_goal_conflicts(in_progress_items, snapshot)
+        # 将冲突行动标记为 abandoned
+        conflict_id_set = set(conflict_ids)
+        for item in tracking_items:
+            if item["id"] in conflict_id_set:
+                item["status"] = "abandoned"
+                item["progress"] += "（LLM 判断：当前行为方向与此目标冲突，已放弃）"
+
     # 汇总统计
     completed = sum(1 for t in tracking_items if t["status"] == "completed")
     timeout = sum(1 for t in tracking_items if t["status"] == "timeout")
+    abandoned = sum(1 for t in tracking_items if t["status"] == "abandoned")
     in_progress = sum(1 for t in tracking_items if t["status"] == "tracking")
 
     summary = (
         f"追踪行动共 {len(tracking_items)} 条："
-        f"已完成 {completed} / 超时 {timeout} / 进行中 {in_progress}\n\n"
+        f"已完成 {completed} / 超时 {timeout} / 已放弃 {abandoned} / 进行中 {in_progress}\n\n"
     )
     summary += json.dumps(tracking_items, ensure_ascii=False, indent=2)
+
+    # 将冲突 ID 附加在末尾，供 gather_context_node 提取写入 state
+    if conflict_ids:
+        summary += f"\n\nCONFLICT_IDS:{json.dumps(conflict_ids)}"
+
     return summary
+
+
+async def _detect_goal_conflicts(
+    in_progress_items: list[dict],
+    snapshot: dict,
+) -> list[str]:
+    """调用 LLM 判断进行中的追踪目标是否与当前快照行为方向冲突。
+
+    返回冲突的追踪记录 ID 列表。
+    """
+    import asyncio
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from src.core.llm.factory import get_llm
+
+    system_prompt = """你是一个行为分析助手。
+你的任务是判断玩家当前的行为方向是否与之前设定的追踪目标冲突。
+
+冲突的定义：
+- 玩家当前的行为、状态或意图明显与追踪目标的方向相悖
+- 继续追踪该目标已无实际意义（玩家已转向其他目标）
+- 例如：追踪目标是"增加购物次数"，但玩家当前快照显示正在关注节省开销
+
+判断原则：
+- 只有明确冲突时才标记，不确定时保持 tracking
+- 返回格式必须是 JSON 数组，包含冲突的追踪记录 id，如：["id1", "id2"]
+- 如果没有冲突，返回空数组：[]"""
+
+    user_content = (
+        f"当前玩家快照：\n{json.dumps(snapshot, ensure_ascii=False)}\n\n"
+        f"进行中的追踪目标：\n{json.dumps(in_progress_items, ensure_ascii=False, indent=2)}\n\n"
+        "请判断哪些追踪目标与当前快照的行为方向冲突，返回冲突的 id 列表（JSON 数组）。"
+    )
+
+    try:
+        llm = await get_llm(model_type="fast")
+        response = await asyncio.wait_for(
+            llm.ainvoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_content),
+            ]),
+            timeout=30,
+        )
+        content = response.content.strip()
+        # 提取 JSON 数组
+        start = content.find("[")
+        end = content.rfind("]") + 1
+        if start >= 0 and end > start:
+            conflict_ids = json.loads(content[start:end])
+            if isinstance(conflict_ids, list):
+                return [str(cid) for cid in conflict_ids]
+    except Exception as e:
+        logger.warning("[get_action_tracking] 冲突判断失败，跳过: %s", e)
+
+    return []
 
 
 def _extract_metric(snapshot: dict, metric: str) -> float | None:
@@ -244,10 +321,8 @@ async def _detect_anomaly(user_id: str, tenant_id: str, snapshot: dict) -> str:
     """检测玩家当前是否存在异常情况。
 
     检测规则（基于规则，不调用 LLM）：
-    1. 活跃度骤降：最近一次分析 engagement_level 高于当前快照推断值
-    2. 流失风险：本次在线时长增量 < 历史均值的 30%
-    3. 行动全部超时：所有追踪行动均已超时
-    4. 重复卡关：当前 bottlenecks 与上次分析完全相同
+    1. 行动超时：action_tracking 中有超过 deadline 的进行中记录
+    2. 重复卡关：当前快照 bottlenecks 与上次分析结果完全相同
     """
     from sqlalchemy import text
 
@@ -256,21 +331,8 @@ async def _detect_anomaly(user_id: str, tenant_id: str, snapshot: dict) -> str:
     anomalies: list[str] = []
     now = datetime.now(timezone.utc)
 
-    # 查询最近两次分析结果
     async with get_session() as session:
-        result = await session.execute(
-            text("""
-                SELECT output_json, analyzed_at
-                FROM analysis_results
-                WHERE user_id = :user_id AND tenant_id = :tenant_id
-                ORDER BY analyzed_at DESC
-                LIMIT 2
-            """),
-            {"user_id": user_id, "tenant_id": tenant_id},
-        )
-        history_rows = result.fetchall()
-
-        # 查询超时行动数量
+        # 规则1：查询超时行动数量
         timeout_result = await session.execute(
             text("""
                 SELECT COUNT(*) as cnt
@@ -286,68 +348,34 @@ async def _detect_anomaly(user_id: str, tenant_id: str, snapshot: dict) -> str:
         timeout_row = timeout_result.first()
         timeout_count = timeout_row.cnt if timeout_row else 0
 
-    # 规则1：行动全部超时
+        # 规则2：查询最近一次分析结果，用于对比 bottlenecks
+        history_result = await session.execute(
+            text("""
+                SELECT output_json
+                FROM analysis_results
+                WHERE user_id = :user_id AND tenant_id = :tenant_id
+                ORDER BY analyzed_at DESC
+                LIMIT 1
+            """),
+            {"user_id": user_id, "tenant_id": tenant_id},
+        )
+        history_row = history_result.first()
+
+    # 规则1：行动超时
     if timeout_count > 0:
-        # 检查是否还有未超时的追踪行动
         anomalies.append(f"行动超时: {timeout_count} 条追踪行动已超过截止时间未完成")
 
-    if not history_rows:
-        if anomalies:
-            return "\n".join(anomalies)
-        return "无异常"
-
-    last_output = history_rows[0].output_json
-    if isinstance(last_output, str):
-        last_output = json.loads(last_output)
-
-    last_profile = last_output.get("player_profile", {})
-
-    # 规则2：活跃度骤降（需要快照中有 engagement 相关指标推断）
-    last_engagement = last_profile.get("engagement_level", "")
-    # 用 play_hours 增量粗略推断当前活跃度
-    stats = snapshot.get("stats", {})
-    current_play_hours = stats.get("play_hours", 0) if isinstance(stats, dict) else 0
-
-    if len(history_rows) >= 2:
-        prev_output = history_rows[1].output_json
-        if isinstance(prev_output, str):
-            prev_output = json.loads(prev_output)
-        prev_snapshot = prev_output.get("snapshot", {})
-        prev_stats = prev_snapshot.get("stats", {}) if isinstance(prev_snapshot, dict) else {}
-        prev_play_hours = prev_stats.get("play_hours", 0) if isinstance(prev_stats, dict) else 0
-
-        # 本次增量 vs 上次增量
-        last_snapshot = last_output.get("snapshot", {})
-        last_stats = last_snapshot.get("stats", {}) if isinstance(last_snapshot, dict) else {}
-        last_play_hours = last_stats.get("play_hours", 0) if isinstance(last_stats, dict) else 0
-
-        last_delta = last_play_hours - prev_play_hours
-        current_delta = current_play_hours - last_play_hours
-
-        if last_delta > 0 and current_delta < last_delta * 0.3:
-            anomalies.append(
-                f"流失风险: 本次游戏时长增量 {current_delta:.1f}h，"
-                f"仅为上次增量 {last_delta:.1f}h 的 {current_delta / last_delta * 100:.0f}%"
-            )
-
-    # 规则3：活跃度等级骤降
-    if last_engagement in ("high", "medium"):
-        # 用 play_hours 增量粗略判断当前活跃度是否骤降
-        # 若增量极低（< 1h）且上次是 high，视为骤降
-        last_snapshot = last_output.get("snapshot", {})
-        last_stats = last_snapshot.get("stats", {}) if isinstance(last_snapshot, dict) else {}
-        last_play_hours_val = last_stats.get("play_hours", 0) if isinstance(last_stats, dict) else 0
-        delta = current_play_hours - last_play_hours_val
-        if last_engagement == "high" and delta < 1:
-            anomalies.append(f"活跃度骤降: 上次分析为 {last_engagement}，本次游戏时长增量仅 {delta:.1f}h")
-
-    # 规则4：重复卡关
-    last_bottlenecks = set(last_profile.get("bottlenecks", []))
-    current_bottlenecks_raw = snapshot.get("bottlenecks", [])
-    if isinstance(current_bottlenecks_raw, list):
-        current_bottlenecks = set(current_bottlenecks_raw)
-        if last_bottlenecks and current_bottlenecks and last_bottlenecks == current_bottlenecks:
-            anomalies.append(f"重复卡关: 瓶颈与上次分析完全相同 — {', '.join(last_bottlenecks)}")
+    # 规则2：重复卡关
+    if history_row:
+        last_output = history_row.output_json
+        if isinstance(last_output, str):
+            last_output = json.loads(last_output)
+        last_bottlenecks = set(last_output.get("player_profile", {}).get("bottlenecks", []))
+        current_bottlenecks_raw = snapshot.get("bottlenecks", [])
+        if isinstance(current_bottlenecks_raw, list):
+            current_bottlenecks = set(current_bottlenecks_raw)
+            if last_bottlenecks and current_bottlenecks and last_bottlenecks == current_bottlenecks:
+                anomalies.append(f"重复卡关: 瓶颈与上次分析完全相同 — {', '.join(sorted(last_bottlenecks))}")
 
     return "\n".join(anomalies) if anomalies else "无异常"
 

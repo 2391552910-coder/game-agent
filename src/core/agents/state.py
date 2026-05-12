@@ -28,3 +28,20 @@ class AnalysisState(TypedDict):
     # detect_anomaly 工具写入，action_reasoning 节点读取
     # 每条为一个异常描述，如 “活跃度骤降: engagement high→low”
     anomalies: Annotated[list[str], operator.add]
+
+    # get_action_tracking 工具写入，tracking_update_node 读取
+    # LLM 判断与当前快照行为方向冲突、已被放弃的追踪记录 ID 列表
+    abandoned_tracking_ids: Annotated[list[str], operator.add]
+
+    # ── 动态决策系统字段 ──
+    # intent_inference 节点写入，goal_evaluation 节点读取
+    # 本次会话意图推断结果（InferredIntent.model_dump()）
+    intent_result: dict
+
+    # goal_evaluation 节点写入，action_reasoning 节点读取
+    # 目标校验与决策结论（GoalEvaluationResult.model_dump()）
+    goal_evaluation_result: dict
+
+    # memory_update 节点读取，从 DB 加载的玩家记忆
+    # behavior_profile + goal_history 合并字典
+    player_memory: dict

@@ -301,6 +301,10 @@ def make_provider_row(
     weight: int = 1,
     is_active: bool = True,
     model_type: str = "default",
+    provider_type: str = "openai",
+    max_tokens: int | None = None,
+    timeout: int = 60,
+    extra_params: dict | None = None,
 ) -> MagicMock:
     """创建模拟 llm_providers 行。"""
     row = MagicMock()
@@ -313,6 +317,10 @@ def make_provider_row(
     row.weight = weight
     row.is_active = is_active
     row.model_type = model_type
+    row.provider_type = provider_type
+    row.max_tokens = max_tokens
+    row.timeout = timeout
+    row.extra_params = extra_params or {}
     row.created_at = datetime.now(UTC)
     row.updated_at = datetime.now(UTC)
     return row

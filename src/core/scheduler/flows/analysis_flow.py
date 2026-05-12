@@ -59,6 +59,7 @@ async def run_agent_task(user_id: str, tenant_id: str, snapshot: dict) -> dict:
             "errors": [],
             "tracking_summary": "",
             "anomalies": [],
+            "abandoned_tracking_ids": [],
         }),
         timeout=300,
     )

@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"D:/app/Clawd on Desk/resources/app.asar.unpacked/\" -name \"*.json\" -not -path \"*/node_modules/*\" 2>/dev/null | grep -i \"config\\\\|setting\\\\|mcp\\\\|api\" | head -20)",
+      "Read(//d/app/Clawd on Desk/resources/app.asar.unpacked/**)",
+      "Bash(find \"D:/app/Clawd on Desk/\" -name \"*.json\" -not -path \"*/node_modules/*\" 2>/dev/null | grep -i \"mcp\\\\|config\\\\|setting\" | head -20)",
+      "Read(//d/app/Clawd on Desk/**)",
+      "Bash(find \"C:/Users/Admin/AppData/Roaming/\" -name \"*.json\" 2>/dev/null | grep -i \"mcp\\\\|zread\\\\|zai\\\\|zhipu\\\\|glm\" | head -20)",
+      "Read(//c/Users/Admin/AppData/Roaming/**)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d, indent=2, ensure_ascii=False\\)\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('mcp', d.get\\('mcpServers', {}\\)\\), indent=2, ensure_ascii=False\\)\\)\")",
+      "Bash(xxd \"C:/Users/Admin/AppData/Roaming/Code/User/mcp.json\")",
+      "Bash(code --list-extensions)",
+      "Bash(find \"C:/Users/Admin/.vscode/extensions/\" -name \"*.json\" 2>/dev/null | xargs grep -l \"zread\\\\|zai_mcp\\\\|web_reader\\\\|web_search_prime\\\\|context7\" 2>/dev/null | head -10)",
+      "Read(//c/Users/Admin/.vscode/extensions/**)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); contrib=d.get\\('contributes',{}\\); print\\(json.dumps\\({k:v for k,v in contrib.items\\(\\) if 'mcp' in k.lower\\(\\) or 'server' in k.lower\\(\\)}, indent=2, ensure_ascii=False\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(git -C \"d:/Projects/myAgent2\" log --oneline)",
+      "Bash(git -C \"d:/Projects/myAgent2\" diff)",
+      "Bash(git -C \"d:/Projects/myAgent2\" add docker-compose.dev.yml src/core/scheduler/triggers.py scripts/setup_prefect.py src/core/scheduler/flows/)",
+      "Bash(git -C d:/Projects/myAgent2 commit -m ' *)",
+      "Bash(python -m pytest tests/ --collect-only -q)",
+      "Bash(git commit -m ' *)",
+      "Bash(uv add *)",
+      "Bash(uv run *)",
+      "Bash(cd /d d:\\\\Projects\\\\myAgent2)",
+      "Bash(docker-compose -f docker-compose.dev.yml up -d)",
+      "Bash(git add *)"
+    ]
+  }
+}
