@@ -2,6 +2,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+ActionType = Literal[
+    "observe_current_state",
+    "move_to_location",
+    "stop_moving",
+    "jump",
+    "play_basic_action",
+]
+
 
 # 可自定义
 class BehaviorProfile(BaseModel):
@@ -19,10 +27,17 @@ class RecommendedAction(BaseModel):
     LLM 在能明确量化完成条件时填写，否则留空。
     tracking_update_node 只处理有 goal_metric 的行动。
     """
-    action_type: str = Field(description="行为类型")
+    action_type: ActionType = Field(description="第一版允许的基础行为动作类型")
     priority: Literal["high", "medium", "low"]
     reason: str = Field(description="推荐原因")
-    payload: dict = Field(description="执行参数", default_factory=dict)
+    payload: dict = Field(
+        description=(
+            "执行参数。observe_current_state/stop_moving 可为空；"
+            "move_to_location 需要 location_id 或 position；"
+            "jump 可包含 count；play_basic_action 需要 action_id。"
+        ),
+        default_factory=dict,
+    )
 
     # ── 监督机制追踪字段（可选）──
     goal_metric: str | None = Field(
