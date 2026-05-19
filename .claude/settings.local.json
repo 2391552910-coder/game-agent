@@ -25,7 +25,20 @@
       "Bash(uv run *)",
       "Bash(cd /d d:\\\\Projects\\\\myAgent2)",
       "Bash(docker-compose -f docker-compose.dev.yml up -d)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "Bash(git -C \"D:/Projects/myAgent2\" status --short)",
+      "Bash(uv --project \"D:/Projects/myAgent2\" run pytest tests/unit/test_robotgateway_callback.py -v)",
+      "Bash(uv --project \"D:/Projects/myAgent2\" run python -)",
+      "Bash(git -C \"D:/Projects/myAgent2\" status --short src/config.py src/core/integration/robotgateway_callback.py tests/unit/test_robotgateway_callback.py src/core/scheduler/flows/analysis_flow.py docs/integration-guide.md)",
+      "Bash(git -C \"D:/Projects/myAgent2\" diff -- src/config.py src/core/integration/robotgateway_callback.py tests/unit/test_robotgateway_callback.py src/core/scheduler/flows/analysis_flow.py docs/integration-guide.md)",
+      "Bash(git -C \"D:/Projects/myAgent2\" status --short \"src/config.py\" \"src/core/integration/robotgateway_callback.py\" \"tests/unit/test_robotgateway_callback.py\" \"src/core/scheduler/flows/analysis_flow.py\" \"tests/unit/test_analysis_flow_callback.py\" \"docs/integration-guide.md\")",
+      "Bash(git -C \"D:/Projects/myAgent2\" diff -- \"src/config.py\" \"src/core/integration/robotgateway_callback.py\" \"tests/unit/test_robotgateway_callback.py\" \"src/core/scheduler/flows/analysis_flow.py\" \"docs/integration-guide.md\")",
+      "Bash(env)",
+      "Bash(python -)",
+      "Bash(git -C \"D:/Projects/myAgent2/.claude/worktrees/agent-aedc4f6b21e0514d5\" status --short \"src/config.py\" \"src/core/integration/robotgateway_callback.py\" \"tests/unit/test_robotgateway_callback.py\")",
+      "Bash(git -C \"D:/Projects/myAgent2\" status --short \"src/config.py\" \"src/core/integration/robotgateway_callback.py\" \"tests/unit/test_robotgateway_callback.py\" \"src/core/scheduler/flows/analysis_flow.py\" \"docs/integration-guide.md\")"
     ]
   }
 }

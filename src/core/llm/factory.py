@@ -55,7 +55,7 @@ def _fallback_llm(model_type: str, temperature: float) -> BaseChatModel:
         temperature=temperature,
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
-        streaming=True,   # 兼容强制返回 SSE 的代理服务器
+        streaming=False,   # DashScope 流式接口可能有问题，先禁用
         max_retries=2,
     )
     _fallback_cache[cache_key] = llm

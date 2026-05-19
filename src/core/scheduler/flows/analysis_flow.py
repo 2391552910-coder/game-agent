@@ -5,14 +5,19 @@ Flow 结构:
         └── fetch_snapshot_task   获取玩家快照（游戏服务器已推送时跳过）
         └── run_agent_task        执行 LangGraph 分析
         └── store_result_task     持久化分析结果
+        └── send_callback_task    回调 RobotGateway
 
 重试策略: 最多 2 次，间隔 30 秒（保守重试）。
 """
 
-import logging
-
 from prefect import flow, task
 from prefect.logging import get_run_logger
+
+from src.config import settings
+from src.core.integration.robotgateway_callback import (
+    RobotGatewayCallbackSkipped,
+    send_robotgateway_analysis_callback,
+)
 
 FLOW_NAME = "offline-analysis"
 DEPLOYMENT_NAME = f"analysis_flow/{FLOW_NAME}"
@@ -47,20 +52,22 @@ async def run_agent_task(user_id: str, tenant_id: str, snapshot: dict) -> dict:
 
     graph = build_orchestrator().compile()
     result = await asyncio.wait_for(
-        graph.ainvoke({
-            "user_id": user_id,
-            "tenant_id": tenant_id,
-            "snapshot": snapshot,
-            "rag_context": "",
-            "enriched_context": "",
-            "behavior_report": "",
-            "reasoned_actions": [],
-            "final_output": {},
-            "errors": [],
-            "tracking_summary": "",
-            "anomalies": [],
-            "abandoned_tracking_ids": [],
-        }),
+        graph.ainvoke(
+            {
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "snapshot": snapshot,
+                "rag_context": "",
+                "enriched_context": "",
+                "behavior_report": "",
+                "reasoned_actions": [],
+                "final_output": {},
+                "errors": [],
+                "tracking_summary": "",
+                "anomalies": [],
+                "abandoned_tracking_ids": [],
+            }
+        ),
         timeout=300,
     )
     output = result.get("final_output", {})
@@ -80,6 +87,31 @@ async def store_result_task(tenant_id: str, user_id: str, snapshot: dict, output
 
     await store_analysis(tenant_id, user_id, snapshot, output)
     logger.info("分析结果已存储, user_id=%s", user_id)
+
+
+@task(
+    name="send-robotgateway-callback",
+    retries=2,
+    retry_delay_seconds=30,
+    task_run_name="send-robotgateway-callback-{user_id}",
+)
+async def send_callback_task(tenant_id: str, user_id: str, snapshot: dict, output: dict) -> None:
+    logger = get_run_logger()
+    try:
+        await send_robotgateway_analysis_callback(
+            callback_url=settings.robotgateway_callback_url,
+            api_key=settings.robotgateway_callback_api_key,
+            timeout_seconds=settings.robotgateway_callback_timeout_seconds,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            snapshot=snapshot,
+            output=output,
+        )
+    except RobotGatewayCallbackSkipped as exc:
+        logger.info("RobotGateway callback skipped, user_id=%s: %s", user_id, exc)
+        return
+
+    logger.info("RobotGateway callback sent, user_id=%s", user_id)
 
 
 @flow(
@@ -111,5 +143,6 @@ async def analysis_flow(user_id: str, tenant_id: str, snapshot: dict | None = No
 
     output = await run_agent_task(user_id=user_id, tenant_id=tenant_id, snapshot=snapshot)
     await store_result_task(tenant_id=tenant_id, user_id=user_id, snapshot=snapshot, output=output)
+    await send_callback_task(tenant_id=tenant_id, user_id=user_id, snapshot=snapshot, output=output)
 
     logger.info("分析流程完成, user_id=%s", user_id)

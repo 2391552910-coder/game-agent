@@ -1,6 +1,6 @@
-# 游戏对接指南
+# RobotGateway 对接指南
 
-面向游戏开发团队。说明如何将游戏服务器对接到 myAgent 平台，使平台能自动分析玩家行为并生成推荐。
+面向游戏开发团队。说明如何将 RobotGateway 对接到 myAgent2 平台，使平台能自动分析玩家行为并生成推荐。
 
 ---
 
@@ -11,10 +11,10 @@
 ```
 1. 注册租户，获取 API Key
 2. 发送玩家在线/离线事件 (Webhook)
-3. 查询分析结果 (HTTP API)
+3. 接收分析结果回调 (HTTP Callback)
 ```
 
-平台自动完成其余工作：获取玩家数据、检索游戏规则、AI 分析、存储结果。
+平台自动完成其余工作：获取玩家数据、检索游戏规则、AI 分析、存储结果，并主动推送分析结果。
 
 ---
 
@@ -44,9 +44,29 @@ curl -X POST http://localhost:8000/api/v1/tenants/register \
 
 ---
 
+## 通信方向
+
+### RobotGateway → myAgent2
+
+RobotGateway 通过 HTTP Webhook 向 myAgent2 发送玩家事件：
+
+- `POST /webhooks/player-event`
+- Header: `X-API-Key: <tenant-api-key>`
+- Body: `online` / `offline` / `behavior_checkpoint`
+
+### myAgent2 → RobotGateway
+
+myAgent2 在分析完成并写入本地结果后，主动 HTTP POST 回调 RobotGateway：
+
+- URL: 由 `ROBOTGATEWAY_CALLBACK_URL` 配置
+- Header: `X-Callback-API-Key`，仅在 `ROBOTGATEWAY_CALLBACK_API_KEY` 配置后发送
+- Body event_type: `analysis.completed`
+
+---
+
 ## 第二步：发送玩家事件
 
-游戏服务器在检测到玩家上线或离线时，向平台发送事件通知。
+RobotGateway 在检测到玩家上线或离线时，向平台发送事件通知。
 
 ### 离线事件（触发分析）
 
@@ -104,9 +124,58 @@ curl -X POST http://localhost:8000/webhooks/player-event \
 
 ---
 
-## 第三步：查询分析结果
+## 第三步：接收分析结果回调
 
-分析在后台异步执行（通常 10-30 秒）。游戏服务器可以定时轮询或使用队列消费结果。
+分析在后台异步执行（通常 10-30 秒）。分析完成后，myAgent2 会主动向配置的 `ROBOTGATEWAY_CALLBACK_URL` 发送 HTTP POST 请求。
+
+### 回调请求格式
+
+**URL**: 由 `ROBOTGATEWAY_CALLBACK_URL` 环境变量配置
+
+**请求头**:
+- `Content-Type: application/json`
+- `X-Callback-API-Key: <api-key>`（仅当配置了 `ROBOTGATEWAY_CALLBACK_API_KEY` 时）
+
+**请求体**:
+
+```json
+{
+  "event_type": "analysis.completed",
+  "tenant_id": "tenant_001",
+  "user_id": "player_12345",
+  "timestamp": "2026-04-13T15:30:00+00:00",
+  "snapshot": {
+    "level": 85,
+    "pvp_rating": 2400
+  },
+  "analysis": {
+    "player_profile": {
+      "playstyle": "competitive",
+      "engagement_level": "high",
+      "current_goal": ["提升PVP段位"],
+      "bottlenecks": ["装备评分不足"]
+    },
+    "recommended_actions": [
+      {
+        "action_type": "pvp_arena",
+        "priority": "high",
+        "reason": "玩家PVP评分1800，推荐参与竞技场冲击段位奖励",
+        "payload": {"arena_type": "ranked"}
+      }
+    ]
+  }
+}
+```
+
+### 响应要求
+
+RobotGateway 应返回 HTTP 204 No Content 或 200 OK，表示已成功接收回调。
+
+---
+
+## 内部查询接口（调试/管理用）
+
+以下接口仅供内部查询、调试或后台管理使用，**不应作为 RobotGateway 获取分析结果的主链路**。
 
 ### 查询最新结果
 

@@ -3,7 +3,12 @@
     "allow": [
       "WebSearch",
       "Bash(git -C \"d:/Projects/myAgent2\" log --oneline)",
-      "Bash(git -C \"d:/Projects/myAgent2\" status)"
+      "Bash(git -C \"d:/Projects/myAgent2\" status)",
+      "Bash(uv --project \"D:/Projects/myAgent2\" run --extra dev ruff check \"D:/Projects/myAgent2/src/core/integration/robotgateway_callback.py\" \"D:/Projects/myAgent2/src/config.py\" \"D:/Projects/myAgent2/tests/unit/test_robotgateway_callback.py\")",
+      "Bash(git -C \"D:/Projects/myAgent2\" status --short \"src/config.py\" \"src/core/integration/robotgateway_callback.py\" \"tests/unit/test_robotgateway_callback.py\" \"src/core/scheduler/flows/analysis_flow.py\" \"tests/unit/test_analysis_flow_callback.py\" \"docs/integration-guide.md\")",
+      "Bash(git -C \"D:/Projects/myAgent2\" diff -- \"src/config.py\" \"src/core/integration/robotgateway_callback.py\" \"tests/unit/test_robotgateway_callback.py\" \"src/core/scheduler/flows/analysis_flow.py\" \"docs/integration-guide.md\")",
+      "Bash(git -C \"D:/Projects/myAgent2\" status --short \"src/config.py\" \"src/core/integration/robotgateway_callback.py\" \"tests/unit/test_robotgateway_callback.py\" \"src/core/scheduler/flows/analysis_flow.py\" \"docs/integration-guide.md\")",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

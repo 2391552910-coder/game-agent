@@ -37,44 +37,59 @@ GAME_DOCS_DIR = PROJECT_ROOT / "game_docs"
 
 # 测试查询集（覆盖不同检索场景）
 TEST_QUERIES = [
-    # 场景 1: 基础信息查询
+    # 场景 1: 地图坐标查询
     {
-        "category": "基础信息",
-        "query": "《星境日常》是什么类型的游戏？",
-        "expected_keywords": ["生活模拟", "元宇宙", "星境城"],
+        "category": "地图坐标",
+        "query": "健身房在哪里？坐标是多少？",
+        "expected_keywords": ["108", "gym_02", "健身房"],
     },
     {
-        "category": "基础信息",
-        "query": "游戏里有哪些职业可以选择？",
-        "expected_keywords": ["教师", "医生", "程序员"],
+        "category": "地图坐标",
+        "query": "射击场的入口坐标是什么？建筑ID是多少？",
+        "expected_keywords": ["125", "shoot_01", "射击场"],
     },
-    # 场景 2: 时间类咨询
+    # 场景 2: 动作技能查询
     {
-        "category": "时间咨询",
-        "query": "工作区几点开放？周末可以去工作区上班吗？",
-        "expected_keywords": ["工作日", "09:00", "18:00"],
-    },
-    {
-        "category": "时间咨询",
-        "query": "自然景区晚上能去吗？几点关闭？",
-        "expected_keywords": ["19:00", "关闭", "夜间"],
-    },
-    # 场景 3: 玩法规则
-    {
-        "category": "玩法规则",
-        "query": "周末集市什么时候开放？在哪里？",
-        "expected_keywords": ["周六", "周日", "10:00", "16:00"],
-    },
-    # 场景 4: 故障排查
-    {
-        "category": "故障排查",
-        "query": "每周三为什么进不去游戏？",
-        "expected_keywords": ["维护", "02:00", "04:00"],
+        "category": "动作技能",
+        "query": "play_action 支持哪些动作？",
+        "expected_keywords": ["wave", "sit", "dance_normal", "start_shooting"],
     },
     {
-        "category": "故障排查",
-        "query": "游戏突然关闭了怎么办？",
-        "expected_keywords": ["公告", "故障", "维护"],
+        "category": "动作技能",
+        "query": "start_shooting 动作在哪里可以使用？",
+        "expected_keywords": ["射击场", "坐标范围"],
+    },
+    # 场景 3: 游戏活动查询
+    {
+        "category": "游戏活动",
+        "query": "有哪些活动适合休闲玩家？",
+        "expected_keywords": ["射击打靶", "咖啡打卡", "休闲"],
+    },
+    {
+        "category": "游戏活动",
+        "query": "射击打靶活动需要什么条件？消耗多少金币？",
+        "expected_keywords": ["LV6", "60", "金币"],
+    },
+    {
+        "category": "游戏活动",
+        "query": "健身塑形活动需要什么道具？",
+        "expected_keywords": ["月卡", "gym_03"],
+    },
+    # 场景 4: 经济系统查询
+    {
+        "category": "经济系统",
+        "query": "游戏中有哪些货币类型？",
+        "expected_keywords": ["金币", "竞技积分", "钻石", "体力值"],
+    },
+    {
+        "category": "经济系统",
+        "query": "健身房月卡多少钱？",
+        "expected_keywords": ["280", "item_gym_month_01"],
+    },
+    {
+        "category": "经济系统",
+        "query": "钻石怎么兑换金币？",
+        "expected_keywords": ["1:100", "兑换"],
     },
 ]
 
@@ -163,13 +178,20 @@ async def test_queries():
         print(f"  Query: {query}")
 
         start = time.time()
-        answer = await rag.aquery(
-            query,
-            param=QueryParam(mode="hybrid", enable_rerank=True),
-        )
+        try:
+            answer = await rag.aquery(
+                query,
+                param=QueryParam(mode="hybrid", enable_rerank=True),
+            )
+        except Exception as e:
+            answer = None
+            print(f"  ERROR: {str(e)[:100]}")
         elapsed = time.time() - start
 
-        keyword_check = check_keywords(answer, expected)
+        if answer is None:
+            keyword_check = {"matched": [], "missing": expected, "score": 0.0}
+        else:
+            keyword_check = check_keywords(answer, expected)
 
         print(f"  Time: {elapsed:.1f}s")
         print(f"  Keywords: {keyword_check['score']:.0%} ({len(keyword_check['matched'])}/{len(expected)})")
@@ -177,7 +199,10 @@ async def test_queries():
             print(f"    MATCH: {', '.join(keyword_check['matched'])}")
         if keyword_check["missing"]:
             print(f"    MISS:  {', '.join(keyword_check['missing'])}")
-        print(f"  Answer: {answer[:120]}...")
+        if answer is not None:
+            print(f"  Answer: {answer[:120]}...")
+        else:
+            print(f"  Answer: None (query failed)")
 
         results.append(
             {
@@ -185,7 +210,7 @@ async def test_queries():
                 "query": query,
                 "elapsed": elapsed,
                 "keyword_score": keyword_check["score"],
-                "answer_length": len(answer),
+                "answer_length": len(answer) if answer else 0,
             }
         )
 
@@ -258,9 +283,78 @@ async def test_rerank_toggle():
         print(f"  Answer: {answer[:150]}...")
 
 
+async def test_game_data_query_modes():
+    """测试 5: 游戏场景数据的四种检索模式对比"""
+    print_separator("TEST 5: Game Data Retrieval Mode Comparison", 80)
+
+    rag = await get_rag()
+    test_query = "健身房在哪里？坐标是多少？"
+
+    print(f"  Query: {test_query}\n")
+
+    # 先检查向量数据库状态
+    print("  === Vector DB Status ===")
+    try:
+        # 尝试直接检查 Milvus 中的 chunks
+        if hasattr(rag, '_db') and hasattr(rag._db, '_vector_db'):
+            vector_db = rag._db._vector_db
+            if hasattr(vector_db, 'client'):
+                collection = vector_db.client.get_collection('chunks')
+                stats = collection.stats()
+                print(f"  Milvus chunks collection stats: {stats}")
+    except Exception as e:
+        print(f"  Could not check Milvus stats: {e}")
+
+    mode_results = {}
+    for mode in QUERY_MODES:
+        print(f"\n  Mode: {mode:8s}", end="  ")
+        start = time.time()
+        try:
+            answer = await rag.aquery(
+                test_query,
+                param=QueryParam(mode=mode, enable_rerank=True),
+            )
+            elapsed = time.time() - start
+            print(f"OK {elapsed:.1f}s  ({len(answer)} chars)")
+            print(f"    Preview: {answer[:100]}...")
+            
+            keyword_check = check_keywords(answer, ["108", "gym_02", "健身房"])
+            print(f"    Keywords: {keyword_check['score']:.0%} matched")
+            
+            mode_results[mode] = {
+                "elapsed": elapsed,
+                "length": len(answer),
+                "success": True,
+                "keyword_score": keyword_check["score"],
+            }
+        except Exception as e:
+            print(f"ERROR: {e}")
+            mode_results[mode] = {
+                "elapsed": 0,
+                "length": 0,
+                "success": False,
+                "error": str(e),
+                "keyword_score": 0,
+            }
+
+    # 汇总统计
+    print_separator("Game Data Mode Comparison Summary", 80)
+    print(f"  Query: {test_query}")
+    print(f"  {'-' * 70}")
+    print(f"  {'Mode':<10} {'Time':<8} {'Length':<10} {'Keywords':<10}")
+    print(f"  {'-' * 70}")
+    for mode, result in mode_results.items():
+        if result["success"]:
+            print(f"  {mode:<10} {result['elapsed']:.2f}s    {result['length']:<10} {result['keyword_score']:.0%}")
+        else:
+            print(f"  {mode:<10} ERROR")
+
+    return mode_results
+
+
 async def test_context_only():
-    """测试 5: 仅上下文模式（供 LangGraph 用）"""
-    print_separator("TEST 5: Context Only Mode (for LangGraph)", 80)
+    """测试 6: 仅上下文模式（供 LangGraph 用）"""
+    print_separator("TEST 6: Context Only Mode (for LangGraph)", 80)
 
     rag = await get_rag()
     test_query = "星境城有哪些功能区域？"
@@ -305,7 +399,10 @@ async def main():
         # 测试 4: Rerank 开关
         await test_rerank_toggle()
 
-        # 测试 5: 仅上下文模式
+        # 测试 5: 游戏场景数据的四种检索模式对比
+        await test_game_data_query_modes()
+
+        # 测试 6: 仅上下文模式
         await test_context_only()
 
         print_separator("ALL TESTS COMPLETED", 80)

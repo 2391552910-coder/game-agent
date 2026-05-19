@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     max_concurrent_analyses: int = Field(default=20, ge=1, le=100)
     offline_trigger_minutes: int = Field(default=5, ge=1)
 
+    # ── RobotGateway Callback ──
+    robotgateway_callback_url: str | None = Field(default=None)
+    robotgateway_callback_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    robotgateway_callback_api_key: str | None = Field(default=None)
+
     # ── Token 配额 ──
     default_monthly_tokens: int = Field(default=40_000_000)
     quota_warning_threshold: float = Field(default=0.8, ge=0.0, le=1.0)

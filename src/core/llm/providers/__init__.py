@@ -21,6 +21,7 @@ PROVIDER_REGISTRY: dict[str, Any] = {
     "qwen": ChatOpenAI,  # 通义千问（OpenAI 兼容）
     "zhipu": ChatOpenAI,  # 智谱 AI（OpenAI 兼容）
     "grok": ChatOpenAI,  # Grok（OpenAI 兼容）
+    "aliyun": ChatOpenAI,  # 阿里云 DashScope（OpenAI 兼容）
 }
 
 # 延迟加载 Anthropic（需要额外依赖）
@@ -70,7 +71,7 @@ def create_provider(config: LLMProviderConfig, temperature: float = 0.1) -> Base
         "temperature": temperature,
         "api_key": config.api_key,
         "base_url": config.base_url,
-        "streaming": True,   # 兼容强制返回 SSE 的代理服务器
+        "streaming": False,   # DashScope 流式接口可能有问题，先禁用
         "max_retries": 2,
     }
 

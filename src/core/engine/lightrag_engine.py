@@ -57,12 +57,8 @@ async def llm_model_func(
     keyword_extraction: bool = False,
     **kwargs: Any,
 ) -> str:
-    """调用统一 LLM 工厂完成文本生成。
-
-    支持 OpenAI、Anthropic、DeepSeek 等多种提供商，
-    通过配置动态切换。
-    """
-    from src.core.llm.factory import get_llm
+    """调用 LLM 完成文本生成（用于 LightRAG）。"""
+    from langchain_openai import ChatOpenAI
 
     # 构建 LangChain 消息列表
     messages: list[HumanMessage | SystemMessage | AIMessage] = []
@@ -85,8 +81,15 @@ async def llm_model_func(
     # 添加当前提示
     messages.append(HumanMessage(content=prompt))
 
-    # 调用统一 LLM 工厂（忽略 LightRAG 传入的内部 kwargs 如 hashing_kv）
-    llm = await get_llm(model_type="default")
+    # 直接创建 LLM 实例（避免缓存问题）
+    llm = ChatOpenAI(
+        model=settings.openai_default_model,
+        temperature=0.1,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        streaming=False,
+        max_retries=2,
+    )
     response = await llm.ainvoke(messages)
 
     # 返回文本内容
@@ -117,6 +120,96 @@ rerank_model_func = partial(
 
 
 # 初始化
+
+
+async def warmup_connections() -> None:
+    """预热所有连接池，避免首次查询时的初始化开销。
+    
+    在应用启动时调用此函数，预先建立：
+    - Redis 连接池
+    - Milvus 向量数据库连接
+    - Neo4j 图数据库连接
+    - LLM 服务连接
+    - Embedding 服务连接
+    
+    这样可以将首次查询的初始化开销转移到应用启动阶段。
+    """
+    import asyncio
+    import time
+    
+    start = time.time()
+    print("[WARMUP] Starting connection pool warmup...")
+    
+    # 1. 预热 Redis 连接
+    print("[WARMUP] Step 1/5: Warming up Redis connections...")
+    redis_start = time.time()
+    from redis import asyncio as aioredis
+    redis_conn = aioredis.from_url(settings.redis_url)
+    try:
+        await redis_conn.ping()
+        await redis_conn.set("_warmup_test", "ok")
+        await redis_conn.get("_warmup_test")
+        await redis_conn.delete("_warmup_test")
+        print(f"[WARMUP] Redis warmup completed in {time.time() - redis_start:.2f}s")
+    finally:
+        await redis_conn.close()
+    
+    # 2. 预热 Milvus 连接
+    print("[WARMUP] Step 2/5: Warming up Milvus connections...")
+    milvus_start = time.time()
+    from pymilvus import MilvusClient
+    milvus_client = MilvusClient(uri=settings.milvus_uri)
+    try:
+        milvus_client.has_collection("chunks")
+        print(f"[WARMUP] Milvus warmup completed in {time.time() - milvus_start:.2f}s")
+    finally:
+        milvus_client.close()
+    
+    # 3. 预热 Neo4j 连接
+    print("[WARMUP] Step 3/5: Warming up Neo4j connections...")
+    neo4j_start = time.time()
+    from neo4j import AsyncGraphDatabase
+    neo4j_driver = AsyncGraphDatabase.driver(
+        settings.neo4j_uri.replace("bolt://", "neo4j://", 1),
+        auth=(settings.neo4j_username, settings.neo4j_password)
+    )
+    try:
+        async with neo4j_driver.session() as session:
+            await session.run("RETURN 1")
+        print(f"[WARMUP] Neo4j warmup completed in {time.time() - neo4j_start:.2f}s")
+    finally:
+        await neo4j_driver.close()
+    
+    # 4. 预热 Embedding 服务
+    print("[WARMUP] Step 4/5: Warming up Embedding service...")
+    embedding_start = time.time()
+    try:
+        # 使用我们已经定义的 embedding_func
+        await embedding_func(["warmup test"])
+        print(f"[WARMUP] Embedding warmup completed in {time.time() - embedding_start:.2f}s")
+    except Exception as e:
+        print(f"[WARMUP] Embedding warmup failed (may be expected): {e}")
+    
+    # 5. 预热 LLM 服务
+    print("[WARMUP] Step 5/5: Warming up LLM service...")
+    llm_start = time.time()
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(
+        model=settings.openai_default_model,
+        temperature=0.1,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        streaming=False,
+        max_retries=1,
+    )
+    try:
+        response = await llm.ainvoke("Hello, this is a warmup request.")
+        print(f"[WARMUP] LLM warmup completed in {time.time() - llm_start:.2f}s")
+    except Exception as e:
+        print(f"[WARMUP] LLM warmup failed (may be expected): {e}")
+    
+    total_time = time.time() - start
+    print(f"[WARMUP] All connections warmed up in {total_time:.2f}s")
 
 
 async def initialize_rag(workspace: str | None = None) -> LightRAG:
