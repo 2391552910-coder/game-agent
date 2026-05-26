@@ -53,9 +53,10 @@ async def schedule_offline_analysis(user_id: str, tenant_id: str, snapshot: dict
     # 提交 Prefect Deployment Run
     try:
         from prefect.deployments import run_deployment
+        from src.core.scheduler.flows.analysis_flow import DEPLOYMENT_NAME
 
         flow_run = await run_deployment(
-            name="analysis_flow/offline-analysis",
+            name=DEPLOYMENT_NAME,
             parameters={"user_id": user_id, "tenant_id": tenant_id, "snapshot": snapshot},
             timeout=0,  # 不等待执行完成，立即返回
         )

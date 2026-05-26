@@ -71,7 +71,7 @@ async def intent_inference_node(state: AnalysisState) -> dict[str, Any]:
         ])
 
         llm = await get_llm(model_type="fast")
-        llm_structured = llm.with_structured_output(InferredIntent, method="function_calling")
+        llm_structured = llm.with_structured_output(InferredIntent, method="json_mode")
         chain = prompt | llm_structured
 
         intent: InferredIntent = await asyncio.wait_for(
@@ -141,7 +141,7 @@ async def goal_evaluation_node(state: AnalysisState) -> dict[str, Any]:
         ])
 
         llm = await get_llm(model_type="default")
-        llm_structured = llm.with_structured_output(GoalEvaluationResult, method="function_calling")
+        llm_structured = llm.with_structured_output(GoalEvaluationResult, method="json_mode")
         chain = prompt | llm_structured
 
         evaluation: GoalEvaluationResult = await asyncio.wait_for(

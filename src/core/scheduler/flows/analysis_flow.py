@@ -19,8 +19,9 @@ from src.core.integration.robotgateway_callback import (
     send_robotgateway_analysis_callback,
 )
 
-FLOW_NAME = "offline-analysis"
-DEPLOYMENT_NAME = f"analysis_flow/{FLOW_NAME}"
+FLOW_NAME = "analysis_flow"
+DEPLOYMENT_NAME = "analysis_flow/offline-analysis"
+DEPLOYMENT_SHORT_NAME = "offline-analysis"
 
 
 @task(
@@ -46,31 +47,45 @@ async def fetch_snapshot_task(user_id: str) -> dict:
 )
 async def run_agent_task(user_id: str, tenant_id: str, snapshot: dict) -> dict:
     import asyncio
+    from time import perf_counter
 
     logger = get_run_logger()
     from src.core.agents.orchestrator import build_orchestrator
 
+    started = perf_counter()
+    logger.info("run-agent 启动, user_id=%s", user_id)
     graph = build_orchestrator().compile()
-    result = await asyncio.wait_for(
-        graph.ainvoke(
-            {
-                "user_id": user_id,
-                "tenant_id": tenant_id,
-                "snapshot": snapshot,
-                "rag_context": "",
-                "enriched_context": "",
-                "behavior_report": "",
-                "reasoned_actions": [],
-                "final_output": {},
-                "errors": [],
-                "tracking_summary": "",
-                "anomalies": [],
-                "abandoned_tracking_ids": [],
-            }
-        ),
-        timeout=300,
-    )
+    try:
+        result = await asyncio.wait_for(
+            graph.ainvoke(
+                {
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "snapshot": snapshot,
+                    "rag_context": "",
+                    "enriched_context": "",
+                    "behavior_report": "",
+                    "reasoned_actions": [],
+                    "final_output": {},
+                    "errors": [],
+                    "tracking_summary": "",
+                    "anomalies": [],
+                    "abandoned_tracking_ids": [],
+                }
+            ),
+            timeout=300,
+        )
+    finally:
+        elapsed_ms = (perf_counter() - started) * 1000
+        logger.info("run-agent 结束, user_id=%s, elapsed_ms=%.2f", user_id, elapsed_ms)
+
     output = result.get("final_output", {})
+    errors = result.get("errors", [])
+    if errors or not output:
+        error_text = "; ".join(str(error) for error in errors) if errors else "final_output为空"
+        logger.error("Agent 分析失败, user_id=%s: %s", user_id, error_text)
+        raise RuntimeError(f"Agent 分析失败: {error_text}")
+
     logger.info("Agent 分析完成, user_id=%s", user_id)
     return output
 

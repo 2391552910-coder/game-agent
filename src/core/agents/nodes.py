@@ -14,18 +14,11 @@ END
 
 import json
 import logging
+from time import perf_counter
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
-
-# ── 防循环/防卡死常量 ──
-# gather_context: 最多 N 轮 LLM 对话（每轮可含多个 tool_call）
-_MAX_GATHER_ITERATIONS = 3
-# gather_context: 总工具调用次数上限（跨所有轮次累计）
-_MAX_TOTAL_TOOL_CALLS = 8
-# 单次外部调用超时（秒）: RAG 检索、LLM 调用、工具执行
-_SINGLE_CALL_TIMEOUT = 60
 
 from src.core.agents.models import ActionList, BehaviorProfile, PlayerAnalysisOutput, RecommendedAction
 from src.core.agents.prompts import (
@@ -39,6 +32,14 @@ from src.core.agents.state import AnalysisState
 from src.core.agents.tools import create_tools
 from src.core.engine.lightrag_engine import get_rag
 from src.core.llm.factory import get_llm
+
+# ── 防循环/防卡死常量 ──
+# gather_context: 最多 N 轮 LLM 对话（每轮可含多个 tool_call）
+_MAX_GATHER_ITERATIONS = 3
+# gather_context: 总工具调用次数上限（跨所有轮次累计）
+_MAX_TOTAL_TOOL_CALLS = 8
+# 单次外部调用超时（秒）: RAG 检索、LLM 调用、工具执行
+_SINGLE_CALL_TIMEOUT = 60
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +77,29 @@ async def retrieve_rag_context_node(state: AnalysisState) -> dict[str, Any]:
 
         from lightrag import QueryParam
 
+        from src.config import settings
+
+        rag_start = perf_counter()
         rag = await get_rag()
+        rag_get_elapsed_ms = (perf_counter() - rag_start) * 1000
+
+        query_start = perf_counter()
         context = await asyncio.wait_for(
-            rag.aquery(query, param=QueryParam(mode="hybrid")),
+            rag.aquery(
+                query,
+                param=QueryParam(mode="hybrid", enable_rerank=settings.rerank_enabled),
+            ),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
+        query_elapsed_ms = (perf_counter() - query_start) * 1000
         logger.info(
-            "[retrieve_rag_context] 检索完成, context_length=%d, query=%s",
+            (
+                "[retrieve_rag_context] 检索完成, "
+                "lightrag_get_elapsed_ms=%.2f, lightrag_query_elapsed_ms=%.2f, "
+                "context_length=%d, query=%s"
+            ),
+            rag_get_elapsed_ms,
+            query_elapsed_ms,
             len(context),
             query[:80],
         )
@@ -139,12 +156,25 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
     snapshot_text = json.dumps(snapshot, ensure_ascii=False) if isinstance(snapshot, dict) else str(snapshot)
     rag_context = state.get("rag_context", "") or "（无额外规则上下文）"
 
+    from src.config import settings
+
     tools = create_tools(state["tenant_id"], state["user_id"], state.get("snapshot"))
+    if not settings.gather_context_enable_dynamic_rag:
+        tools = [tool for tool in tools if tool.name != "dynamic_rag_query"]
+
     llm = await get_llm(model_type="fast")
     llm_with_tools = llm.bind_tools(tools)
 
+    system_prompt = CONTEXT_GATHERING_SYSTEM
+    if not settings.gather_context_enable_dynamic_rag:
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            "当前运行模式已禁用 dynamic_rag_query。不要调用该工具；"
+            "优先使用已有 RAG 上下文以及历史、追踪、异常检测类工具。"
+        )
+
     messages = [
-        SystemMessage(content=CONTEXT_GATHERING_SYSTEM),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=f"玩家快照:\n{snapshot_text}\n\n已有RAG上下文:\n{rag_context}"),
     ]
 
@@ -192,9 +222,9 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
                             tool_fn.ainvoke(tool_args),
                             timeout=_SINGLE_CALL_TIMEOUT,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.warning("[gather_context] 工具 %s 执行超时 (%ds)", tool_name, _SINGLE_CALL_TIMEOUT)
-                        result = f"工具执行超时"
+                        result = "工具执行超时"
                     except Exception as e:
                         logger.error("[gather_context] 工具 %s 执行失败: %s", tool_name, e)
                         result = f"工具执行失败: {e}"
@@ -260,7 +290,7 @@ async def behavior_analysis_node(state: AnalysisState) -> dict[str, Any]:
     ])
 
     llm = await get_llm(model_type="fast")
-    llm = llm.with_structured_output(BehaviorProfile, method="function_calling")
+    llm = llm.with_structured_output(BehaviorProfile, method="json_mode")
     chain = prompt | llm
 
     try:
@@ -306,7 +336,11 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
     intent_result = state.get("intent_result") or {}
     goal_evaluation_result = state.get("goal_evaluation_result") or {}
     intent_text = json.dumps(intent_result, ensure_ascii=False) if intent_result else "（无意图推断数据）"
-    goal_eval_text = json.dumps(goal_evaluation_result, ensure_ascii=False) if goal_evaluation_result else "（无目标校验数据）"
+    goal_eval_text = (
+        json.dumps(goal_evaluation_result, ensure_ascii=False)
+        if goal_evaluation_result
+        else "（无目标校验数据）"
+    )
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", ACTION_REASONING_SYSTEM),
@@ -314,7 +348,7 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
     ])
 
     llm = await get_llm(model_type="default")
-    llm = llm.with_structured_output(ActionList, method="function_calling")
+    llm = llm.with_structured_output(ActionList, method="json_mode")
     chain = prompt | llm
 
     try:
@@ -391,12 +425,12 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
 
     只处理有 goal_metric 的行动，无法量化完成条件的行动不追踪。
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import text
 
-    from src.core.infrastructure.db import get_session
     from src.core.agents.tools import _extract_metric
+    from src.core.infrastructure.db import get_session
 
     user_id = state["user_id"]
     tenant_id = state["tenant_id"]
@@ -405,7 +439,7 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
     actions = final_output.get("recommended_actions", [])
     abandoned_tracking_ids = set(state.get("abandoned_tracking_ids", []))
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # ── 步骤1：更新旧追踪记录状态（独立事务）──
     old_rows_count = 0
@@ -446,7 +480,7 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
                     deadline_dt = (
                         row.deadline
                         if row.deadline.tzinfo
-                        else row.deadline.replace(tzinfo=timezone.utc)
+                        else row.deadline.replace(tzinfo=UTC)
                     )
                     if now > deadline_dt:
                         new_status = "timeout"

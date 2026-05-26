@@ -28,7 +28,15 @@
 ========
 """
 
-from typing import TypedDict
+import os
+import random
+import time
+from typing import Any, TypedDict
+from urllib.parse import quote
+
+import httpx
+
+from src.config import settings
 
 
 class PlayerSnapshot(TypedDict, total=False):
@@ -275,14 +283,6 @@ class PlayerSnapshot(TypedDict, total=False):
     }
 """
 
-import os
-import random
-import time
-from datetime import datetime
-from typing import Any
-
-from src.core.infrastructure.db import get_session
-
 _TEMPLATE_NAMES = ("competitive", "explorer", "casual", "social", "whale")
 
 
@@ -296,6 +296,9 @@ async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
 
     平台在玩家离线时调用此函数获取当前状态。
     游戏厂商需连接自己的数据库实现此函数。
+
+    当环境变量 GAME_DATA_SOURCE=robotgateway 或配置 ROBOTGATEWAY_BASE_URL 时，
+    通过 HTTP 主动向 RobotGateway 拉取玩家快照。
 
     当环境变量 SIMULATE_GAME_SERVER=1 时，使用内置模拟数据，
     用于无真实游戏服务器的测试环境。
@@ -317,6 +320,23 @@ async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
     DatabaseError
         当数据库连接或查询失败时抛出
     """
+    data_source = os.environ.get("GAME_DATA_SOURCE", settings.game_data_source).strip().lower()
+    robotgateway_base_url = os.environ.get("ROBOTGATEWAY_BASE_URL", settings.robotgateway_base_url or "").strip()
+    if data_source == "robotgateway" or robotgateway_base_url:
+        if not robotgateway_base_url:
+            raise DatabaseError("GAME_DATA_SOURCE=robotgateway 时必须配置 ROBOTGATEWAY_BASE_URL")
+        return await _fetch_robotgateway_snapshot(
+            user_id=user_id,
+            base_url=robotgateway_base_url,
+            api_key=os.environ.get("ROBOTGATEWAY_SNAPSHOT_API_KEY", settings.robotgateway_snapshot_api_key or ""),
+            timeout_seconds=float(
+                os.environ.get(
+                    "ROBOTGATEWAY_SNAPSHOT_TIMEOUT_SECONDS",
+                    str(settings.robotgateway_snapshot_timeout_seconds),
+                )
+            ),
+        )
+
     if os.environ.get("SIMULATE_GAME_SERVER", "").lower() in ("1", "true", "yes"):
         return await _fetch_simulated_snapshot(user_id)
 
@@ -325,6 +345,37 @@ async def fetch_player_snapshot(user_id: str) -> PlayerSnapshot:
         "参考 src/game_specific/connector.py 中的文档和示例。\n"
         "测试环境可设置 SIMULATE_GAME_SERVER=1 使用模拟数据。"
     )
+
+
+async def _fetch_robotgateway_snapshot(
+    *,
+    user_id: str,
+    base_url: str,
+    api_key: str | None,
+    timeout_seconds: float,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> PlayerSnapshot:
+    """通过 RobotGateway HTTP 接口获取玩家快照。"""
+    safe_user_id = quote(user_id, safe="")
+    url = f"{base_url.rstrip('/')}/players/{safe_user_id}/snapshot"
+    headers = {"X-API-Key": api_key} if api_key else {}
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds, transport=transport) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise DatabaseError(f"RobotGateway 快照请求失败: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise DatabaseError("RobotGateway 快照响应必须是 JSON object")
+
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else payload
+    if not isinstance(snapshot, dict):
+        raise DatabaseError("RobotGateway 快照响应缺少有效 snapshot")
+    snapshot.setdefault("user_id", user_id)
+    return PlayerSnapshot(snapshot)
 
 
 async def _fetch_simulated_snapshot(user_id: str) -> PlayerSnapshot:

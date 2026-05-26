@@ -5,8 +5,7 @@
 
 import pytest
 
-from src.core.agents.orchestrator import build_orchestrator
-from src.core.agents.state import AnalysisState
+from src.core.agents.orchestrator import _timed_node, build_orchestrator
 
 
 class TestBuildOrchestrator:
@@ -66,3 +65,20 @@ class TestBuildOrchestrator:
             "memory_update",
         ]:
             assert name in nodes, f"缺少节点: {name}"
+
+    @pytest.mark.asyncio
+    async def test_timed_node_logs_elapsed_ms(self, caplog, capsys):
+        async def fake_node(state: dict) -> dict:
+            return {"rag_context": "ok"}
+
+        wrapped = _timed_node("retrieve_rag_context", fake_node)
+
+        with caplog.at_level("INFO", logger="src.core.agents.orchestrator"):
+            result = await wrapped({"user_id": "player_001"})
+
+        assert result == {"rag_context": "ok"}
+        assert "[agent_node_timing]" in caplog.text
+        assert "node=retrieve_rag_context" in caplog.text
+        assert "elapsed_ms=" in caplog.text
+        captured = capsys.readouterr()
+        assert "TIMING kind=agent_node node=retrieve_rag_context status=completed" in captured.out

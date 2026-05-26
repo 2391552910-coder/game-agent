@@ -23,8 +23,8 @@ _fallback_cache: dict[str, BaseChatModel] = {}
 async def get_llm(model_type: str = "default", temperature: float = 0.1) -> BaseChatModel:
     """获取 LLM 实例。
 
-    优先从 LoadBalancer 获取（DB 配置的 provider pool），
-    无可用 provider 时回退到 .env 配置。
+    默认使用 .env 配置；仅当 LLM_PROVIDER_SOURCE=db 时，
+    才优先从 LoadBalancer 获取 DB 配置的 provider pool。
 
     Args:
         model_type: "default" 或 "fast"
@@ -33,8 +33,12 @@ async def get_llm(model_type: str = "default", temperature: float = 0.1) -> Base
     Returns:
         LangChain BaseChatModel 实例
     """
-    from src.core.llm.balancer import NoProviderAvailable, balancer
+    provider_source = (settings.llm_provider_source or "env").strip().lower()
+    if provider_source != "db":
+        logger.debug("[factory] 使用 .env LLM 配置, model_type=%s", model_type)
+        return _fallback_llm(model_type, temperature)
 
+    from src.core.llm.balancer import NoProviderAvailable, balancer
     try:
         return await balancer.select(model_type, temperature)
     except NoProviderAvailable:

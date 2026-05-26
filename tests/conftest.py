@@ -37,6 +37,7 @@ def _mock_settings():
     mock.embedding_model = "text-embedding-v3"
     mock.embedding_dim = 1536
     # Rerank
+    mock.rerank_enabled = False
     mock.rerank_api_key = "sk-test-key"
     mock.rerank_model = "gte-rerank"
     # PostgreSQL
@@ -55,9 +56,17 @@ def _mock_settings():
     mock.milvus_db_name = "lightrag"
     # Game DB
     mock.game_db_dsn = None
+    mock.game_data_source = ""
+    mock.robotgateway_base_url = None
+    mock.robotgateway_snapshot_api_key = None
+    mock.robotgateway_snapshot_timeout_seconds = 10.0
     # RAG
     mock.rag_working_dir = "/tmp/rag_storage"
     mock.rag_default_strategy = "hybrid"
+    mock.gather_context_enable_dynamic_rag = False
+    mock.lightrag_llm_max_async = 1
+    mock.lightrag_chunk_token_size = 512
+    mock.lightrag_chunk_overlap_token_size = 256
     # 调度
     mock.max_concurrent_analyses = 20
     mock.offline_trigger_minutes = 5

@@ -64,7 +64,13 @@ BEHAVIOR_ANALYSIS_SYSTEM = """你是一个实体行为分析师。
 要求：
 - 基于数据事实分析，不要凭空推测
 - 风格判断要结合领域规则和上下文
-- 如果有历史趋势数据，重点关注变化方向（上升/下降/稳定）"""
+- 如果有历史趋势数据，重点关注变化方向（上升/下降/稳定）
+
+输出要求：
+- 只输出 JSON 对象，不要输出 Markdown 或解释性文本
+- JSON 必须包含 playstyle、current_goal、bottlenecks、engagement_level
+- current_goal 和 bottlenecks 必须是字符串数组
+- engagement_level 只能是 high、medium、low"""
 
 BEHAVIOR_ANALYSIS_USER = """分析以下实体数据：
 
@@ -79,10 +85,10 @@ BEHAVIOR_ANALYSIS_USER = """分析以下实体数据：
 
 # ── 行动推理 ──
 
-ACTION_REASONING_SYSTEM = f"""你是一个策略推理专家。
+ACTION_REASONING_SYSTEM = """你是一个策略推理专家。
 根据实体行为分析报告、领域规则、上次行动完成情况和当前异常，推理出最优行动方案。
 
-{AGENT_V1_ACTION_BOUNDARY}
+""" + AGENT_V1_ACTION_BOUNDARY + """
 
 允许的 payload 约束：
 - observe_current_state：payload 使用空对象，或只包含观察范围，例如 {{"scope": "self"}}
@@ -116,7 +122,15 @@ ACTION_REASONING_SYSTEM = f"""你是一个策略推理专家。
 - 如果 decision=downgrade，推荐更容易达成的基础行为子目标
 - 如果 decision=switch，推荐与 suggested_goal 对齐的新方向，但不得输出暂不开放能力
 - 如果 decision=new，结合 intent_result 中的 next_likely 和玩家历史记忆推荐起始目标
-- intent_result 中 next_likely 排名第一的意图应优先体现，但如果它超出第一版能力范围，只能输出对应的基础观察或移动行动"""
+- intent_result 中 next_likely 排名第一的意图应优先体现，但如果它超出第一版能力范围，只能输出对应的基础观察或移动行动
+
+输出要求：
+- 只输出 JSON 对象，不要输出 Markdown 或解释性文本
+- JSON 顶层必须是 actions 数组
+- actions 每一项必须包含 action_type、priority、reason、payload
+- 可选包含 goal_metric、goal_value、expected_hours
+- action_type 只能使用允许列表中的五类基础动作
+- priority 只能是 high、medium、low"""
 
 ACTION_REASONING_USER = """行为分析报告：
 {behavior_report}

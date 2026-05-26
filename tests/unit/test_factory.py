@@ -19,21 +19,44 @@ _FACTORY_SETTINGS = "src.core.llm.factory.settings"
 
 class TestGetLlm:
     @pytest.mark.asyncio
-    async def test_balancer_success(self):
+    async def test_env_source_uses_settings_without_balancer(self):
+        import src.core.llm.factory as factory_mod
+        factory_mod._fallback_cache.clear()
+
+        with patch(_BALANCER_PATH) as mock_balancer:
+            mock_balancer.select = AsyncMock()
+            with patch(_FACTORY_SETTINGS) as mock_s:
+                mock_s.llm_provider_source = "env"
+                mock_s.openai_default_model = "test-env-model"
+                mock_s.openai_api_key = "sk-test"
+                mock_s.openai_base_url = "http://test"
+                result = await get_llm("default", 0.1)
+
+        mock_balancer.select.assert_not_called()
+        assert result.model_name == "test-env-model"
+
+    @pytest.mark.asyncio
+    async def test_db_source_balancer_success(self):
         mock_llm = MagicMock()
         mock_llm.model_name = "from-balancer"
 
         with patch(_BALANCER_PATH) as mock_balancer:
             mock_balancer.select = AsyncMock(return_value=mock_llm)
-            result = await get_llm("default", 0.1)
+            with patch(_FACTORY_SETTINGS) as mock_s:
+                mock_s.llm_provider_source = "db"
+                result = await get_llm("default", 0.1)
 
         assert result.model_name == "from-balancer"
 
     @pytest.mark.asyncio
-    async def test_fallback_on_no_provider(self):
+    async def test_db_source_fallback_on_no_provider(self):
+        import src.core.llm.factory as factory_mod
+        factory_mod._fallback_cache.clear()
+
         with patch(_BALANCER_PATH) as mock_balancer:
             mock_balancer.select = AsyncMock(side_effect=NoProviderAvailable())
             with patch(_FACTORY_SETTINGS) as mock_s:
+                mock_s.llm_provider_source = "db"
                 mock_s.openai_default_model = "test-model-default"
                 mock_s.openai_api_key = "sk-test"
                 mock_s.openai_base_url = "http://test"
@@ -43,9 +66,13 @@ class TestGetLlm:
 
     @pytest.mark.asyncio
     async def test_fast_model_type(self):
+        import src.core.llm.factory as factory_mod
+        factory_mod._fallback_cache.clear()
+
         with patch(_BALANCER_PATH) as mock_balancer:
             mock_balancer.select = AsyncMock(side_effect=NoProviderAvailable())
             with patch(_FACTORY_SETTINGS) as mock_s:
+                mock_s.llm_provider_source = "db"
                 mock_s.openai_fast_model = "test-model-fast"
                 mock_s.openai_api_key = "sk-test"
                 mock_s.openai_base_url = "http://test"

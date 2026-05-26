@@ -123,7 +123,7 @@ uv run python scripts/seed_provider.py
 ### 8. 启动服务
 
 ```bash
-uv run python main.py
+uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 服务默认监听 `http://localhost:8000`。

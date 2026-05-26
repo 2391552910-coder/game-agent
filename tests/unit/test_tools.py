@@ -110,6 +110,33 @@ class TestDynamicRagQuery:
             assert "PVP" in result
 
     @pytest.mark.asyncio
+    async def test_successful_query_logs_lightrag_timing(self, caplog):
+        mock_rag = AsyncMock()
+        mock_rag.aquery = AsyncMock(return_value="PVP匹配规则: 随机匹配")
+
+        with (
+            patch("src.core.engine.lightrag_engine.get_rag", AsyncMock(return_value=mock_rag)),
+            caplog.at_level("INFO", logger="src.core.agents.tools"),
+        ):
+            result = await _dynamic_rag_query("PVP匹配机制")
+
+        assert "PVP" in result
+        assert "lightrag_get_elapsed_ms=" in caplog.text
+        assert "lightrag_query_elapsed_ms=" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_dynamic_rag_query_disables_rerank_by_default(self):
+        mock_rag = AsyncMock()
+        mock_rag.aquery = AsyncMock(return_value="PVP匹配规则: 随机匹配")
+
+        with patch("src.core.engine.lightrag_engine.get_rag", AsyncMock(return_value=mock_rag)):
+            result = await _dynamic_rag_query("PVP匹配机制")
+
+        assert "PVP" in result
+        query_param = mock_rag.aquery.call_args.kwargs["param"]
+        assert query_param.enable_rerank is False
+
+    @pytest.mark.asyncio
     async def test_empty_result(self):
         mock_rag = AsyncMock()
         mock_rag.aquery = AsyncMock(return_value="")

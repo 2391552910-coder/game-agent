@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     cors_allowed_origins: list[str] = Field(default=["http://localhost:8000"])
 
     # ── LLM ──
+    llm_provider_source: str = Field(default="env")
     llm_provider: str = Field(default="deepseek")
     openai_api_key: str = Field(...)
     openai_base_url: str = Field(...)
@@ -30,6 +31,7 @@ class Settings(BaseSettings):
     embedding_dim: int = Field(default=1024)
 
     # ── Rerank（DashScope / Qwen gte-rerank-v2） ──
+    rerank_enabled: bool = Field(default=False)
     rerank_api_key: str = Field(...)
     rerank_model: str = Field(default="gte-rerank-v2")
 
@@ -53,10 +55,18 @@ class Settings(BaseSettings):
 
     # ── Game DB ──
     game_db_dsn: PostgresDsn | None = Field(default=None)
+    game_data_source: str = Field(default="")
+    robotgateway_base_url: str | None = Field(default=None)
+    robotgateway_snapshot_api_key: str | None = Field(default=None)
+    robotgateway_snapshot_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
 
     # ── RAG ──
     rag_default_strategy: str = Field(default="hybrid")
     rag_working_dir: str = Field(default="./rag_storage")
+    gather_context_enable_dynamic_rag: bool = Field(default=False)
+    lightrag_llm_max_async: int = Field(default=1, ge=1)
+    lightrag_chunk_token_size: int = Field(default=512, ge=1)
+    lightrag_chunk_overlap_token_size: int = Field(default=256, ge=0)
 
     # ── 调度 ──
     max_concurrent_analyses: int = Field(default=20, ge=1, le=100)

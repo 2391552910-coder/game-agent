@@ -9,17 +9,21 @@
 LLM 集成：使用统一 LLM 工厂，支持多提供商。
 """
 
+import logging
 import os
 from functools import partial
+from time import perf_counter
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from lightrag import LightRAG
-from lightrag.llm.openai import openai_embed
 from lightrag.rerank import ali_rerank
 from lightrag.utils import EmbeddingFunc
 
 from src.config import settings
+from src.core.engine.embedding import embed_texts
+
+logger = logging.getLogger(__name__)
 
 # 工作目录
 
@@ -101,22 +105,28 @@ async def llm_model_func(
 embedding_func = EmbeddingFunc(
     embedding_dim=settings.embedding_dim,
     max_token_size=8192,
-    func=lambda texts: openai_embed.func(
+    func=lambda texts: embed_texts(
         texts,
         model=settings.embedding_model,
         api_key=settings.embedding_api_key,
         base_url=settings.embedding_base_url,
+        embedding_dim=settings.embedding_dim,
     ),
 )
 
 
 # Rerank 函数（Qwen gte-rerank-v2）
 
-rerank_model_func = partial(
-    ali_rerank,
-    api_key=settings.rerank_api_key,
-    model=settings.rerank_model,
-)
+
+def _build_rerank_model_func():
+    if not settings.rerank_enabled:
+        return None
+
+    return partial(
+        ali_rerank,
+        api_key=settings.rerank_api_key,
+        model=settings.rerank_model,
+    )
 
 
 # 初始化
@@ -124,22 +134,21 @@ rerank_model_func = partial(
 
 async def warmup_connections() -> None:
     """预热所有连接池，避免首次查询时的初始化开销。
-    
+
     在应用启动时调用此函数，预先建立：
     - Redis 连接池
     - Milvus 向量数据库连接
     - Neo4j 图数据库连接
     - LLM 服务连接
     - Embedding 服务连接
-    
+
     这样可以将首次查询的初始化开销转移到应用启动阶段。
     """
-    import asyncio
     import time
-    
+
     start = time.time()
     print("[WARMUP] Starting connection pool warmup...")
-    
+
     # 1. 预热 Redis 连接
     print("[WARMUP] Step 1/5: Warming up Redis connections...")
     redis_start = time.time()
@@ -153,7 +162,7 @@ async def warmup_connections() -> None:
         print(f"[WARMUP] Redis warmup completed in {time.time() - redis_start:.2f}s")
     finally:
         await redis_conn.close()
-    
+
     # 2. 预热 Milvus 连接
     print("[WARMUP] Step 2/5: Warming up Milvus connections...")
     milvus_start = time.time()
@@ -164,7 +173,7 @@ async def warmup_connections() -> None:
         print(f"[WARMUP] Milvus warmup completed in {time.time() - milvus_start:.2f}s")
     finally:
         milvus_client.close()
-    
+
     # 3. 预热 Neo4j 连接
     print("[WARMUP] Step 3/5: Warming up Neo4j connections...")
     neo4j_start = time.time()
@@ -179,7 +188,7 @@ async def warmup_connections() -> None:
         print(f"[WARMUP] Neo4j warmup completed in {time.time() - neo4j_start:.2f}s")
     finally:
         await neo4j_driver.close()
-    
+
     # 4. 预热 Embedding 服务
     print("[WARMUP] Step 4/5: Warming up Embedding service...")
     embedding_start = time.time()
@@ -189,7 +198,7 @@ async def warmup_connections() -> None:
         print(f"[WARMUP] Embedding warmup completed in {time.time() - embedding_start:.2f}s")
     except Exception as e:
         print(f"[WARMUP] Embedding warmup failed (may be expected): {e}")
-    
+
     # 5. 预热 LLM 服务
     print("[WARMUP] Step 5/5: Warming up LLM service...")
     llm_start = time.time()
@@ -203,11 +212,11 @@ async def warmup_connections() -> None:
         max_retries=1,
     )
     try:
-        response = await llm.ainvoke("Hello, this is a warmup request.")
+        await llm.ainvoke("Hello, this is a warmup request.")
         print(f"[WARMUP] LLM warmup completed in {time.time() - llm_start:.2f}s")
     except Exception as e:
         print(f"[WARMUP] LLM warmup failed (may be expected): {e}")
-    
+
     total_time = time.time() - start
     print(f"[WARMUP] All connections warmed up in {total_time:.2f}s")
 
@@ -227,10 +236,11 @@ async def initialize_rag(workspace: str | None = None) -> LightRAG:
         workspace=workspace,
         llm_model_func=llm_model_func,
         embedding_func=embedding_func,
-        rerank_model_func=rerank_model_func,
+        rerank_model_func=_build_rerank_model_func(),
+        llm_model_max_async=settings.lightrag_llm_max_async,
         summary_max_tokens=10000,
-        chunk_token_size=512,
-        chunk_overlap_token_size=256,
+        chunk_token_size=settings.lightrag_chunk_token_size,
+        chunk_overlap_token_size=settings.lightrag_chunk_overlap_token_size,
         kv_storage="RedisKVStorage",
         graph_storage="Neo4JStorage",
         vector_storage="MilvusVectorDBStorage",
@@ -270,7 +280,15 @@ async def get_rag(workspace: str | None = None) -> LightRAG:
     """
     global _rag
     if _rag is None:
+        started = perf_counter()
+        logger.info("[lightrag_timing] initialization status=started workspace=%s", workspace or "default")
         _rag = await initialize_rag(workspace=workspace)
+        elapsed_ms = (perf_counter() - started) * 1000
+        logger.info(
+            "[lightrag_timing] initialization status=completed elapsed_ms=%.2f workspace=%s",
+            elapsed_ms,
+            workspace or "default",
+        )
     return _rag
 
 

@@ -79,3 +79,32 @@ async def test_analysis_flow_stores_result_before_callback(monkeypatch):
     )
 
     assert events == ["run_agent", "store_result", "send_callback"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_task_raises_when_graph_reports_errors(monkeypatch):
+    class FakeGraph:
+        async def ainvoke(self, state):
+            return {
+                "final_output": {},
+                "errors": ["行为分析失败: provider rejected structured output"],
+            }
+
+    class FakeBuilder:
+        def compile(self):
+            return FakeGraph()
+
+    def fake_build_orchestrator():
+        return FakeBuilder()
+
+    monkeypatch.setattr(
+        "src.core.agents.orchestrator.build_orchestrator",
+        fake_build_orchestrator,
+    )
+
+    with pytest.raises(RuntimeError, match="Agent 分析失败"):
+        await flow_module.run_agent_task.fn(
+            user_id="player_001",
+            tenant_id="tenant_001",
+            snapshot={"level": 28},
+        )

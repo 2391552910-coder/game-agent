@@ -43,7 +43,13 @@ INTENT_INFERENCE_SYSTEM = f"""你是一个玩家行为分析师，专门从会�
 - 行为序列较短或模糊时，置信度设为 low
 - next_likely 要结合玩家历史记忆中的偏好和目标历史
 - 如果行为序列为空，session_summary 说明数据不足，next_likely 参考历史记忆推断
-- 如果玩家最可能的真实意图超出第一版能力范围，应同时给出一个可执行的基础行为替代方向"""
+- 如果玩家最可能的真实意图超出第一版能力范围，应同时给出一个可执行的基础行为替代方向
+
+输出要求：
+- 只输出 JSON 对象，不要输出 Markdown 或解释性文本
+- JSON 必须包含 completed、abandoned、next_likely、intent_confidence、session_summary
+- completed、abandoned、next_likely 必须是字符串数组
+- intent_confidence 只能是 high、medium、low"""
 
 INTENT_INFERENCE_USER = """玩家 ID：{user_id}
 
@@ -83,7 +89,14 @@ GOAL_EVALUATION_SYSTEM = f"""你是一个决策分析师，负责评估玩家目
 - 玩家当前状态是否支持执行基础动作
 - 领域规则中是否明确存在相关地点或基础动作
 
-feasibility_issues 只列实际存在的问题，不要虚构。"""
+feasibility_issues 只列实际存在的问题，不要虚构。
+
+输出要求：
+- 只输出 JSON 对象，不要输出 Markdown 或解释性文本
+- JSON 必须包含 has_active_goal、decision、decision_reason
+- goal_progress、cost_deviation、suggested_goal、suggested_goal_type 可以为 null
+- feasibility_issues 必须是字符串数组
+- decision 只能是 continue、downgrade、switch、new"""
 
 GOAL_EVALUATION_USER = """玩家快照：
 {snapshot_text}

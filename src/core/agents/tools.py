@@ -16,7 +16,8 @@ LLM 只需传业务参数（如 limit），无需感知租户隔离细节。
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from time import perf_counter
 
 from langchain_core.tools import tool
 
@@ -131,10 +132,30 @@ async def _dynamic_rag_query(query: str) -> str:
     """动态 RAG 检索的核心实现。"""
     from lightrag import QueryParam
 
+    from src.config import settings
     from src.core.engine.lightrag_engine import get_rag
 
+    rag_start = perf_counter()
     rag = await get_rag()
-    context = await rag.aquery(query, param=QueryParam(mode="hybrid"))
+    rag_get_elapsed_ms = (perf_counter() - rag_start) * 1000
+
+    query_start = perf_counter()
+    context = await rag.aquery(
+        query,
+        param=QueryParam(mode="hybrid", enable_rerank=settings.rerank_enabled),
+    )
+    query_elapsed_ms = (perf_counter() - query_start) * 1000
+    logger.info(
+        (
+            "[dynamic_rag_query] 检索完成, "
+            "lightrag_get_elapsed_ms=%.2f, lightrag_query_elapsed_ms=%.2f, "
+            "context_length=%d, query=%s"
+        ),
+        rag_get_elapsed_ms,
+        query_elapsed_ms,
+        len(context or ""),
+        query[:80],
+    )
     return context if context else "未找到相关内容"
 
 
@@ -150,7 +171,7 @@ async def _get_action_tracking(user_id: str, tenant_id: str, snapshot: dict) -> 
 
     from src.core.infrastructure.db import get_session
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with get_session() as session:
         result = await session.execute(
@@ -201,7 +222,7 @@ async def _get_action_tracking(user_id: str, tenant_id: str, snapshot: dict) -> 
 
         # 截止时间兜底
         if computed_status == "tracking" and row.deadline:
-            deadline_dt = row.deadline if row.deadline.tzinfo else row.deadline.replace(tzinfo=timezone.utc)
+            deadline_dt = row.deadline if row.deadline.tzinfo else row.deadline.replace(tzinfo=UTC)
             if now > deadline_dt:
                 computed_status = "timeout"
                 progress_desc += f"（已超过截止时间 {deadline_dt.isoformat()}）"
@@ -329,7 +350,7 @@ async def _detect_anomaly(user_id: str, tenant_id: str, snapshot: dict) -> str:
     from src.core.infrastructure.db import get_session
 
     anomalies: list[str] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with get_session() as session:
         # 规则1：查询超时行动数量

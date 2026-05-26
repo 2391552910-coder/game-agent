@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-myAgent v2.0 是一个多租户游戏玩家行为分析与预测平台。游戏服务器通过 Webhook 发送玩家数据，平台使用 LangGraph Agent 编排 + LightRAG 知识图谱检索，生成结构化的玩家行为分析和推荐行动。
+myAgent v2.0 是一个多租户游戏玩家行为分析与预测平台。RobotGateway通过 Webhook 发送玩家数据，平台使用 LangGraph Agent 编排 + LightRAG 知识图谱检索，生成结构化的玩家行为分析和推荐行动，生成推荐行动后返回给RobotGateway。
 
 ## Common Commands
 
@@ -57,7 +57,7 @@ FastAPI (API 层) → Prefect (调度层) → LangGraph (Agent 层) → LightRAG
 ### LLM 提供商抽象层 (core/llm/)
 
 多提供商加权轮询负载均衡 + 健康降级机制:
-- `base.py`: `LLMProvider` 基类，定义 `invoke()` / `stream()` 接口
+- `models.py`: LLM Provider 配置、创建、更新和响应模型
 - `balancer.py`: `LLMBalancer` 加权轮询，支持按 provider 权重和健康状态动态调度
 - `factory.py`: `LLMFactory` 工厂，按名称创建 provider 实例
 - `providers/`: 具体实现（DeepSeek 等 OpenAI 兼容端点）

@@ -25,9 +25,13 @@ async def lifespan(app: FastAPI):
     logger.info("服务启动中...")
     await init_db()
     await init_redis()
-    from src.core.llm.balancer import balancer
 
-    await balancer.initialize()
+    if (settings.llm_provider_source or "env").strip().lower() == "db":
+        from src.core.llm.balancer import balancer
+
+        await balancer.initialize()
+    else:
+        logger.info("LLM 使用 .env 配置，跳过 DB provider 预加载")
     logger.info("所有服务初始化完成")
     yield
     logger.info("服务关闭中...")

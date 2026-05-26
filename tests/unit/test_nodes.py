@@ -3,7 +3,6 @@
 所有外部依赖（LLM, RAG, DB）均被 mock，只测试节点逻辑。
 """
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +17,7 @@ from src.core.agents.nodes import (
     merge_output_node,
     retrieve_rag_context_node,
 )
+from src.core.agents.prompts import ACTION_REASONING_SYSTEM, ACTION_REASONING_USER
 
 
 def _base_state(**overrides) -> dict:
@@ -82,6 +82,33 @@ class TestRetrieveRagContext:
             result = await retrieve_rag_context_node(state)
 
         assert result["rag_context"] == "商业区开放时间: 9:00-22:00"
+
+    @pytest.mark.asyncio
+    async def test_successful_retrieval_logs_lightrag_timing(self, caplog):
+        mock_rag = AsyncMock()
+        mock_rag.aquery = AsyncMock(return_value="商业区开放时间: 9:00-22:00")
+
+        with (
+            patch("src.core.agents.nodes.get_rag", AsyncMock(return_value=mock_rag)),
+            caplog.at_level("INFO", logger="src.core.agents.nodes"),
+        ):
+            result = await retrieve_rag_context_node(_base_state())
+
+        assert result["rag_context"] == "商业区开放时间: 9:00-22:00"
+        assert "lightrag_get_elapsed_ms=" in caplog.text
+        assert "lightrag_query_elapsed_ms=" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_retrieval_query_param_disables_rerank_by_default(self):
+        mock_rag = AsyncMock()
+        mock_rag.aquery = AsyncMock(return_value="商业区开放时间: 9:00-22:00")
+
+        with patch("src.core.agents.nodes.get_rag", AsyncMock(return_value=mock_rag)):
+            result = await retrieve_rag_context_node(_base_state())
+
+        assert result["rag_context"] == "商业区开放时间: 9:00-22:00"
+        query_param = mock_rag.aquery.call_args.kwargs["param"]
+        assert query_param.enable_rerank is False
 
     @pytest.mark.asyncio
     async def test_rag_failure_returns_error(self):
@@ -167,8 +194,38 @@ class TestGatherContext:
         assert result["enriched_context"] == ""
 
     @pytest.mark.asyncio
+    async def test_dynamic_rag_tool_is_hidden_when_disabled(self):
+        """默认不把 dynamic_rag_query 暴露给 gather_context 的工具决策 LLM。"""
+        mock_response = MagicMock()
+        mock_response.tool_calls = []
+
+        mock_llm_bound = MagicMock()
+        mock_llm_bound.ainvoke = AsyncMock(return_value=mock_response)
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm_bound)
+
+        dynamic_tool = MagicMock()
+        dynamic_tool.name = "dynamic_rag_query"
+        history_tool = MagicMock()
+        history_tool.name = "query_player_history"
+
+        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
+            with patch(
+                "src.core.agents.nodes.create_tools",
+                MagicMock(return_value=[dynamic_tool, history_tool]),
+            ):
+                result = await gather_context_node(_base_state())
+
+        bound_tools = mock_llm.bind_tools.call_args.args[0]
+        assert result["enriched_context"] == ""
+        assert [tool.name for tool in bound_tools] == ["query_player_history"]
+
+    @pytest.mark.asyncio
     async def test_with_tool_calls(self):
         """LLM 调用工具后收集上下文。"""
+        from src.config import settings
+
         tool_response_1 = MagicMock()
         tool_response_1.tool_calls = [
             {"name": "dynamic_rag_query", "args": {"query": "PVP规则"}, "id": "tc-1"}
@@ -187,10 +244,13 @@ class TestGatherContext:
         mock_tool.name = "dynamic_rag_query"
         mock_tool.ainvoke = AsyncMock(return_value="PVP匹配规则: 随机匹配")
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.create_tools", MagicMock(return_value=[mock_tool])):
-                state = _base_state()
-                result = await gather_context_node(state)
+        with (
+            patch.object(settings, "gather_context_enable_dynamic_rag", True),
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.create_tools", MagicMock(return_value=[mock_tool])),
+        ):
+            state = _base_state()
+            result = await gather_context_node(state)
 
         assert "dynamic_rag_query" in result["enriched_context"]
         assert "PVP匹配规则" in result["enriched_context"]
@@ -283,10 +343,29 @@ class TestBehaviorAnalysis:
 
 
 class TestActionReasoning:
+    def test_action_reasoning_prompt_json_examples_are_escaped(self):
+        from langchain_core.prompts import ChatPromptTemplate
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", ACTION_REASONING_SYSTEM),
+            ("human", ACTION_REASONING_USER),
+        ])
+
+        assert set(prompt.input_variables) == {
+            "behavior_report",
+            "snapshot_text",
+            "rag_context",
+            "enriched_context",
+            "tracking_summary",
+            "anomaly_text",
+            "intent_result",
+            "goal_evaluation_result",
+        }
+
     @pytest.mark.asyncio
     async def test_successful_reasoning(self):
         actions = ActionList(actions=[
-            RecommendedAction(action_type="quest", priority="high", reason="提升等级"),
+            RecommendedAction(action_type="observe_current_state", priority="high", reason="观察状态"),
         ])
 
         mock_chain = MagicMock()
@@ -311,7 +390,7 @@ class TestActionReasoning:
                 result = await action_reasoning_node(state)
 
         assert len(result["reasoned_actions"]) == 1
-        assert result["reasoned_actions"][0]["action_type"] == "quest"
+        assert result["reasoned_actions"][0]["action_type"] == "observe_current_state"
 
     @pytest.mark.asyncio
     async def test_null_result_returns_error(self):
@@ -379,7 +458,7 @@ class TestMergeOutput:
             bottlenecks=["time"],
             engagement_level="high",
         )
-        actions = [RecommendedAction(action_type="quest", priority="high", reason="r")]
+        actions = [RecommendedAction(action_type="observe_current_state", priority="high", reason="r")]
 
         state = _base_state(
             behavior_report=profile.model_dump_json(),

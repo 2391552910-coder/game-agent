@@ -163,12 +163,10 @@ src/
 │   ├── infrastructure/               # 基础设施层
 │   │   ├── db.py                     # SQLAlchemy 异步引擎, get_session()
 │   │   ├── redis.py                  # Redis 连接池, get_redis()
-│   │   ├── neo4j.py                  # Neo4j 异步驱动
 │   │   ├── result_store.py           # 分析结果持久化 + SHA256 去重
 │   │   └── resilience.py             # CircuitBreaker + with_retry 装饰器
 │   │
 │   ├── llm/                          # LLM 提供商抽象层
-│   │   ├── base.py                   # LLMType = BaseChatModel 类型别名
 │   │   ├── models.py                 # LLMProviderConfig/Create/Update/Response
 │   │   ├── factory.py                # get_llm(model_type) → BaseChatModel
 │   │   │                             # 优先 balancer → 回退 .env 配置
