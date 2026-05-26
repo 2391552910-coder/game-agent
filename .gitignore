@@ -15,6 +15,9 @@ build/
 .vscode/
 .idea/
 
+# Claude 临时 worktrees
+.claude/worktrees/
+
 # RAG 本地缓存
 rag_storage/
 
