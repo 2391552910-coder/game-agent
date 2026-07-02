@@ -62,6 +62,7 @@ app.add_middleware(AuthMiddleware)
 
 # 路由注册
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+app.include_router(webhooks.gateway_router, prefix="/api/gateway", tags=["gateway-v1"])
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["analysis"])
 app.include_router(tenants.router, prefix="/api/v1/tenants", tags=["tenants"])
 app.include_router(quota.router, prefix="/api/v1/quota", tags=["quota"])

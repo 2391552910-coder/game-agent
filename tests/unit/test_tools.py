@@ -76,6 +76,8 @@ class TestQuerySimilarPlayers:
 
         assert len(parsed) == 1
         assert parsed[0]["user_id"] == "user-002"
+        assert parsed[0]["top_actions"][0]["skillName"] == "pvp"
+        assert parsed[0]["top_actions"][0]["arguments"] == {}
 
     @pytest.mark.asyncio
     async def test_no_results(self, mock_session):
@@ -135,6 +137,27 @@ class TestDynamicRagQuery:
         assert "PVP" in result
         query_param = mock_rag.aquery.call_args.kwargs["param"]
         assert query_param.enable_rerank is False
+
+    @pytest.mark.asyncio
+    async def test_dynamic_rag_query_uses_configured_chunk_top_k_and_prepends_exact_context(self):
+        mock_rag = AsyncMock()
+        mock_rag.aquery = AsyncMock(return_value="向量检索内容")
+
+        with (
+            patch("src.config.settings.rag_exact_match_enabled", True, create=True),
+            patch("src.config.settings.lightrag_chunk_top_k", 50, create=True),
+            patch("src.core.engine.lightrag_engine.get_rag", AsyncMock(return_value=mock_rag)),
+            patch(
+                "src.core.agents.tools.retrieve_exact_rag_context",
+                AsyncMock(return_value="精确匹配内容"),
+                create=True,
+            ),
+        ):
+            result = await _dynamic_rag_query("体育馆正门坐标是多少？")
+
+        query_param = mock_rag.aquery.call_args.kwargs["param"]
+        assert query_param.chunk_top_k == 50
+        assert result == "精确匹配内容\n\n向量检索内容"
 
     @pytest.mark.asyncio
     async def test_empty_result(self):

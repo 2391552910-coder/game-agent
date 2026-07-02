@@ -1,6 +1,7 @@
 """Pydantic 模型验证测试。"""
 
 import pytest
+from pydantic import ValidationError
 
 from src.core.agents.models import (
     ActionList,
@@ -73,28 +74,35 @@ class TestBehaviorProfile:
 
 
 class TestRecommendedAction:
-    def test_valid_action(self):
+    def test_valid_gateway_skill_action(self):
         a = RecommendedAction(
-            action_type="quest",
+            skillName="move_to",
+            schemaVersion="v1",
+            arguments={
+                "target": {"x": 61.3, "y": 0.94, "z": 154.0},
+                "stopDistance": 0.5,
+            },
             priority="high",
-            reason="帮助提升等级",
-            payload={"quest_id": "q001"},
+            reason="前往目标点",
         )
+        assert a.skill_name == "move_to"
+        assert a.schema_version == "v1"
+        assert a.model_dump()["skillName"] == "move_to"
         assert a.priority == "high"
-        assert a.payload["quest_id"] == "q001"
+        assert a.arguments["target"]["x"] == 61.3
 
-    def test_default_payload(self):
+    def test_default_arguments(self):
         a = RecommendedAction(
-            action_type="hint",
+            skillName="observe_state",
             priority="medium",
             reason="提示",
         )
-        assert a.payload == {}
+        assert a.arguments == {}
 
     def test_invalid_priority(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             RecommendedAction(
-                action_type="quest",
+                skillName="observe_state",
                 priority="urgent",
                 reason="test",
             )
@@ -109,8 +117,8 @@ class TestPlayerAnalysisOutput:
             engagement_level="high",
         )
         actions = [
-            RecommendedAction(action_type="quest", priority="high", reason="r1"),
-            RecommendedAction(action_type="hint", priority="medium", reason="r2"),
+            RecommendedAction(skillName="observe_state", priority="high", reason="r1"),
+            RecommendedAction(skillName="jump", priority="medium", reason="r2"),
         ]
         output = PlayerAnalysisOutput(
             player_profile=profile,
@@ -137,7 +145,7 @@ class TestPlayerAnalysisOutput:
 class TestActionList:
     def test_action_list(self):
         actions = [
-            RecommendedAction(action_type="quest", priority="high", reason="r1"),
+            RecommendedAction(skillName="observe_state", priority="high", reason="r1"),
         ]
         al = ActionList(actions=actions)
         assert len(al.actions) == 1

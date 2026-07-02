@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-myAgent v2.0 是一个多租户游戏玩家行为分析与预测平台。RobotGateway通过 Webhook 发送玩家数据，平台使用 LangGraph Agent 编排 + LightRAG 知识图谱检索，生成结构化的玩家行为分析和推荐行动，生成推荐行动后返回给RobotGateway。
+myAgent v2.0 是一个AI游戏决策平台，对玩家进行行为分析与预测。RobotGateway通过 Webhook 发送玩家数据，平台使用 LangGraph Agent 编排 + LightRAG 知识图谱检索，生成结构化的玩家行为分析和推荐行动，生成推荐行动后返回给RobotGateway。
 
 ## Common Commands
 

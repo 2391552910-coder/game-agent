@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
 
-PUBLIC_PATHS = {"/health","/docs","/openapi.json","/redoc"}
+PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/api/gateway/events"}
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """

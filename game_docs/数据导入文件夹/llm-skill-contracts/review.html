@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Skill Contracts Review</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #f5f7fb;
+            --sidebar-bg: #ffffff;
+            --panel-bg: #ffffff;
+            --text-color: #202633;
+            --text-muted: #667085;
+            --border-color: #e4e7ec;
+            --primary-color: #2f6feb;
+            --primary-hover: #1d4ed8;
+            --active-bg: #eef4ff;
+            --code-bg: #0f172a;
+            --shadow: 0 12px 32px rgba(16, 24, 40, 0.08);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0f172a;
+                --sidebar-bg: #111827;
+                --panel-bg: #111827;
+                --text-color: #e5e7eb;
+                --text-muted: #9ca3af;
+                --border-color: #1f2937;
+                --primary-color: #60a5fa;
+                --primary-hover: #93c5fd;
+                --active-bg: #172554;
+                --code-bg: #020617;
+                --shadow: none;
+            }
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            width: 320px;
+            background-color: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .sidebar-header {
+            padding: 24px 20px 18px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-title {
+            margin: 0;
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--primary-color);
+        }
+
+        .sidebar-subtitle {
+            margin: 8px 0 0;
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        .sidebar-search {
+            margin-top: 16px;
+        }
+
+        .sidebar-search input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            outline: none;
+        }
+
+        .sidebar-search input:focus {
+            border-color: var(--primary-color);
+        }
+
+        .nav-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 0 24px;
+            margin: 0;
+            list-style: none;
+        }
+
+        .category-name {
+            padding: 14px 20px 8px;
+        }
+
+        .category-name-en {
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            font-weight: 700;
+            line-height: 1.3;
+        }
+
+        .category-name-zh {
+            margin-top: 2px;
+            font-size: 0.9rem;
+            color: var(--text-color);
+            font-weight: 700;
+            line-height: 1.35;
+        }
+
+        .nav-item {
+            margin: 2px 10px;
+            padding: 10px 12px 11px;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background-color 0.2s ease, color 0.2s ease;
+        }
+
+        .nav-item:hover {
+            background-color: var(--active-bg);
+            color: var(--primary-color);
+        }
+
+        .nav-item.active {
+            background-color: var(--active-bg);
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+
+        .nav-item-en {
+            font-size: 0.8rem;
+            text-transform: none;
+            letter-spacing: 0.02em;
+            color: var(--primary-color);
+            font-weight: 700;
+            line-height: 1.35;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .nav-item-zh {
+            margin-top: 2px;
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            line-height: 1.4;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .nav-item.active .nav-item-zh,
+        .nav-item:hover .nav-item-zh {
+            color: inherit;
+        }
+
+        .content-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 36px;
+            scroll-behavior: smooth;
+        }
+
+        .dashboard,
+        .markdown-body {
+            max-width: 1040px;
+            margin: 0 auto;
+        }
+
+        .dashboard-header {
+            margin-bottom: 28px;
+        }
+
+        .dashboard-title {
+            margin: 0 0 10px;
+            font-size: 2.3rem;
+            line-height: 1.2;
+        }
+
+        .dashboard-desc {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 1.02rem;
+            line-height: 1.7;
+            max-width: 880px;
+        }
+
+        .meta-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin: 26px 0 34px;
+        }
+
+        .meta-card,
+        .card,
+        .markdown-body {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+        }
+
+        .meta-card {
+            padding: 16px 18px;
+        }
+
+        .meta-label {
+            margin: 0 0 6px;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            font-weight: 700;
+        }
+
+        .meta-value {
+            margin: 0;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            word-break: break-all;
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            padding: 22px;
+            transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: var(--primary-color);
+        }
+
+        .card-title {
+            margin: 0 0 10px;
+            font-size: 1.12rem;
+        }
+
+        .card-desc {
+            margin: 0 0 14px;
+            color: var(--text-muted);
+            font-size: 0.94rem;
+            line-height: 1.7;
+        }
+
+        .card-links {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .card-links span {
+            color: var(--primary-color);
+            cursor: pointer;
+            font-size: 0.94rem;
+            font-weight: 600;
+        }
+
+        .card-links span:hover {
+            color: var(--primary-hover);
+            text-decoration: underline;
+        }
+
+        .dashboard-footer {
+            margin-top: 24px;
+            padding: 18px 20px;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+
+        .markdown-body {
+            padding: 34px 38px 40px;
+            line-height: 1.75;
+        }
+
+        .page-header {
+            margin-bottom: 22px;
+        }
+
+        .breadcrumb {
+            font-size: 0.86rem;
+            color: var(--text-muted);
+        }
+
+        .pm-summary-banner {
+            background-color: var(--active-bg);
+            border: 1px solid rgba(47, 111, 235, 0.18);
+            border-left: 4px solid var(--primary-color);
+            padding: 16px 18px;
+            margin-bottom: 24px;
+            border-radius: 0 12px 12px 0;
+        }
+
+        .pm-summary-title {
+            font-weight: 700;
+            margin-bottom: 8px;
+            color: var(--primary-color);
+            font-size: 0.98rem;
+        }
+
+        .markdown-body h1,
+        .markdown-body h2,
+        .markdown-body h3,
+        .markdown-body h4 {
+            margin-top: 1.5em;
+            margin-bottom: 0.55em;
+            font-weight: 700;
+            line-height: 1.3;
+        }
+
+        .markdown-body h1 {
+            font-size: 2rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.35em;
+        }
+
+        .markdown-body h2 {
+            font-size: 1.45rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.3em;
+        }
+
+        .markdown-body h3 {
+            font-size: 1.15rem;
+        }
+
+        .markdown-body a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+
+        .markdown-body a:hover {
+            text-decoration: underline;
+        }
+
+        .markdown-body code {
+            background-color: var(--active-bg);
+            padding: 0.2em 0.45em;
+            border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 85%;
+        }
+
+        .markdown-body pre {
+            background-color: var(--code-bg);
+            padding: 16px;
+            border-radius: 12px;
+            overflow: auto;
+            border: 1px solid var(--border-color);
+        }
+
+        .markdown-body pre code {
+            background-color: transparent;
+            padding: 0;
+            font-size: 90%;
+        }
+
+        .markdown-body table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-bottom: 18px;
+        }
+
+        .markdown-body table th,
+        .markdown-body table td {
+            border: 1px solid var(--border-color);
+            padding: 9px 12px;
+            vertical-align: top;
+        }
+
+        .markdown-body table tr:nth-child(2n) {
+            background-color: var(--active-bg);
+        }
+
+        .markdown-body blockquote {
+            padding: 0 1em;
+            color: var(--text-muted);
+            border-left: 0.25em solid var(--border-color);
+            margin: 0 0 18px 0;
+        }
+
+        .empty-state {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 24px;
+        }
+
+        @media (max-width: 900px) {
+            body {
+                flex-direction: column;
+                height: auto;
+                overflow: auto;
+            }
+
+            .sidebar {
+                width: 100%;
+                height: auto;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+            }
+
+            .content-area {
+                padding: 20px;
+            }
+
+            .markdown-body {
+                padding: 24px 20px 28px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h1 class="sidebar-title">LLM Skill Contracts</h1>
+            <p class="sidebar-subtitle">仅保留面向 LLM 同事的首批技能契约、公共规则、reason 枚举和参数表。</p>
+            <div class="sidebar-search">
+                <input type="text" id="searchInput" placeholder="搜索文档...">
+            </div>
+        </div>
+        <ul class="nav-list" id="navList"></ul>
+    </div>
+
+    <div class="content-area" id="contentArea">
+        <div class="dashboard" id="dashboard">
+            <div class="dashboard-header">
+                <h1 class="dashboard-title">LLM Skill Contracts 审核页</h1>
+                <p class="dashboard-desc">这份页面只收录 `llm-skill-contracts` 目录下已经定稿的对外技能文档，不再混入后台管理、历史讨论或其它外围契约，方便直接发给 LLM 同事审阅。</p>
+            </div>
+
+            <div class="meta-panel">
+                <div class="meta-card">
+                    <p class="meta-label">生成时间</p>
+                    <p class="meta-value">2026-06-29 14:55:03</p>
+                </div>
+                <div class="meta-card">
+                    <p class="meta-label">源目录</p>
+                    <p class="meta-value">D:\MyWork\SG-Client\.worktrees\codex-ai-hosting-robot-gateway\Unity\.codestable\reference\project\airobot-gateway\llm-skill-contracts</p>
+                </div>
+                <div class="meta-card">
+                    <p class="meta-label">输出文件</p>
+                    <p class="meta-value">D:\MyWork\SG-Client\.worktrees\codex-ai-hosting-robot-gateway\Unity\.codestable\reference\project\airobot-gateway\llm-skill-contracts\review.html</p>
+                </div>
+                <div class="meta-card">
+                    <p class="meta-label">Markdown 数量</p>
+                    <p class="meta-value">34 份</p>
+                </div>
+            </div>
+
+            <div class="dashboard-grid">
+                <div class="card">
+                    <h3 class="card-title">首批技能总览</h3>
+                    <p class="card-desc">查看本轮已纳入首批的技能范围、分组、非目标和整体边界。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('index.md')">查看总览</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">公共规则</h3>
+                    <p class="card-desc">查看统一请求格式、严格校验、并发规则、消费保护和载具取消窗口约束。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('common-rules.md')">查看公共规则</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">固定 reason 枚举</h3>
+                    <p class="card-desc">查看通用 `reason` 和每个技能专属的 reject / failed reason 列表。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('reason-codes.md')">查看 reason 枚举</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">固定参数表</h3>
+                    <p class="card-desc">查看已定稿技能的对外参数表和固定枚举，不暴露内部 DTO、协议字段或配置 ID。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('parameter-tables/index.md')">查看参数表</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">暂不开放技能</h3>
+                    <p class="card-desc">查看当前明确排除在首批之外的技能清单，避免和已开放能力混淆。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('not-initial-batch.md')">查看排除清单</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="dashboard-footer">
+                左侧导航支持按分类浏览和全文搜索。正文中的本地 Markdown 链接会自动跳转到本页内对应文档，不再依赖外部 `.md` 文件跳转。
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const docsData = [{"id": "index.md", "title": "AiRobotGateway 首批 LLM Skill 契约", "category": "概览与规则", "englishLabel": "overview", "chineseLabel": "首批技能契约总览", "summary": "AiRobotGateway 首批对外 LLM skill 契约入口，收录公共规则、固定 reason 枚举和每个首批 skill 的独立说明页。", "content": "# AiRobotGateway 首批 LLM Skill 契约\n\n## 概述\n\n本文档目录收录 AiRobotGateway 面向外部 LLM / DecisionProvider 的首批高层 skill 契约。目标是把“LLM 能调什么、参数长什么样、Gateway 负责哪些内部编排”固定下来，避免 LLM 直接消费底层协议步骤、内部配置 ID 或运行时临时对象。\n\n这里的 skill 契约只描述 LLM 可见的外部表面：\n\n- 请求固定使用 `skillName + schemaVersion + arguments`\n- `arguments` 之外的多余字段一律拒绝\n- skill 参数只保留高层业务语义\n- 内部购买、报名、候选资源切换、协议重试和表现同步由 Gateway 负责\n- 动态细节进入 Gateway 日志，不进入对外 `reason`\n\n## 目录\n\n- [公共规则](common-rules.md)\n- [固定 reason 枚举](reason-codes.md)\n- [固定参数表](parameter-tables/index.md)\n- [暂不开放技能清单](not-initial-batch.md)\n\n### 基础控制\n\n- [move_to](basic/move_to.md)\n- [stop_move](basic/stop_move.md)\n- [jump](basic/jump.md)\n- [play_action](basic/play_action.md)\n- [scene_tornado](basic/scene_tornado.md)\n\n### 单人活动\n\n- [sign_in](activities/sign_in.md)\n- [shooting_auto_schedule](activities/shooting_auto_schedule.md)\n- [darts_auto_schedule](activities/darts_auto_schedule.md)\n- [dance_auto_schedule](activities/dance_auto_schedule.md)\n- [draw_lots_auto_schedule](activities/draw_lots_auto_schedule.md)\n- [wish_board_auto_schedule](activities/wish_board_auto_schedule.md)\n- [paper_plane_auto_schedule](activities/paper_plane_auto_schedule.md)\n- [coffee_auto_schedule](activities/coffee_auto_schedule.md)\n\n### 座位与载具\n\n- [seat_sit](seat-and-vehicle/seat_sit.md)\n- [seat_get_out](seat-and-vehicle/seat_get_out.md)\n- [hot_air_balloon_auto_schedule](seat-and-vehicle/hot_air_balloon_auto_schedule.md)\n- [hot_air_balloon_exit](seat-and-vehicle/hot_air_balloon_exit.md)\n- [helicopter_auto_schedule](seat-and-vehicle/helicopter_auto_schedule.md)\n- [helicopter_exit](seat-and-vehicle/helicopter_exit.md)\n- [elevator_auto_schedule](seat-and-vehicle/elevator_auto_schedule.md)\n\n## 首批 skill 清单\n\n### 基础控制\n\n- `move_to`\n- `stop_move`\n- `jump`\n- `play_action`\n- `scene_tornado`\n\n### 单人活动\n\n- `sign_in`\n- `shooting_auto_schedule`\n- `darts_auto_schedule`\n- `dance_auto_schedule`\n- `draw_lots_auto_schedule`\n- `wish_board_auto_schedule`\n- `paper_plane_auto_schedule`\n- `coffee_auto_schedule`\n\n### 座位与载具\n\n- `seat_sit`\n- `seat_get_out`\n- `hot_air_balloon_auto_schedule`\n- `hot_air_balloon_exit`\n- `helicopter_auto_schedule`\n- `helicopter_exit`\n- `elevator_auto_schedule`\n\n## 非目标\n\n以下内容不在本目录内展开：\n\n- Gateway 与 LLM 的事件流、lease、stateVersion 和 HMAC 细节\n- 内部子 skill、底层协议步骤、配置 ID 映射\n- query 详细参数表\n- 多人交互活动\n- 首批之外的待验证 skill"}, {"id": "common-rules.md", "title": "公共规则", "category": "概览与规则", "englishLabel": "common-rules", "chineseLabel": "公共规则", "summary": "AiRobotGateway 首批 LLM skill 的公共请求格式、字段校验、并发规则、消费边界和命名约束。", "content": "# 公共规则\n\n## 顶层请求格式\n\n所有首批 LLM skill 固定使用同一层外部包装：\n\n```json\n{\n  \"skillName\": \"move_to\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n字段规则：\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `skillName` | `string` | 是 | 必须是 Gateway 注册并对 LLM 开放的固定 skill 名。 |\n| `schemaVersion` | `string` | 是 | 当前固定 `v1`。 |\n| `arguments` | `object` | 是 | 必须是对象；只允许当前 skill 文档声明的字段。无参数 skill 也必须传 `{}`。 |\n\n## 严格校验\n\n- `schemaVersion` 不是 `v1`，直接拒绝。\n- `arguments` 不是合法对象，直接拒绝。\n- `arguments` 出现未声明字段，直接拒绝。\n- 顶层出现 `skillName / schemaVersion / arguments` 之外的字段，直接拒绝。\n- 名称类字段全部使用精确匹配，不做别名或模糊匹配。\n- 不做 trim、大小写兼容或同义词兼容。\n- 重名配置视为 Gateway 配置错误，不交给 LLM 兜底。\n\n## 命名与枚举\n\n- 名称类字段保持业务语义，例如 `coffeeName`、`boardName`、`planeName`\n- 对外优先暴露业务枚举，不暴露内部配置 ID\n- 仅当业务语义天然就是数值定位时，才直接暴露数值，例如 `tableNum`、`chairId`\n\n## 通用并发规则\n\n当前首批 skill 的统一并发规则：\n\n- `move_to + jump` 允许并行\n- 其它 skill 不允许直接与 `move_to` 并行\n- 需要执行其它 skill 时，先调用 `stop_move`\n- 等角色停下后，再发目标 skill\n- `stop_move` 被 accepted 后，原 `move_to` 内部取消，不单独发送原 `move_to` 的 `skill_finished`\n\n补充：\n\n- `play_action` v1 只表示固定挥手动作\n- `play_action` 不允许在移动中直接发起\n- `stop_move` 语义要求幂等；当前未移动时也应视为可接受\n- 占用型长流程 skill 不提供通用 `cancel_skill / abort_skill`\n\n## 消费与购买\n\n所有会产生消费的路径都遵循同一原则：\n\n- LLM 不传预算额度\n- LLM 不传是否有权限购买\n- LLM 不传累计消费上限\n- Gateway 自己判断是否允许购买\n- Gateway 自己做免费优先、库存检查、补购和累计消费保护\n\n当前已纳入首批的内部自动补购场景：\n\n- `shooting_auto_schedule`：子弹不足时自动补购当前枪型所需子弹\n- `darts_auto_schedule`：库存不足时只补本局缺口\n- `dance_auto_schedule`：活动次数不足时自动补购次数\n- `wish_board_auto_schedule`：买牌受消费保护\n- `paper_plane_auto_schedule`：买道具受消费保护\n- `coffee_auto_schedule`：买咖啡受消费保护\n\n## 载具取消窗口\n\n- `hot_air_balloon_auto_schedule` 和 `helicopter_auto_schedule` 在等待开始阶段，可由 Gateway 发送 `observation_updated(reason=vehicle_cancel_window)`。\n- 这张 lease 只允许：\n  - `wait`\n  - 配对 exit skill\n  - `stop_hosting`\n- 当前首批已开放的配对 exit skill 只有：\n  - `hot_air_balloon_exit`\n  - `helicopter_exit`\n- `wait` 表示放弃这次取消机会，继续当前载具流程；不发送单独的 `wait_completed`。\n- 对应 exit skill 被 accepted 后：\n  - 原 auto schedule 内部取消\n  - 不再单独发送原 skill 的 `skill_finished`\n- exit 成功和幂等成功统一使用 `reason=ok`。\n\n## reason 约束\n\n- 对外 `reason` 使用固定枚举\n- 不把 `roleId`、`shopId`、协议名、错误码等动态值拼进 `reason`\n- 动态细节只进 Gateway 日志和审计\n- 每个 skill 页只列 skill 专属 reason；通用 reason 见 [reason-codes.md](reason-codes.md)\n\n## 首批能力边界\n\n首批 LLM skill 只覆盖：\n\n- 基础移动与简单动作\n- 单人独立可完成的活动\n- 明确座位和基础载具/电梯\n\n首批不覆盖：\n\n- 多人交互活动\n- 低层子 skill\n- query 参数细表\n- 待验证或已禁用的 hosted operation"}, {"id": "reason-codes.md", "title": "固定 reason 枚举", "category": "概览与规则", "englishLabel": "reason-codes", "chineseLabel": "固定 reason 枚举", "summary": "AiRobotGateway 首批 LLM skill 的固定 reason 枚举表，包含通用 reason 以及各 skill 的 reject / failed reason。", "content": "# 固定 reason 枚举\n\n## 说明\n\n- 本文档只列对外固定枚举。\n- 动态细节不进入对外 `reason`。\n- 成功统一使用 `ok`。\n- 这里只收录首批 skill 已确认的专属 reason；更高层通用拒绝原因仍以 Gateway 外部决策契约为准。\n\n## 通用 reason\n\n### 通用接受 / 终态\n\n- `ok`\n\n### 通用拒绝 / 失败\n\n- `lease_expired`\n- `lease_not_found`\n- `lease_session_mismatch`\n- `stale_state`\n- `skill_in_progress`\n- `skill_not_allowed`\n- `skill_not_found`\n- `schema_invalid`\n- `state_not_allowed`\n- `session_not_running`\n- `circuit_breaker_open`\n- `ttl_expired`\n- `rate_limited`\n- `idempotency_key_conflict`\n\n## 基础控制\n\n### move_to\n\n- reject\n  - `move_to_target_invalid`\n  - `move_to_speed_mode_invalid`\n  - `move_to_stop_distance_invalid`\n- failed\n  - `navigation_unavailable`\n  - `execution_limit_exceeded`\n\n### stop_move\n\n- reject\n  - 无专属 reject\n- failed\n  - 无专属 failed\n\n### jump\n\n- reject\n  - 无专属 reject\n- failed\n  - `jump_interrupted`\n  - `navigation_unavailable`\n\n### play_action\n\n- reject\n  - `play_action_action_id_invalid`\n- failed\n  - 无专属 failed\n\n### scene_tornado\n\n- reject\n  - 无专属 reject\n- failed\n  - `trigger_missing`\n  - `action_missing`\n  - `landing_unavailable`\n  - `protocol_failed`\n\n## 单人活动\n\n### sign_in\n\n- reject\n  - 无专属 reject\n- failed\n  - `sign_in_failed`\n  - `sign_in_protocol_error`\n\n### shooting_auto_schedule\n\n- reject\n  - `shooting_table_num_invalid`\n  - `shooting_distance_invalid`\n  - `shooting_weapon_invalid`\n  - `shooting_posture_invalid`\n  - `shooting_game_mode_invalid`\n  - `shooting_score_invalid`\n  - `shooting_score_exceeds_limit`\n  - `shooting_project_invalid`\n- failed\n  - `table_occupied`\n  - `resource_exhausted`\n  - `protocol_failed`\n  - `cleanup_failed`\n\n### darts_auto_schedule\n\n- reject\n  - `darts_dart_pos_invalid`\n  - `darts_score_invalid`\n  - `darts_score_exceeds_limit`\n  - `darts_dart_item_invalid`\n  - `darts_dart_count_invalid`\n  - `darts_dart_plan_invalid`\n- failed\n  - `dart_pos_occupied`\n  - `no_available_dart_pos`\n  - `insufficient_darts`\n  - `insufficient_entry_cost`\n  - `spending_limit_exceeded`\n  - `purchase_failed`\n  - `protocol_failed`\n  - `cleanup_failed`\n\n### dance_auto_schedule\n\n- reject\n  - 无专属 reject\n- failed\n  - `activity_point_missing`\n  - `go_to_failed`\n  - `apply_failed`\n  - `start_notify_timeout`\n  - `end_notify_timeout`\n  - `protocol_failed`\n\n### draw_lots_auto_schedule\n\n- reject\n  - 无专属 reject\n- failed\n  - `draw_lots_go_to_activity_failed`\n  - `draw_lots_buy_blocked`\n  - `draw_lots_buy_failed`\n  - `draw_lots_start_failed`\n  - `draw_lots_protocol_error`\n\n### wish_board_auto_schedule\n\n- reject\n  - `wish_board_board_name_invalid`\n  - `wish_board_wish_invalid`\n  - `wish_board_wish_too_long`\n- failed\n  - `wish_board_go_to_activity_failed`\n  - `wish_board_buy_card_blocked`\n  - `wish_board_buy_card_failed`\n  - `wish_board_make_wish_failed`\n  - `wish_board_protocol_error`\n\n### paper_plane_auto_schedule\n\n- reject\n  - `paper_plane_plane_name_invalid`\n  - `paper_plane_use_time_ms_invalid`\n- failed\n  - `paper_plane_go_to_activity_failed`\n  - `paper_plane_buy_item_blocked`\n  - `paper_plane_buy_item_failed`\n  - `paper_plane_start_failed`\n  - `paper_plane_submit_failed`\n  - `paper_plane_protocol_error`\n\n### coffee_auto_schedule\n\n- reject\n  - `coffee_name_invalid`\n- failed\n  - `coffee_buy_blocked`\n  - `coffee_buy_failed`\n  - `coffee_drink_failed`\n  - `coffee_protocol_error`\n\n## 座位与载具\n\n### seat_sit\n\n- reject\n  - `seat_scene_id_invalid`\n  - `seat_chair_id_invalid`\n- failed\n  - `seat_not_available`\n  - `seat_sit_failed`\n  - `seat_protocol_error`\n\n### seat_get_out\n\n- reject\n  - `seat_scene_id_invalid`\n  - `seat_chair_id_invalid`\n- failed\n  - `seat_get_out_failed`\n  - `seat_protocol_error`\n\n### hot_air_balloon_auto_schedule\n\n- reject\n  - 无专属 reject\n- failed\n  - `no_available_hot_air_balloon`\n  - `go_to_failed`\n  - `join_failed`\n  - `protocol_failed`\n\n### hot_air_balloon_exit\n\n- reject\n  - 无专属 reject\n- failed\n  - `protocol_failed`\n\n### helicopter_auto_schedule\n\n- reject\n  - 无专属 reject\n- failed\n  - `no_available_helicopter`\n  - `go_to_failed`\n  - `join_failed`\n  - `protocol_failed`\n\n### helicopter_exit\n\n- reject\n  - 无专属 reject\n- failed\n  - `protocol_failed`\n\n### elevator_auto_schedule\n\n- reject\n  - 无专属 reject\n- failed\n  - `elevator_available_missing`\n  - `elevator_start_failed`\n  - `elevator_wait_end_timeout`\n  - `elevator_protocol_error`"}, {"id": "not-initial-batch.md", "title": "暂不开放技能清单", "category": "概览与规则", "englishLabel": "not-initial-batch", "chineseLabel": "暂不开放技能", "summary": "AiRobotGateway 当前未纳入首批 LLM skill 的能力清单及原因，避免后续重复讨论或误开放。", "content": "# 暂不开放技能清单\n\n## 原则\n\n以下能力当前不纳入首批 LLM skill：\n\n- 多人交互活动\n- 仍是底层参数语义的 auto skill\n- `PendingValidation` 或 `Disabled` 的能力\n- 仍需单独补 query / 参数表 / 运行态验证的能力\n\n## 当前不纳入首批的能力\n\n### tarot_auto_schedule\n\n- 原因：本轮讨论已明确首批不开放塔罗\n\n### throw_ball_auto_schedule\n\n- 原因：多人交互流程\n- 当前状态：Gateway 已按 `skill_disabled_multiplayer_untested` 禁用\n\n### drink_wine_auto_schedule\n\n- 原因：\n  - 当前参数仍是 `itemId / wineGlassId / waitMs` 这类底层对象语义\n  - 运行态仍属 `PendingValidation`\n  - 还没有收敛成面向 LLM 的高层业务意图版本\n\n### paper_plane_synthesis\n\n- 原因：已明确暂不开放\n\n### 低层子 skill\n\n包括但不限于：\n\n- `*_go_to_activity`\n- `*_observe`\n- `*_start`\n- `*_submit_*`\n- `*_presentation`\n- `*_buy_*`\n- `*_join`\n\n原因：首批对 LLM 只开放高层 skill，不开放底层编排步骤。\n\n例外：\n\n- `hot_air_balloon_exit`\n- `helicopter_exit`\n\n这两个载具退出 skill 已纳入首批，但只允许在 `vehicle_cancel_window` 下调用。\n\n### 未恢复的多人动作\n\n包括但不限于：\n\n- 真实 `throw_ball_*` 流程动作\n- 真实 `gomoku_*` 对局推进动作\n\n原因：仍需多人交互和无头验证，不适合作为默认 LLM 能力。"}, {"id": "basic/jump.md", "title": "jump", "category": "基础控制", "englishLabel": "jump", "chineseLabel": "跳跃", "summary": "jump 对外 LLM skill 契约，定义角色原地或移动中跳跃行为。", "content": "# jump\n\n## 技能说明\n\n让当前角色执行一次跳跃。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"jump\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 接收后触发一次跳跃。\n- 本 skill 不暴露跳跃力度、方向、持续时长等底层控制参数。\n\n## 并发 / 打断规则\n\n- `jump` 可以和 `move_to` 并行。\n- `jump` 不是“结束后继续 move_to”，而是允许在移动过程中直接触发一次跳跃。\n- 其它首批 skill 不因为 `jump` 而自动获得并行权限。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `jump_interrupted`\n- `navigation_unavailable`\n\n## 备注\n\n- 如果运行态不允许跳跃，由通用 `state_not_allowed` 处理。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "basic/move_to.md", "title": "move_to", "category": "基础控制", "englishLabel": "move_to", "chineseLabel": "目标点移动", "summary": "move_to 对外 LLM skill 契约，定义目标坐标移动请求、参数范围和停止语义。", "content": "# move_to\n\n## 技能说明\n\n让当前托管角色朝指定世界坐标移动，直到进入 `stopDistance` 范围内视为完成。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"move_to\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"target\": {\n      \"x\": 120.5,\n      \"y\": 8.0,\n      \"z\": -35.2\n    },\n    \"speedMode\": \"walk\",\n    \"stopDistance\": 0.5\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `target` | `object` | 是 | 世界坐标目标点。 |\n| `target.x` | `number` | 是 | 目标点 X 坐标。 |\n| `target.y` | `number` | 是 | 目标点 Y 坐标。 |\n| `target.z` | `number` | 是 | 目标点 Z 坐标。 |\n| `speedMode` | `string` | 否 | `walk` 或 `run`，默认 `walk`。 |\n| `stopDistance` | `number` | 否 | 大于等于 `0`，默认 `0.5`。允许传 `0`。 |\n\n## 执行语义\n\n- Gateway 接收后开始驱动角色向目标点移动。\n- 当角色进入 `stopDistance` 范围内，技能完成。\n- `stopDistance = 0` 合法，但 Gateway 仍应做内部兜底，避免因为浮点或导航误差长期无法结束。\n\n## 并发 / 打断规则\n\n- `move_to` 可以和 `jump` 并行。\n- 其它首批 skill 不允许直接和 `move_to` 并行。\n- 需要切换去执行其它 skill 时，LLM 先发 `stop_move`，等停下后再发目标 skill。\n- `stop_move` 被 accepted 后，原 `move_to` 内部取消，不单独发送原 `move_to` 的 `skill_finished`。\n\n## reject reasons\n\n- `move_to_target_invalid`\n- `move_to_speed_mode_invalid`\n- `move_to_stop_distance_invalid`\n\n## failed reasons\n\n- `session_not_running`\n- `navigation_unavailable`\n- `execution_limit_exceeded`\n\n## 备注\n\n- 本 skill 对外只暴露高层移动意图，不暴露底层导航、寻路或摇杆控制细节。\n- 参数取值说明见 [../parameter-tables/move_to.md](../parameter-tables/move_to.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "basic/play_action.md", "title": "play_action", "category": "基础控制", "englishLabel": "play_action", "chineseLabel": "固定动作播放", "summary": "play_action 对外 LLM skill 契约，v1 只表示固定挥手动作。", "content": "# play_action\n\n## 技能说明\n\n让当前角色播放一个固定动作。\n\nv1 只支持固定挥手动作。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"play_action\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"actionId\": \"wave\"\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `actionId` | `string` | 是 | 当前固定为 `wave`。不支持别名、大小写兼容、数字动作 ID 或底层协议 `cmdId`。 |\n\n## 执行语义\n\n- Gateway 接收后播放固定挥手动作。\n- 对外不暴露内部动作 ID。\n- 完成语义是动作指令发送成功，不等待客户端完整动画播放结束。\n\n## 并发 / 打断规则\n\n- `play_action` 不允许和 `move_to` 直接并行。\n- 需要在移动后执行时，LLM 先发 `stop_move`，停下后再发 `play_action`。\n- `play_action` v1 不与 `jump / auto_schedule` 并行，也不打断这些 skill。\n\n## reject reasons\n\n- `play_action_action_id_invalid`\n\n## failed reasons\n\n- `session_not_running`\n\n## 备注\n\n- 后续如果开放更多动作，优先扩展 `actionId` 枚举；是否升版本再单独判断。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "basic/scene_tornado.md", "title": "scene_tornado", "category": "基础控制", "englishLabel": "scene_tornado", "chineseLabel": "场景龙卷风", "summary": "scene_tornado 对外 LLM skill 契约，v1 为固定龙卷风场景动作。", "content": "# scene_tornado\n\n## 技能说明\n\n触发当前场景固定龙卷风表现。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"scene_tornado\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 接收后执行固定龙卷风能力。\n- 对外不暴露 `triggerId`、`triggerConfigId`、阶段、起点、落点、朝向、动画或其它内部控制项。\n- Gateway 等待龙卷风表现和落地段结束后，同步最终落点。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要在移动后释放时，LLM 先发 `stop_move`，停下后再发 `scene_tornado`。\n- `scene_tornado` 执行期间会接管角色表现，不允许其它 skill 打断。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `trigger_missing`\n- `action_missing`\n- `landing_unavailable`\n- `protocol_failed`\n\n## 备注\n\n- 本 skill 首版是空参数固定技能，后续若真要开放控制项，应通过新 schemaVersion 处理。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "basic/stop_move.md", "title": "stop_move", "category": "基础控制", "englishLabel": "stop_move", "chineseLabel": "停止移动", "summary": "stop_move 对外 LLM skill 契约，定义停止当前移动的幂等语义。", "content": "# stop_move\n\n## 技能说明\n\n停止当前角色正在进行的移动。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"stop_move\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 接收后尝试停止当前移动。\n- 如果当前正在执行 `move_to`，应打断该移动。\n- 如果当前没有在移动，也应按幂等成功处理，不因为“本来就没动”而报错。\n- `stop_move` 被 accepted 后，原 `move_to` 内部取消，不单独发送原 `move_to` 的 `skill_finished`。\n\n## 并发 / 打断规则\n\n- `stop_move` 的主要用途是把角色从移动态切回可执行其它 skill 的状态。\n- `stop_move` 成功后，LLM 再发送下一个目标 skill。\n- 当前正在执行射击、飞镖、跳舞、载具等占用型长流程 skill 时，`stop_move` 不负责打断，Gateway 返回 `skill_in_progress`。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n\n## 备注\n\n- `stop_move` 只处理移动停止语义，不承担其它活动退出、取消报名或中止载具流程的职责。\n- v1 不提供通用 `cancel_skill / abort_skill`；取消长期玩法、退出活动或停止托管不复用 `stop_move`。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/coffee_auto_schedule.md", "title": "coffee_auto_schedule", "category": "单人活动", "englishLabel": "coffee_auto_schedule", "chineseLabel": "喝咖啡自动编排", "summary": "coffee_auto_schedule 对外 LLM skill 契约，定义喝咖啡自动编排的高层参数。", "content": "# coffee_auto_schedule\n\n## 技能说明\n\n执行一次完整的买咖啡并饮用流程。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"coffee_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"coffeeName\": \"美式咖啡\"\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `coffeeName` | `string` | 是 | 咖啡名称，精确匹配。 |\n\n## 执行语义\n\n- Gateway 负责完成购买和饮用。\n- 不自动查找或占用座位。\n- 如果后续需要“先坐下再喝”，应由 LLM 先调用 `seat_sit`，再调用 `coffee_auto_schedule`。\n- 咖啡购买、饮用和消费保护都由 Gateway 负责；LLM 不传 `coffeeItemId`、`isSit` 或表现等待参数。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后喝咖啡时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n- `coffee_name_invalid`\n\n## failed reasons\n\n- `session_not_running`\n- `coffee_buy_blocked`\n- `coffee_buy_failed`\n- `coffee_drink_failed`\n- `coffee_protocol_error`\n\n## 备注\n\n- `isSit` 已从首批对外参数中移除。\n- 参数取值说明见 [../parameter-tables/coffee_auto_schedule.md](../parameter-tables/coffee_auto_schedule.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/dance_auto_schedule.md", "title": "dance_auto_schedule", "category": "单人活动", "englishLabel": "dance_auto_schedule", "chineseLabel": "跳舞自动编排", "summary": "dance_auto_schedule 对外 LLM skill 契约，定义跳舞活动自动编排的空参数高层入口。", "content": "# dance_auto_schedule\n\n## 技能说明\n\n执行一次完整的跳舞自动编排流程。Gateway 负责前往活动点、报名、补次数、按节奏提交成绩并等待活动结束。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"dance_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 内部负责：\n  - 自动前往活动点\n  - 自动报名\n  - 次数不足时自动补购\n  - 自动执行整场流程\n  - 在每次可提交窗口内按内部默认规则提交成绩\n- 不对外暴露 `stepCount`、`stepIntervalMs`、`startWaitMs`、`endWaitMs`、`danceStepId`、`speedPermille` 等内部参数。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后再跳舞时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `activity_point_missing`\n- `go_to_failed`\n- `apply_failed`\n- `start_notify_timeout`\n- `end_notify_timeout`\n- `protocol_failed`\n\n## 备注\n\n- 当前对 LLM 暴露的是“安排自动跳一场”，不是节拍控制器。\n- 参数取值说明见 [../parameter-tables/dance_auto_schedule.md](../parameter-tables/dance_auto_schedule.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/darts_auto_schedule.md", "title": "darts_auto_schedule", "category": "单人活动", "englishLabel": "darts_auto_schedule", "chineseLabel": "飞镖自动编排", "summary": "darts_auto_schedule 对外 LLM skill 契约，定义飞镖自动编排的高层参数。", "content": "# darts_auto_schedule\n\n## 技能说明\n\n执行一次完整的飞镖自动编排流程。Gateway 负责检查镖盘、补足当前局飞镖、开始投掷并提交结果。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"darts_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"score\": 120,\n    \"dartPos\": 2,\n    \"allowSwitchWhenOccupied\": true,\n    \"darts\": [\n      {\n        \"dartItem\": \"general\",\n        \"count\": 3\n      },\n      {\n        \"dartItem\": \"elementary\",\n        \"count\": 3\n      },\n      {\n        \"dartItem\": \"advanced\",\n        \"count\": 3\n      }\n    ],\n    \"allowPurchaseWhenInsufficient\": false\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `score` | `integer` | 是 | 期望总分。 |\n| `dartPos` | `integer` | 否 | 优先指定的飞镖台位；不传表示 Gateway 自动选台。 |\n| `allowSwitchWhenOccupied` | `boolean` | 否 | 指定台位被占用时，是否允许 Gateway 自动换其它候选台位。默认 `true`。 |\n| `darts` | `array` | 是 | 本局使用的飞镖方案。 |\n| `darts[].dartItem` | `string` | 是 | `general`、`elementary`、`advanced`。 |\n| `darts[].count` | `integer` | 是 | 当前类型飞镖数量，允许 `0`。 |\n| `allowPurchaseWhenInsufficient` | `boolean` | 否 | 飞镖数量不足时，是否允许 Gateway 自动购买本局缺口。默认 `false`。 |\n\n## 执行语义\n\n- `darts` 中每种 `dartItem` 固定出现一次。\n- `darts` 的总数量必须等于 `9`。\n- 三种 `count` 允许为 `0`。\n- Gateway 只会补足当前局缺口，不做额外囤货。\n- 补购行为完全受 Gateway 侧消费规则控制。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后再打飞镖时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n- `darts_dart_pos_invalid`\n- `darts_score_invalid`\n- `darts_score_exceeds_limit`\n- `darts_dart_item_invalid`\n- `darts_dart_count_invalid`\n- `darts_dart_plan_invalid`\n\n## failed reasons\n\n- `session_not_running`\n- `dart_pos_occupied`\n- `no_available_dart_pos`\n- `insufficient_darts`\n- `insufficient_entry_cost`\n- `spending_limit_exceeded`\n- `purchase_failed`\n- `protocol_failed`\n- `cleanup_failed`\n\n## 备注\n\n- 本 skill 只暴露业务语义，不暴露内部道具 id、购买协议字段或底层投掷步骤。\n- `dartItem` 的固定取值和组合规则见 [../parameter-tables/darts_auto_schedule.md](../parameter-tables/darts_auto_schedule.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/draw_lots_auto_schedule.md", "title": "draw_lots_auto_schedule", "category": "单人活动", "englishLabel": "draw_lots_auto_schedule", "chineseLabel": "抽签自动编排", "summary": "draw_lots_auto_schedule 对外 LLM skill 契约，定义抽签活动自动编排入口。", "content": "# draw_lots_auto_schedule\n\n## 技能说明\n\n执行一次完整的抽签自动编排流程。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"draw_lots_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 负责自动前往活动点、检查是否需要购买、发起抽签并完成流程。\n- 消费判断、免费优先和购买保护由 Gateway 自己负责。\n- 对外不暴露活动点、购买数量、等待时间或底层开始/结束步骤。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后抽签时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `draw_lots_go_to_activity_failed`\n- `draw_lots_buy_blocked`\n- `draw_lots_buy_failed`\n- `draw_lots_start_failed`\n- `draw_lots_protocol_error`\n\n## 备注\n\n- 首批只开放高层自动编排入口，不开放底层活动参数。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/paper_plane_auto_schedule.md", "title": "paper_plane_auto_schedule", "category": "单人活动", "englishLabel": "paper_plane_auto_schedule", "chineseLabel": "纸飞机自动编排", "summary": "paper_plane_auto_schedule 对外 LLM skill 契约，定义纸飞机自动编排的高层参数。", "content": "# paper_plane_auto_schedule\n\n## 技能说明\n\n执行一次完整的纸飞机自动编排流程。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"paper_plane_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"planeName\": \"纸飞机A\",\n    \"useTimeMs\": 12000,\n    \"isComplete\": true\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `planeName` | `string` | 是 | 纸飞机名称，精确匹配。 |\n| `useTimeMs` | `integer` | 是 | 使用时长，必须落在 Gateway 允许范围内。超范围直接 reject，不做 clamp。 |\n| `isComplete` | `boolean` | 是 | 是否按完整流程执行。 |\n\n## 执行语义\n\n- Gateway 按 `planeName` 精确匹配目标纸飞机。\n- Gateway 负责自动前往活动点、必要购买、开始使用、提交结果。\n- `useTimeMs` 是对外唯一开放的时间控制字段。\n- `isComplete` 决定本次按完成还是未完成结果提交。\n- 免费次数优先、缺资源时是否补购、补购后的消费限制都由 Gateway 负责。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后放纸飞机时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n- `paper_plane_plane_name_invalid`\n- `paper_plane_use_time_ms_invalid`\n\n## failed reasons\n\n- `session_not_running`\n- `paper_plane_go_to_activity_failed`\n- `paper_plane_buy_item_blocked`\n- `paper_plane_buy_item_failed`\n- `paper_plane_start_failed`\n- `paper_plane_submit_failed`\n- `paper_plane_protocol_error`\n\n## 备注\n\n- 首批不开放 `paper_plane_synthesis`。\n- `planeName` 采用精确匹配，不支持别名。\n- 对外不暴露 `configId`、`itemId`、`shopId`、购买数量或等待表现细节。\n- 参数取值说明见 [../parameter-tables/paper_plane_auto_schedule.md](../parameter-tables/paper_plane_auto_schedule.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/shooting_auto_schedule.md", "title": "shooting_auto_schedule", "category": "单人活动", "englishLabel": "shooting_auto_schedule", "chineseLabel": "射击自动编排", "summary": "shooting_auto_schedule 对外 LLM skill 契约，定义射击自动编排的高层参数。", "content": "# shooting_auto_schedule\n\n## 技能说明\n\n执行一次完整的射击自动编排流程。Gateway 负责到场、可用性检查、必要补购、开始、提交和结束。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"shooting_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"distance\": \"10m\",\n    \"weapon\": \"pistol\",\n    \"posture\": \"standing\",\n    \"gameMode\": \"practice\",\n    \"score\": 86,\n    \"tableNum\": 3,\n    \"allowSwitchWhenOccupied\": true\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `distance` | `string` | 是 | 固定业务枚举，当前按客户端现有靶距枚举。 |\n| `weapon` | `string` | 是 | 固定业务枚举，当前按客户端现有枪型枚举。 |\n| `posture` | `string` | 是 | 固定业务枚举，当前按客户端现有姿势枚举。 |\n| `gameMode` | `string` | 否 | `practice`、`match`、`points`。默认 `practice`。 |\n| `score` | `integer` | 是 | LLM 期望命中的分数。 |\n| `tableNum` | `integer` | 否 | 优先指定的台位编号；不传表示 Gateway 自动选台。 |\n| `allowSwitchWhenOccupied` | `boolean` | 否 | 指定台位被占用时，是否允许 Gateway 自动换台。默认 `true`。 |\n\n## 执行语义\n\n- Gateway 负责自动到活动点、检查台位、开始射击、提交成绩。\n- 子弹不足时，Gateway 先判断免费次数与库存，再决定是否补购当前枪型所需子弹。\n- 补购只受 Gateway 自身消费保护控制，LLM 不传预算字段。\n- 指定 `tableNum` 时，Gateway 优先尝试该台位；若被占用且 `allowSwitchWhenOccupied=true`，继续换其它候选台位。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后再打枪时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n- `shooting_table_num_invalid`\n- `shooting_distance_invalid`\n- `shooting_weapon_invalid`\n- `shooting_posture_invalid`\n- `shooting_game_mode_invalid`\n- `shooting_score_invalid`\n- `shooting_score_exceeds_limit`\n- `shooting_project_invalid`\n\n## failed reasons\n\n- `session_not_running`\n- `table_occupied`\n- `resource_exhausted`\n- `protocol_failed`\n- `cleanup_failed`\n\n## 备注\n\n- 本 skill 只暴露高层业务参数，不暴露项目 id、商品 id、库存 id 等内部细节。\n- `distance / weapon / posture / gameMode` 的固定取值表见 [../parameter-tables/shooting_auto_schedule.md](../parameter-tables/shooting_auto_schedule.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/sign_in.md", "title": "sign_in", "category": "单人活动", "englishLabel": "sign_in", "chineseLabel": "场景签到", "summary": "sign_in 对外 LLM skill 契约，定义固定签到动作的高层入口。", "content": "# sign_in\n\n## 技能说明\n\n执行当前场景内的签到动作。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"sign_in\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 接收后执行签到。\n- 对外不暴露底层协议字段或内部签到步骤。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 如需在移动后签到，LLM 先发 `stop_move`，停下后再发 `sign_in`。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `sign_in_failed`\n- `sign_in_protocol_error`\n\n## 备注\n\n- 如果失败原因来自下层协议，对外统一归并到固定枚举，不回传动态错误文本。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "activities/wish_board_auto_schedule.md", "title": "wish_board_auto_schedule", "category": "单人活动", "englishLabel": "wish_board_auto_schedule", "chineseLabel": "许愿牌自动编排", "summary": "wish_board_auto_schedule 对外 LLM skill 契约，定义许愿牌自动编排的高层参数。", "content": "# wish_board_auto_schedule\n\n## 技能说明\n\n执行一次完整的许愿牌自动编排流程。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"wish_board_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"boardName\": \"心愿牌\",\n    \"wish\": \"希望今天顺利\"\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `boardName` | `string` | 是 | 许愿牌名称，精确匹配。 |\n| `wish` | `string` | 是 | 许愿内容。 |\n\n## 执行语义\n\n- Gateway 按 `boardName` 精确定位要使用的许愿牌。\n- 购买数量固定为 `1`，不由 LLM 控制。\n- 买牌和许愿的消费保护、免费优先和累计消费限制都由 Gateway 负责。\n- 对外不暴露内部 `configId`、购买协议细节或表现同步参数。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后许愿时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n- `wish_board_board_name_invalid`\n- `wish_board_wish_invalid`\n- `wish_board_wish_too_long`\n\n## failed reasons\n\n- `session_not_running`\n- `wish_board_go_to_activity_failed`\n- `wish_board_buy_card_blocked`\n- `wish_board_buy_card_failed`\n- `wish_board_make_wish_failed`\n- `wish_board_protocol_error`\n\n## 备注\n\n- `boardName` 只允许精确匹配，不支持模糊查找、别名或近似词。\n- `wish` 的长度上限由 Gateway 配置控制，不由 LLM 写死。\n- 参数取值说明见 [../parameter-tables/wish_board_auto_schedule.md](../parameter-tables/wish_board_auto_schedule.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "seat-and-vehicle/elevator_auto_schedule.md", "title": "elevator_auto_schedule", "category": "座位与载具", "englishLabel": "elevator_auto_schedule", "chineseLabel": "电梯自动编排", "summary": "elevator_auto_schedule 对外 LLM skill 契约，定义电梯自动编排高层入口。", "content": "# elevator_auto_schedule\n\n## 技能说明\n\n执行一次完整的电梯自动编排流程。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"elevator_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 负责找到可用电梯并执行完整电梯流程。\n- 对外不暴露 `elevatorId`、楼层 id、按钮 id、`waitMs`、`exitAfterJoin`、协议步骤或等待细节。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后坐电梯时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `elevator_available_missing`\n- `elevator_start_failed`\n- `elevator_wait_end_timeout`\n- `elevator_protocol_error`\n\n## 备注\n\n- 本 skill 是高层自动编排入口，不承诺对 LLM 暴露内部楼层控制参数。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "seat-and-vehicle/helicopter_auto_schedule.md", "title": "helicopter_auto_schedule", "category": "座位与载具", "englishLabel": "helicopter_auto_schedule", "chineseLabel": "直升机自动乘坐", "summary": "helicopter_auto_schedule 对外 LLM skill 契约，定义直升机自动乘坐的高层入口。", "content": "# helicopter_auto_schedule\n\n## 技能说明\n\n执行一次完整的直升机自动编排流程。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"helicopter_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 负责找到可用直升机、上去并等待服务器推送的结束态。\n- 对外不暴露直升机 id、配置 id、候选策略、底层协议参数等内部字段。\n- 本 skill 不负责下楼；如果后续需要下楼，由 `elevator_auto_schedule` 单独处理。\n- 等待开始期间如果允许取消，Gateway 通过 `observation_updated(reason=vehicle_cancel_window)` 发放窄 lease。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后坐直升机时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `no_available_helicopter`\n- `go_to_failed`\n- `join_failed`\n- `protocol_failed`\n\n## 备注\n\n- 对外是高层“坐一次直升机”，不是“控制直升机内部阶段”。\n- 如果 LLM 在取消窗口内调用 `helicopter_exit` 并被 accepted，原 `helicopter_auto_schedule` 内部取消，不单独发送原 skill 的 `skill_finished`。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "seat-and-vehicle/helicopter_exit.md", "title": "helicopter_exit", "category": "座位与载具", "englishLabel": "helicopter_exit", "chineseLabel": "直升机取消乘坐", "summary": "helicopter_exit 对外 LLM skill 契约，只允许在直升机等待开始取消窗口内退出。", "content": "# helicopter_exit\n\n## 技能说明\n\n在直升机等待开始取消窗口内，取消本次直升机乘坐。\n\n这不是通用下车按钮，只允许作为 `helicopter_auto_schedule` 的配对退出 skill 使用。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"helicopter_exit\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- 只允许在 `observation_updated(reason=vehicle_cancel_window)` 发出的窄 lease 下调用。\n- 当前挂起中的载具流程必须是 `helicopter_auto_schedule`。\n- 如果 `helicopter_exit` 被 accepted，原 `helicopter_auto_schedule` 内部取消，不单独发送原 skill 的 `skill_finished`。\n- 成功和幂等成功统一返回 `reason=ok`。\n\n## 并发 / 打断规则\n\n- 不允许在普通 lease 下调用。\n- 不允许在热气球取消窗口下调用。\n- 不允许打断其它普通 skill 或其它载具流程。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `protocol_failed`\n\n## 备注\n\n- 如果当前已经不在直升机上，但最终状态已经符合“取消成功”的目标，对外仍返回 `ok`，细节只写 Gateway 日志。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "seat-and-vehicle/hot_air_balloon_auto_schedule.md", "title": "hot_air_balloon_auto_schedule", "category": "座位与载具", "englishLabel": "hot_air_balloon_auto_schedule", "chineseLabel": "热气球自动乘坐", "summary": "hot_air_balloon_auto_schedule 对外 LLM skill 契约，定义热气球自动乘坐的高层入口。", "content": "# hot_air_balloon_auto_schedule\n\n## 技能说明\n\n执行一次完整的热气球自动编排流程。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"hot_air_balloon_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- Gateway 负责找到可用热气球、上去并等待服务器推送的结束态。\n- 对外不暴露热气球 id、配置 id、候选策略、表现参数等内部字段。\n- 本 skill 只覆盖热气球本身流程，不负责后续楼层移动。\n- 等待开始期间如果允许取消，Gateway 通过 `observation_updated(reason=vehicle_cancel_window)` 发放窄 lease。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后坐热气球时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `no_available_hot_air_balloon`\n- `go_to_failed`\n- `join_failed`\n- `protocol_failed`\n\n## 备注\n\n- 如果 LLM 在取消窗口内调用 `hot_air_balloon_exit` 并被 accepted，原 `hot_air_balloon_auto_schedule` 内部取消，不单独发送原 skill 的 `skill_finished`。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "seat-and-vehicle/hot_air_balloon_exit.md", "title": "hot_air_balloon_exit", "category": "座位与载具", "englishLabel": "hot_air_balloon_exit", "chineseLabel": "热气球取消乘坐", "summary": "hot_air_balloon_exit 对外 LLM skill 契约，只允许在热气球等待开始取消窗口内退出。", "content": "# hot_air_balloon_exit\n\n## 技能说明\n\n在热气球等待开始取消窗口内，取消本次热气球乘坐。\n\n这不是通用下车按钮，只允许作为 `hot_air_balloon_auto_schedule` 的配对退出 skill 使用。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"hot_air_balloon_exit\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## arguments 字段\n\n无字段。\n\n## 执行语义\n\n- 只允许在 `observation_updated(reason=vehicle_cancel_window)` 发出的窄 lease 下调用。\n- 当前挂起中的载具流程必须是 `hot_air_balloon_auto_schedule`。\n- 如果 `hot_air_balloon_exit` 被 accepted，原 `hot_air_balloon_auto_schedule` 内部取消，不单独发送原 skill 的 `skill_finished`。\n- 成功和幂等成功统一返回 `reason=ok`。\n\n## 并发 / 打断规则\n\n- 不允许在普通 lease 下调用。\n- 不允许在直升机取消窗口下调用。\n- 不允许打断其它普通 skill 或其它载具流程。\n\n## reject reasons\n\n无专属 reject。\n\n## failed reasons\n\n- `session_not_running`\n- `protocol_failed`\n\n## 备注\n\n- 如果当前已经不在热气球上，但最终状态已经符合“取消成功”的目标，对外仍返回 `ok`，细节只写 Gateway 日志。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "seat-and-vehicle/seat_get_out.md", "title": "seat_get_out", "category": "座位与载具", "englishLabel": "seat_get_out", "chineseLabel": "离座", "summary": "seat_get_out 对外 LLM skill 契约，定义按 sceneId 和 chairId 离座。", "content": "# seat_get_out\n\n## 技能说明\n\n让当前角色从指定座位起身。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"seat_get_out\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"sceneId\": 1001,\n    \"chairId\": 23\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `sceneId` | `integer` | 是 | 座位所属场景 id。 |\n| `chairId` | `integer` | 是 | 座位 id。 |\n\n## 执行语义\n\n- Gateway 按 `sceneId + chairId` 定位要离开的座位。\n- 对外仍然保留显式座位参数，避免 LLM 误以为该 skill 会自动推断其它上下文。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后离座时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n- `seat_scene_id_invalid`\n- `seat_chair_id_invalid`\n\n## failed reasons\n\n- `session_not_running`\n- `seat_get_out_failed`\n- `seat_protocol_error`\n\n## 备注\n\n- 如果当前不在该座位上，最终对外失败 reason 由 Gateway 归并到固定枚举，不回传内部细节。\n- 参数取值说明见 [../parameter-tables/seat_get_out.md](../parameter-tables/seat_get_out.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "seat-and-vehicle/seat_sit.md", "title": "seat_sit", "category": "座位与载具", "englishLabel": "seat_sit", "chineseLabel": "入座", "summary": "seat_sit 对外 LLM skill 契约，定义按 sceneId 和 chairId 入座。", "content": "# seat_sit\n\n## 技能说明\n\n让当前角色坐到指定座位。\n\n## 请求示例\n\n```json\n{\n  \"skillName\": \"seat_sit\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"sceneId\": 1001,\n    \"chairId\": 23\n  }\n}\n```\n\n## arguments 字段\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `sceneId` | `integer` | 是 | 座位所属场景 id。 |\n| `chairId` | `integer` | 是 | 座位 id。 |\n\n## 执行语义\n\n- Gateway 按 `sceneId + chairId` 精确定位座位。\n- 首批不支持“自动找最近座位”。\n\n## 并发 / 打断规则\n\n- 不允许和 `move_to` 直接并行。\n- 需要移动后坐下时，LLM 先发 `stop_move`，停下后再发本 skill。\n\n## reject reasons\n\n- `seat_scene_id_invalid`\n- `seat_chair_id_invalid`\n\n## failed reasons\n\n- `session_not_running`\n- `seat_not_available`\n- `seat_sit_failed`\n- `seat_protocol_error`\n\n## 备注\n\n- 如果后续需要查询附近座位，应通过 query 能力单独扩展，不在本 skill 内隐式查找。\n- 参数取值说明见 [../parameter-tables/seat_sit.md](../parameter-tables/seat_sit.md)。\n- 通用规则见 [../common-rules.md](../common-rules.md)。"}, {"id": "parameter-tables/coffee_auto_schedule.md", "title": "coffee_auto_schedule 参数表", "category": "参数表", "englishLabel": "coffee_auto_schedule", "chineseLabel": "咖啡参数表", "summary": "coffee_auto_schedule 面向 LLM 的固定参数表，定义咖啡名称的外部字段语义。", "content": "# coffee_auto_schedule 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"coffee_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"coffeeName\": \"美式咖啡\"\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `coffeeName` | `string` | 是 | 咖啡名称，精确匹配，不支持别名或模糊匹配。 |\n\n## 语义补充\n\n- 对外只暴露 `coffeeName`。\n- Gateway 会把 `coffeeName` 映射到内部购买入口和道具配置。\n- 如果后续需要“先坐下再喝”，应先单独调用 `seat_sit`，再调用 `coffee_auto_schedule`。\n\n## 不对外开放的内部字段\n\n以下字段虽然存在内部实现，但不属于 LLM v1 外部契约：\n\n- `buy.coffeeId`\n- `drink.coffeeItemId`\n- `drink.isSit`\n- `drink.presentationWaitMs`\n- `presentationWaitMs`"}, {"id": "parameter-tables/dance_auto_schedule.md", "title": "dance_auto_schedule 参数表", "category": "参数表", "englishLabel": "dance_auto_schedule", "chineseLabel": "跳舞参数表", "summary": "dance_auto_schedule 面向 LLM 的固定参数表，说明 v1 固定为空参数对象。", "content": "# dance_auto_schedule 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"dance_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {}\n}\n```\n\n## 字段表\n\n无字段。\n\n## 语义补充\n\n- 当前 v1 只表达“安排自动跳一场”。\n- 当前 v1 不开放 `stepCount`、`stepIntervalMs`、`startWaitMs`、`endWaitMs`、`danceStepId`、`speedPermille`。\n- 当前 v1 也不开放购买参数、报名参数或舞步切换参数。\n\n## Gateway 内部负责的内容\n\n- 前往活动点\n- 报名\n- 次数不足时自动补购\n- 等待开场\n- 逐步提交成绩\n- 等待结束\n\n## 不允许 LLM 侧补传的字段\n\n以下字段属于 Gateway 内部编排参数，LLM 不应补传：\n\n- `stepCount`\n- `stepIntervalMs`\n- `startWaitMs`\n- `endWaitMs`\n- `scorePerStep`\n- `presentation`\n- `submit.maxAllowedScore`\n- `apply`\n- `waiveAfterSchedule`\n\n如果对外请求里出现这些字段，应按未知字段拒绝。"}, {"id": "parameter-tables/darts_auto_schedule.md", "title": "darts_auto_schedule 参数表", "category": "参数表", "englishLabel": "darts_auto_schedule", "chineseLabel": "飞镖参数表", "summary": "darts_auto_schedule 面向 LLM 的固定参数表，定义飞镖类型、数量约束和值域。", "content": "# darts_auto_schedule 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"darts_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"score\": 120,\n    \"dartPos\": 2,\n    \"allowSwitchWhenOccupied\": true,\n    \"darts\": [\n      {\n        \"dartItem\": \"general\",\n        \"count\": 3\n      },\n      {\n        \"dartItem\": \"elementary\",\n        \"count\": 3\n      },\n      {\n        \"dartItem\": \"advanced\",\n        \"count\": 3\n      }\n    ],\n    \"allowPurchaseWhenInsufficient\": false\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `score` | `integer` | 是 | 大于等于 `0`，且不能超过 Gateway 当前飞镖分数上限。 |\n| `dartPos` | `integer` | 否 | 正整数。具体可用镖盘由当前场景决定；不传表示 Gateway 自动选台。 |\n| `allowSwitchWhenOccupied` | `boolean` | 否 | `true` 表示指定镖盘被占用时允许 Gateway 自动换盘。 |\n| `darts` | `array` | 是 | 飞镖方案数组。 |\n| `darts[].dartItem` | `string` | 是 | 固定枚举，见下表。 |\n| `darts[].count` | `integer` | 是 | `0..9`。 |\n| `allowPurchaseWhenInsufficient` | `boolean` | 否 | 飞镖数量不足时，是否允许 Gateway 自动补当前局缺口。默认 `false`。 |\n\n## dartItem 枚举\n\n| 值 | 含义 |\n|---|---|\n| `general` | 普通飞镖 |\n| `elementary` | 初级飞镖 |\n| `advanced` | 高级飞镖 |\n\n## darts 组合规则\n\n- `darts` 中必须且只能包含 `general / elementary / advanced` 三项。\n- 每种 `dartItem` 固定出现一次。\n- 所有 `count` 之和必须等于 `9`。\n- 任一 `count` 允许等于 `0`。\n\n## 合法示例\n\n### 全部普通飞镖\n\n```json\n{\n  \"score\": 90,\n  \"darts\": [\n    {\n      \"dartItem\": \"general\",\n      \"count\": 9\n    },\n    {\n      \"dartItem\": \"elementary\",\n      \"count\": 0\n    },\n    {\n      \"dartItem\": \"advanced\",\n      \"count\": 0\n    }\n  ]\n}\n```\n\n### 三种飞镖混用\n\n```json\n{\n  \"dartPos\": 2,\n  \"score\": 120,\n  \"darts\": [\n    {\n      \"dartItem\": \"general\",\n      \"count\": 3\n    },\n    {\n      \"dartItem\": \"elementary\",\n      \"count\": 3\n    },\n    {\n      \"dartItem\": \"advanced\",\n      \"count\": 3\n    }\n  ]\n}\n```\n\n## 不合法示例\n\n- `darts` 总数不是 `9`\n- 同一个 `dartItem` 出现两次\n- 缺少某个固定 `dartItem`\n- 出现未定义的 `dartItem`\n\n这些情况应直接按 `darts_dart_plan_invalid`、`darts_dart_item_invalid` 或 `darts_dart_count_invalid` 拒绝。\n\n## 语义补充\n\n- Gateway 只会补当前局缺口，不会额外囤货。\n- 补购和消费保护完全由 Gateway 决定。\n- 对外不开放内部道具配置 id。"}, {"id": "parameter-tables/move_to.md", "title": "move_to 参数表", "category": "参数表", "englishLabel": "move_to", "chineseLabel": "移动参数表", "summary": "move_to 面向 LLM 的固定参数表，定义坐标移动请求、速度枚举和停止距离规则。", "content": "# move_to 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"move_to\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"target\": {\n      \"x\": 120.5,\n      \"y\": 8.0,\n      \"z\": -35.2\n    },\n    \"speedMode\": \"walk\",\n    \"stopDistance\": 0.5\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `target.x` | `number` | 是 | 目标点 X 坐标。 |\n| `target.y` | `number` | 是 | 目标点 Y 坐标。 |\n| `target.z` | `number` | 是 | 目标点 Z 坐标。 |\n| `speedMode` | `string` | 否 | 固定枚举，见下表。默认 `walk`。 |\n| `stopDistance` | `number` | 否 | 大于等于 `0`。允许传 `0`。默认 `0.5`。 |\n\n## speedMode 枚举\n\n| 值 | 含义 |\n|---|---|\n| `walk` | 走路 |\n| `run` | 跑步 |\n\n## 语义补充\n\n- `target` 使用世界坐标。\n- `stopDistance` 表示距离目标点多近时算到达，不是额外偏移量。\n- `stopDistance = 0` 合法，但不保证必须与目标点完全零误差重合。\n\n## 不对外开放的内部字段\n\n以下字段虽然存在内部 DTO，但不属于 LLM v1 外部契约：\n\n- `maxSnapDistance`\n\n如果外部请求传这些字段，应按未知字段拒绝。"}, {"id": "parameter-tables/paper_plane_auto_schedule.md", "title": "paper_plane_auto_schedule 参数表", "category": "参数表", "englishLabel": "paper_plane_auto_schedule", "chineseLabel": "纸飞机参数表", "summary": "paper_plane_auto_schedule 面向 LLM 的固定参数表，定义纸飞机名称、使用时长和完成标记。", "content": "# paper_plane_auto_schedule 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"paper_plane_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"planeName\": \"纸飞机A\",\n    \"useTimeMs\": 12000,\n    \"isComplete\": true\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `planeName` | `string` | 是 | 纸飞机名称，精确匹配。 |\n| `useTimeMs` | `integer` | 是 | 必须大于 `0`，且不能超过 Gateway 当前允许的最大纸飞机时长。超范围直接 reject，不做 clamp。 |\n| `isComplete` | `boolean` | 是 | 是否按完成关卡结果提交。 |\n\n## useTimeMs 规则\n\n- `useTimeMs <= 0`：直接 reject\n- `useTimeMs > Gateway 当前最大时长`：直接 reject\n- 不做自动截断或 clamp\n\n## 语义补充\n\n- `planeName` 对外是业务名，不暴露内部 `configId`。\n- `useTimeMs` 是 LLM 唯一可控制的时间字段。\n- `isComplete=true` 表示按完成结果提交；`false` 表示按未完成结果提交。\n- 是否购买、购买哪个内部商品、等待多久、是否沿用免费次数，都由 Gateway 内部处理。\n\n## 不对外开放的内部字段\n\n以下字段虽然存在内部实现，但不属于 LLM v1 外部契约：\n\n- `presentation.configId`\n- `presentation.showEffect`\n- `presentation.hideEffect`\n- `submit.itemId`\n- `submit.isUseFree`\n- `purchaseWhenNoFree`\n- `waitMs`\n- `waitUseTime`"}, {"id": "parameter-tables/seat_get_out.md", "title": "seat_get_out 参数表", "category": "参数表", "englishLabel": "seat_get_out", "chineseLabel": "离座参数表", "summary": "seat_get_out 面向 LLM 的固定参数表，定义离座时使用的 sceneId 和 chairId。", "content": "# seat_get_out 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"seat_get_out\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"sceneId\": 1001,\n    \"chairId\": 23\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `sceneId` | `integer` | 是 | 正整数。 |\n| `chairId` | `integer` | 是 | 正整数。 |\n\n## 语义补充\n\n- 对外仍然要求显式传 `sceneId + chairId`。\n- 不依赖 Gateway 根据“当前正坐着哪个座位”替 LLM 自动补外部请求参数。\n- `sceneId <= 0` 或 `chairId <= 0` 都应直接 reject。"}, {"id": "parameter-tables/seat_sit.md", "title": "seat_sit 参数表", "category": "参数表", "englishLabel": "seat_sit", "chineseLabel": "入座参数表", "summary": "seat_sit 面向 LLM 的固定参数表，定义入座时使用的 sceneId 和 chairId。", "content": "# seat_sit 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"seat_sit\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"sceneId\": 1001,\n    \"chairId\": 23\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `sceneId` | `integer` | 是 | 正整数。 |\n| `chairId` | `integer` | 是 | 正整数。 |\n\n## 语义补充\n\n- `sceneId + chairId` 共同唯一定位目标座位。\n- 首批不支持“自动找最近座位”。\n- `sceneId <= 0` 或 `chairId <= 0` 都应直接 reject。"}, {"id": "parameter-tables/shooting_auto_schedule.md", "title": "shooting_auto_schedule 参数表", "category": "参数表", "englishLabel": "shooting_auto_schedule", "chineseLabel": "射击参数表", "summary": "shooting_auto_schedule 面向 LLM 的固定参数表，定义射击项目枚举、组合规则和值域。", "content": "# shooting_auto_schedule 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"shooting_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"distance\": \"10m\",\n    \"weapon\": \"pistol\",\n    \"posture\": \"standing\",\n    \"gameMode\": \"practice\",\n    \"score\": 86,\n    \"tableNum\": 3,\n    \"allowSwitchWhenOccupied\": true\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `distance` | `string` | 是 | 固定枚举，见下表。 |\n| `weapon` | `string` | 是 | 固定枚举，见下表。 |\n| `posture` | `string` | 是 | 固定枚举，见下表。 |\n| `gameMode` | `string` | 否 | 固定枚举，见下表；默认 `practice`。 |\n| `score` | `integer` | 是 | 大于等于 `0`，且不能超过 Gateway 当前射击分数上限。 |\n| `tableNum` | `integer` | 否 | 正整数。具体可用台位由当前场景决定。 |\n| `allowSwitchWhenOccupied` | `boolean` | 否 | `true` 表示指定台位被占用时允许 Gateway 自动换台。 |\n\n## distance 枚举\n\n| 值 | 含义 |\n|---|---|\n| `10m` | 10 米项目 |\n| `25m` | 25 米项目 |\n| `50m` | 50 米项目 |\n\n## weapon 枚举\n\n| 值 | 含义 |\n|---|---|\n| `pistol` | 手枪 |\n| `rifle` | 步枪 |\n\n## posture 枚举\n\n| 值 | 含义 |\n|---|---|\n| `standing` | 站姿 |\n| `crouching` | 蹲姿 |\n| `prone` | 卧姿 |\n\n## gameMode 枚举\n\n| 值 | 含义 |\n|---|---|\n| `practice` | 练习模式 |\n| `match` | 比赛模式 |\n| `points` | 积分赛模式 |\n\n## 合法项目组合\n\n`distance + weapon + posture` 不是任意组合，当前只允许以下 6 种：\n\n| distance | weapon | posture |\n|---|---|---|\n| `10m` | `pistol` | `standing` |\n| `10m` | `rifle` | `standing` |\n| `25m` | `pistol` | `standing` |\n| `50m` | `rifle` | `standing` |\n| `50m` | `rifle` | `crouching` |\n| `50m` | `rifle` | `prone` |\n\n## 不合法组合示例\n\n- `25m + rifle + standing`\n- `10m + pistol + crouching`\n- `10m + rifle + prone`\n- `50m + pistol + standing`\n\n这些组合应直接按 `shooting_project_invalid` 拒绝。\n\n## 语义补充\n\n- `score` 是 LLM 想提交的目标分数，不是命中次数。\n- 子弹不足、免费次数、补购和消费保护都由 Gateway 内部处理。\n\n## 与内部实现的关系\n\n- Gateway 内部会把 `distance` 映射成数值项目参数。\n- Gateway 内部会把 `weapon` 和 `posture` 映射成底层枪型与姿势参数。\n- Gateway 内部会把 `gameMode` 映射成具体玩法模式和等待开赛流程。\n- 这些内部映射规则不作为 LLM 侧契约字段暴露。"}, {"id": "parameter-tables/wish_board_auto_schedule.md", "title": "wish_board_auto_schedule 参数表", "category": "参数表", "englishLabel": "wish_board_auto_schedule", "chineseLabel": "许愿牌参数表", "summary": "wish_board_auto_schedule 面向 LLM 的固定参数表，定义许愿牌名称匹配和许愿文本规则。", "content": "# wish_board_auto_schedule 参数表\n\n## 对外参数形态\n\n```json\n{\n  \"skillName\": \"wish_board_auto_schedule\",\n  \"schemaVersion\": \"v1\",\n  \"arguments\": {\n    \"boardName\": \"心愿牌\",\n    \"wish\": \"希望今天顺利\"\n  }\n}\n```\n\n## 字段表\n\n| 字段 | 类型 | 必填 | 规则 |\n|---|---|---|---|\n| `boardName` | `string` | 是 | 许愿牌名称，精确匹配，不支持别名或模糊匹配。 |\n| `wish` | `string` | 是 | 许愿内容，不能为空白字符串。 |\n\n## 文本规则\n\n- `wish` 不能为空。\n- `wish` 长度不能超过 Gateway 当前配置的最大长度限制。\n- 这个长度上限由 Gateway 配置决定，LLM 不应写死具体数字。\n\n## 语义补充\n\n- 对外不暴露内部 `configId`。\n- 购买数量固定为 `1`，不由 LLM 控制。\n- `boardName` 的真实可选值以后续查询能力或配置表为准。\n\n## 不对外开放的内部字段\n\n以下字段属于内部编排参数，不属于 LLM v1 外部契约：\n\n- `buy.configId`\n- `buy.count`\n- `makeWish.configId`\n- `makeWish.syncPresentation`"}, {"id": "parameter-tables/index.md", "title": "固定参数表", "category": "参数表", "englishLabel": "parameter-tables", "chineseLabel": "固定参数表", "summary": "AiRobotGateway 首批 LLM skill 的固定参数表入口，收录当前已定稿的首批技能对外字段说明。", "content": "# 固定参数表\n\n## 说明\n\n本目录只描述面向 LLM 的对外固定参数表，不描述 Gateway 内部 DTO、协议字段或配置 id。\n\n当前已收录以下首批技能参数表：\n\n- [move_to 参数表](move_to.md)\n- [shooting_auto_schedule 参数表](shooting_auto_schedule.md)\n- [darts_auto_schedule 参数表](darts_auto_schedule.md)\n- [dance_auto_schedule 参数表](dance_auto_schedule.md)\n- [wish_board_auto_schedule 参数表](wish_board_auto_schedule.md)\n- [paper_plane_auto_schedule 参数表](paper_plane_auto_schedule.md)\n- [coffee_auto_schedule 参数表](coffee_auto_schedule.md)\n- [seat_sit 参数表](seat_sit.md)\n- [seat_get_out 参数表](seat_get_out.md)\n\n说明：\n\n- 无参数 skill 不单独建参数页时，以各自 skill 页中的请求示例和 `arguments 固定为空对象 {}` 为准。\n- 后续如需给 `hot_air_balloon_exit / helicopter_exit` 这类空参数 skill 单独做审核页，再补这里的索引。\n\n## 使用原则\n\n- LLM 只按这里声明的字段名、枚举值和值域传参。\n- Gateway 自己把这些高层参数映射到内部 `start / submit / apply / presentation` 等底层结构。\n- 未在这里开放的底层字段，LLM 不应自行补传。"}];
+        const categoryOrder = ["概览与规则", "基础控制", "单人活动", "座位与载具", "参数表"];
+        const categoryDisplayMap = {"概览与规则": {"english": "overview & rules", "chinese": "概览与规则"}, "基础控制": {"english": "basic controls", "chinese": "基础控制"}, "单人活动": {"english": "solo activities", "chinese": "单人活动"}, "座位与载具": {"english": "seat & vehicle", "chinese": "座位与载具"}, "参数表": {"english": "parameter tables", "chinese": "参数表"}};
+
+        marked.setOptions({
+            highlight: function (code, lang) {
+                const language = hljs.getLanguage(lang) ? lang : "plaintext";
+                return hljs.highlight(code, { language }).value;
+            },
+            langPrefix: "hljs language-",
+            breaks: true,
+            gfm: true
+        });
+
+        const navList = document.getElementById("navList");
+        const contentArea = document.getElementById("contentArea");
+
+        function getGroupedDocs(filterText) {
+            const grouped = new Map();
+            const filter = filterText.trim().toLowerCase();
+
+            docsData.forEach(doc => {
+                const matched = !filter
+                    || doc.title.toLowerCase().includes(filter)
+                    || doc.content.toLowerCase().includes(filter)
+                    || doc.id.toLowerCase().includes(filter)
+                    || doc.englishLabel.toLowerCase().includes(filter)
+                    || doc.chineseLabel.toLowerCase().includes(filter);
+
+                if (!matched) {
+                    return;
+                }
+
+                if (!grouped.has(doc.category)) {
+                    grouped.set(doc.category, []);
+                }
+                grouped.get(doc.category).push(doc);
+            });
+
+            return grouped;
+        }
+
+        function renderNav(filterText = "") {
+            navList.innerHTML = "";
+
+            const homeItem = document.createElement("li");
+            homeItem.className = "nav-item";
+            homeItem.innerHTML = `
+                <div class="nav-item-en">home</div>
+                <div class="nav-item-zh">总览首页</div>
+            `;
+            homeItem.onclick = showDashboard;
+            navList.appendChild(homeItem);
+
+            const grouped = getGroupedDocs(filterText);
+            const renderedCategories = [];
+
+            categoryOrder.forEach(category => {
+                if (grouped.has(category)) {
+                    renderedCategories.push(category);
+                }
+            });
+
+            grouped.forEach((_, category) => {
+                if (!renderedCategories.includes(category)) {
+                    renderedCategories.push(category);
+                }
+            });
+
+            renderedCategories.forEach(category => {
+                const categoryDocs = grouped.get(category) || [];
+                if (!categoryDocs.length) {
+                    return;
+                }
+
+                const categoryNode = document.createElement("li");
+                categoryNode.className = "category-name";
+                const categoryDisplay = categoryDisplayMap[category] || { english: category, chinese: category };
+                categoryNode.innerHTML = `
+                    <div class="category-name-en">${categoryDisplay.english}</div>
+                    <div class="category-name-zh">${categoryDisplay.chinese}</div>
+                `;
+                navList.appendChild(categoryNode);
+
+                categoryDocs.forEach(doc => {
+                    const docNode = document.createElement("li");
+                    docNode.className = "nav-item";
+                    docNode.innerHTML = `
+                        <div class="nav-item-en">${doc.englishLabel}</div>
+                        <div class="nav-item-zh">${doc.chineseLabel}</div>
+                    `;
+                    docNode.dataset.id = doc.id;
+                    docNode.onclick = () => loadDoc(doc.id, docNode);
+                    navList.appendChild(docNode);
+                });
+            });
+        }
+
+        function setActiveNav(id) {
+            document.querySelectorAll(".nav-item").forEach(node => node.classList.remove("active"));
+
+            if (!id) {
+                const homeNode = navList.querySelector(".nav-item");
+                if (homeNode) {
+                    homeNode.classList.add("active");
+                }
+                return;
+            }
+
+            const activeNode = document.querySelector(`.nav-item[data-id="${id}"]`);
+            if (activeNode) {
+                activeNode.classList.add("active");
+            }
+        }
+
+        function showDashboard() {
+            setActiveNav(null);
+            contentArea.innerHTML = document.getElementById("dashboard-template").innerHTML;
+            contentArea.scrollTop = 0;
+        }
+
+        function resolveDocId(currentId, href) {
+            if (href.startsWith("/")) {
+                return href.substring(1);
+            }
+
+            const baseParts = currentId.split("/");
+            baseParts.pop();
+
+            href.split("/").forEach(part => {
+                if (part === "." || !part) {
+                    return;
+                }
+                if (part === "..") {
+                    baseParts.pop();
+                } else {
+                    baseParts.push(part);
+                }
+            });
+
+            return baseParts.join("/");
+        }
+
+        function wireLocalLinks(currentDoc) {
+            contentArea.querySelectorAll("a").forEach(anchor => {
+                const href = anchor.getAttribute("href");
+                if (!href || href.startsWith("http")) {
+                    return;
+                }
+                if (!href.endsWith(".md")) {
+                    return;
+                }
+
+                anchor.onclick = event => {
+                    event.preventDefault();
+                    const targetId = resolveDocId(currentDoc.id, href);
+                    const targetDoc = docsData.find(doc => doc.id === targetId);
+                    if (targetDoc) {
+                        loadDoc(targetId);
+                    } else {
+                        alert("无法跳转：未找到文档 " + targetId);
+                    }
+                };
+            });
+        }
+
+        function loadDoc(id, clickedNode) {
+            const doc = docsData.find(item => item.id === id);
+            if (!doc) {
+                return;
+            }
+
+            setActiveNav(id);
+            if (clickedNode) {
+                clickedNode.classList.add("active");
+            }
+
+            const rawHtml = marked.parse(doc.content);
+            const cleanHtml = DOMPurify.sanitize(rawHtml);
+
+            const summaryHtml = doc.summary
+                ? `
+                    <div class="pm-summary-banner">
+                        <div class="pm-summary-title">核心速览</div>
+                        <div>${doc.summary}</div>
+                    </div>
+                `
+                : "";
+
+            contentArea.innerHTML = `
+                <div class="markdown-body">
+                    <div class="page-header">
+                        <div class="breadcrumb">${doc.category} / ${doc.id}</div>
+                    </div>
+                    ${summaryHtml}
+                    ${cleanHtml}
+                </div>
+            `;
+
+            contentArea.scrollTop = 0;
+
+            contentArea.querySelectorAll("pre code").forEach(block => {
+                hljs.highlightElement(block);
+            });
+
+            wireLocalLinks(doc);
+        }
+
+        document.getElementById("searchInput").addEventListener("input", event => {
+            renderNav(event.target.value);
+        });
+
+        renderNav();
+        showDashboard();
+    </script>
+
+    <template id="dashboard-template">
+        <div class="dashboard">
+            <div class="dashboard-header">
+                <h1 class="dashboard-title">LLM Skill Contracts 审核页</h1>
+                <p class="dashboard-desc">这份页面只收录 `llm-skill-contracts` 目录下已经定稿的对外技能文档，不再混入后台管理、历史讨论或其它外围契约，方便直接发给 LLM 同事审阅。</p>
+            </div>
+
+            <div class="meta-panel">
+                <div class="meta-card">
+                    <p class="meta-label">生成时间</p>
+                    <p class="meta-value">2026-06-29 14:55:03</p>
+                </div>
+                <div class="meta-card">
+                    <p class="meta-label">源目录</p>
+                    <p class="meta-value">D:\MyWork\SG-Client\.worktrees\codex-ai-hosting-robot-gateway\Unity\.codestable\reference\project\airobot-gateway\llm-skill-contracts</p>
+                </div>
+                <div class="meta-card">
+                    <p class="meta-label">输出文件</p>
+                    <p class="meta-value">D:\MyWork\SG-Client\.worktrees\codex-ai-hosting-robot-gateway\Unity\.codestable\reference\project\airobot-gateway\llm-skill-contracts\review.html</p>
+                </div>
+                <div class="meta-card">
+                    <p class="meta-label">Markdown 数量</p>
+                    <p class="meta-value">34 份</p>
+                </div>
+            </div>
+
+            <div class="dashboard-grid">
+                <div class="card">
+                    <h3 class="card-title">首批技能总览</h3>
+                    <p class="card-desc">查看本轮已纳入首批的技能范围、分组、非目标和整体边界。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('index.md')">查看总览</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">公共规则</h3>
+                    <p class="card-desc">查看统一请求格式、严格校验、并发规则、消费保护和载具取消窗口约束。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('common-rules.md')">查看公共规则</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">固定 reason 枚举</h3>
+                    <p class="card-desc">查看通用 `reason` 和每个技能专属的 reject / failed reason 列表。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('reason-codes.md')">查看 reason 枚举</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">固定参数表</h3>
+                    <p class="card-desc">查看已定稿技能的对外参数表和固定枚举，不暴露内部 DTO、协议字段或配置 ID。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('parameter-tables/index.md')">查看参数表</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="card-title">暂不开放技能</h3>
+                    <p class="card-desc">查看当前明确排除在首批之外的技能清单，避免和已开放能力混淆。</p>
+                    <div class="card-links">
+                        <span onclick="loadDoc('not-initial-batch.md')">查看排除清单</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="dashboard-footer">
+                左侧导航支持按分类浏览和全文搜索。正文中的本地 Markdown 链接会自动跳转到本页内对应文档，不再依赖外部 `.md` 文件跳转。
+            </div>
+        </div>
+    </template>
+</body>
+</html>

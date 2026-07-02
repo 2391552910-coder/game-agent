@@ -1,7 +1,7 @@
 """Webhook 路由测试。"""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -20,7 +20,10 @@ class TestPlayerEvent:
     async def test_offline_event_schedules(self, client, mock_redis):
         _setup_auth(mock_redis)
 
-        with patch("src.core.scheduler.triggers.schedule_offline_analysis", AsyncMock(return_value="run-123")) as mock_schedule:
+        with patch(
+            "src.core.scheduler.triggers.schedule_offline_analysis",
+            AsyncMock(return_value="run-123"),
+        ) as mock_schedule:
             response = await client.post(
                 "/webhooks/player-event",
                 json={

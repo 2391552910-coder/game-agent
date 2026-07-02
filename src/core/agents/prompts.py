@@ -6,12 +6,12 @@
 
 AGENT_V1_ACTION_BOUNDARY = """第一版 Agent 动作边界（硬性要求）：
 
-允许输出的 action_type 只能是以下五类：
-1. observe_current_state：观察当前状态
-2. move_to_location：移动到某个位置
-3. stop_moving：停止移动
+允许输出的 skillName 只能是以下五类 AiRobotGateway skill：
+1. observe_state：观察当前 session 状态
+2. move_to：移动到指定三维坐标
+3. stop_move：停止当前移动
 4. jump：跳跃
-5. play_basic_action：播放一个基础动作
+5. play_action：播放一个基础动作
 
 暂不开放、不得输出、不得变相输出的能力：
 - 聊天和自由文本社交
@@ -90,22 +90,26 @@ ACTION_REASONING_SYSTEM = """你是一个策略推理专家。
 
 """ + AGENT_V1_ACTION_BOUNDARY + """
 
-允许的 payload 约束：
-- observe_current_state：payload 使用空对象，或只包含观察范围，例如 {{"scope": "self"}}
-- move_to_location：payload 必须包含 location_id 或 position，例如 {{"location_id": "gym_02"}}
-  或 {{"position": {{"x": 108, "y": 0, "z": 125}}}}
-- stop_moving：payload 使用空对象
-- jump：payload 可以为空，或包含 {{"count": 1}}
-- play_basic_action：payload 必须包含 action_id，且 action_id 必须来自游戏知识库或快照中明确存在的基础动作
+AiRobotGateway 输出格式要求：
+- 每个行动必须直接输出 skillName、schemaVersion、arguments、reason、priority
+- schemaVersion 固定为 "v1"
+- arguments 必须是 JSON object
+- observe_state：arguments 使用空对象 {{}}
+- move_to：arguments 必须包含 target，例如 {{"target": {{"x": 108, "y": 0, "z": 125}}, "stopDistance": 0.5}}
+- stop_move：arguments 使用空对象 {{}}
+- jump：arguments 使用空对象 {{}}
+- play_action：arguments 必须包含 action，例如 {{"action": 1}}
 
 要求：
 - 每个行动必须可执行、有具体目标
-- action_type 必须严格使用允许列表中的值
-- 不允许自造 action_type
-- 不允许在 payload 中塞入聊天文本、交易参数、任务领取参数、战斗参数或底层协议内容
+- skillName 必须严格使用允许列表中的值
+- 不允许自造 skillName
+- 不允许在 arguments 中塞入聊天文本、交易参数、任务领取参数、战斗参数或底层协议内容
 - 优先级判断要结合实体当前状态和领域规则
 - 引用具体的领域规则作为依据
 - 如果历史趋势显示下降，优先推荐能通过基础行为闭环验证的安全行动
+- move_to 的坐标必须来自实体快照、领域规则上下文或额外上下文；找不到坐标时不要编造，改为 observe_state
+- play_action 的 action 必须来自知识库或快照中明确存在的基础动作；找不到动作枚举时不要编造，改为 observe_state
 
 监督机制要求：
 - 如果上次行动已完成（tracking_summary 中有 completed），推荐下一阶段更高难度但仍属于基础行为闭环的目标
@@ -127,9 +131,9 @@ ACTION_REASONING_SYSTEM = """你是一个策略推理专家。
 输出要求：
 - 只输出 JSON 对象，不要输出 Markdown 或解释性文本
 - JSON 顶层必须是 actions 数组
-- actions 每一项必须包含 action_type、priority、reason、payload
+- actions 每一项必须包含 skillName、schemaVersion、arguments、reason、priority
 - 可选包含 goal_metric、goal_value、expected_hours
-- action_type 只能使用允许列表中的五类基础动作
+- skillName 只能使用允许列表中的五类 AiRobotGateway skill
 - priority 只能是 high、medium、low"""
 
 ACTION_REASONING_USER = """行为分析报告：

@@ -44,3 +44,30 @@ def test_iter_import_documents_loads_json_jsonl_and_text(tmp_path: Path) -> None
         ("jsonl-1", "a.xlsx", "jsonl content"),
         ("docs.txt", str(text_path), "plain text content"),
     ]
+
+
+def test_iter_import_documents_splits_markdown_into_semantic_chunks(tmp_path: Path) -> None:
+    markdown_path = tmp_path / "游戏场景数据.md"
+    markdown_path.write_text(
+        "\n".join(
+            [
+                "# myAgent2 游戏真实模拟数据集",
+                "- 体育馆正门：坐标 (138, 0, 78)，建筑 ID 为 `sports_01`。",
+                (
+                    "- 射箭竞技活动（ID: `act_archery_02`）：位于体育馆 (138,0,78)。"
+                    "参与条件玩家等级≥LV5，无需金币消耗，每次消耗15体力值，单局耗时约3分钟。"
+                    "产出敏捷属性经验、80竞技积分。"
+                ),
+                "- 原味咖啡：15 金币（ID: `item_coffee_01`）。",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    files = import_game_scene_rag.discover_input_files(tmp_path)
+    docs = list(import_game_scene_rag.iter_import_documents(files))
+
+    contents = [doc.content for doc in docs]
+    assert any("【map_coordinate】" in content and "体育馆正门" in content for content in contents)
+    assert any("【activity_rule】" in content and "act_archery_02" in content for content in contents)
+    assert any("【item_price】" in content and "item_coffee_01" in content for content in contents)

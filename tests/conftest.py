@@ -40,6 +40,8 @@ def _mock_settings():
     mock.rerank_enabled = False
     mock.rerank_api_key = "sk-test-key"
     mock.rerank_model = "gte-rerank"
+    mock.rerank_base_url = "https://api.test.com/v1"
+    mock.rerank_max_concurrency = 1
     # PostgreSQL
     mock.postgres_dsn = "postgresql+asyncpg://test:test@localhost/test"
     # Neo4j
@@ -67,9 +69,25 @@ def _mock_settings():
     mock.lightrag_llm_max_async = 1
     mock.lightrag_chunk_token_size = 512
     mock.lightrag_chunk_overlap_token_size = 256
+    mock.lightrag_vector_cosine_threshold = 0.5
+    mock.lightrag_chunk_top_k = 50
+    mock.rag_exact_match_enabled = False
+    mock.rag_exact_match_top_k = 5
     # 调度
     mock.max_concurrent_analyses = 20
     mock.offline_trigger_minutes = 5
+    # RobotGateway callback / LLM Gateway v1
+    mock.robotgateway_callback_url = None
+    mock.robotgateway_callback_timeout_seconds = 10.0
+    mock.robotgateway_callback_api_key = None
+    mock.llm_gateway_app_secrets = {}
+    mock.llm_gateway_app_tenants = {}
+    mock.llm_gateway_timestamp_tolerance_ms = 300_000
+    mock.llm_gateway_idempotency_ttl_seconds = 86_400
+    mock.llm_gateway_decision_url = None
+    mock.llm_gateway_decision_app_id = None
+    mock.llm_gateway_decision_app_secret = None
+    mock.llm_gateway_decision_timeout_seconds = 10.0
     # Token 配额
     mock.default_monthly_tokens = 100000
     mock.quota_warning_threshold = 0.8
@@ -81,10 +99,31 @@ def _mock_settings():
 def mock_redis():
     """Mock Redis 客户端。"""
     redis = AsyncMock()
-    redis.get = AsyncMock(return_value=None)
-    redis.set = AsyncMock(return_value=True)
-    redis.setex = AsyncMock(return_value=True)
-    redis.delete = AsyncMock(return_value=1)
+
+    store: dict[str, str] = {}
+
+    async def _get(key: str):
+        return store.get(key)
+
+    async def _set(key: str, value, ex=None, nx: bool = False):
+        if nx and key in store:
+            return False
+        store[key] = value.decode() if isinstance(value, bytes) else str(value)
+        return True
+
+    async def _setex(key: str, seconds: int, value):
+        store[key] = value.decode() if isinstance(value, bytes) else str(value)
+        return True
+
+    async def _delete(key: str):
+        existed = key in store
+        store.pop(key, None)
+        return 1 if existed else 0
+
+    redis.get = AsyncMock(side_effect=_get)
+    redis.set = AsyncMock(side_effect=_set)
+    redis.setex = AsyncMock(side_effect=_setex)
+    redis.delete = AsyncMock(side_effect=_delete)
     redis.incr = AsyncMock(return_value=1)
     redis.expire = AsyncMock(return_value=True)
 
@@ -175,7 +214,9 @@ def _mock_db_session(mock_session):
     需要在所有导入点都打 patch。对尚未导入的模块跳过。
     """
     session, ctx = mock_session
-    _get_session_fn = lambda: ctx
+
+    def _get_session_fn():
+        return ctx
 
     # 所有可能导入 get_session 的模块
     import_locations = [
@@ -278,7 +319,13 @@ def make_analysis_row(
             "bottlenecks": ["time"],
         },
         "recommended_actions": [
-            {"action_type": "quest", "priority": "high", "reason": "test", "payload": {}},
+            {
+                "skillName": "observe_state",
+                "schemaVersion": "v1",
+                "arguments": {},
+                "priority": "high",
+                "reason": "test",
+            },
         ],
     })
     row.analyzed_at = analyzed_at or datetime.now(UTC)
@@ -298,7 +345,11 @@ def make_quota_row(
     row.used = used
     today = date.today()
     row.period_start = period_start or today.replace(day=1)
-    row.period_end = period_end or date(today.year, today.month + 1, 1) if today.month < 12 else date(today.year + 1, 1, 1)
+    row.period_end = (
+        period_end or date(today.year, today.month + 1, 1)
+        if today.month < 12
+        else date(today.year + 1, 1, 1)
+    )
     return row
 
 

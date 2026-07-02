@@ -22,6 +22,7 @@ from lightrag.utils import EmbeddingFunc
 
 from src.config import settings
 from src.core.engine.embedding import embed_texts
+from src.core.engine.rerank import is_ollama_rerank_base_url, ollama_rerank
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ async def llm_model_func(
     return response.content
 
 
-# Embedding 函数（Qwen text-embedding-v4）
+# Embedding 函数（Ollama Qwen3 Embedding）
 
 embedding_func = EmbeddingFunc(
     embedding_dim=settings.embedding_dim,
@@ -115,17 +116,27 @@ embedding_func = EmbeddingFunc(
 )
 
 
-# Rerank 函数（Qwen gte-rerank-v2）
+# Rerank 函数（Ollama Qwen3 Reranker / DashScope 兼容）
 
 
 def _build_rerank_model_func():
     if not settings.rerank_enabled:
         return None
 
+    if is_ollama_rerank_base_url(settings.rerank_base_url):
+        return partial(
+            ollama_rerank,
+            api_key=settings.rerank_api_key or None,
+            model=settings.rerank_model,
+            base_url=settings.rerank_base_url,
+            max_concurrency=settings.rerank_max_concurrency,
+        )
+
     return partial(
         ali_rerank,
-        api_key=settings.rerank_api_key,
+        api_key=settings.rerank_api_key or None,
         model=settings.rerank_model,
+        base_url=settings.rerank_base_url,
     )
 
 
@@ -255,7 +266,7 @@ async def initialize_rag(workspace: str | None = None) -> LightRAG:
             "hnsw_m": 24,
             "hnsw_ef_construction": 360,
             "hnsw_ef": 200,
-            "cosine_better_than_threshold": 0.6,
+            "cosine_better_than_threshold": settings.lightrag_vector_cosine_threshold,
         },
     )
 

@@ -49,16 +49,21 @@ async def setup_rag_environment(mock_redis, mock_llm):
                 },
                 "recommended_actions": [
                     {
-                        "action_type": "quest",
+                        "skillName": "observe_state",
+                        "schemaVersion": "v1",
+                        "arguments": {},
                         "priority": "high",
-                        "reason": "提升等级解锁新区域",
-                        "payload": {"quest_id": "main_chapter_10"},
+                        "reason": "先观察当前状态，确认能否进入下一步",
                     },
                     {
-                        "action_type": "preparation",
+                        "skillName": "move_to",
+                        "schemaVersion": "v1",
+                        "arguments": {
+                            "target": {"x": 61.3, "y": 0.94, "z": 154.0},
+                            "stopDistance": 0.5,
+                        },
                         "priority": "medium",
-                        "reason": "提升装备评分",
-                        "payload": {"target_dungeon": "heroic"},
+                        "reason": "移动到目标地点",
                     },
                 ],
             },
@@ -148,27 +153,26 @@ async def test_tool_call_query_similar_players(setup_rag_environment):
     # 注册多个相似玩家
     similar_players = register_multiple_players(5, "similar_", "competitive")
 
-    # Mock 相似玩家查询
-    with patch("src.core.agents.tools.query_similar_players") as mock_query:
-        mock_query = AsyncMock(
-            return_value=[
-                {
-                    "user_id": pid,
-                    "similarity": 0.85,
-                    "playstyle": "competitive",
-                }
-                for pid in similar_players
-            ]
-        )
+    mock_result = [
+        {
+            "user_id": pid,
+            "similarity": 0.85,
+            "playstyle": "competitive",
+        }
+        for pid in similar_players
+    ]
 
+    # Mock 相似玩家核心查询
+    with patch("src.core.agents.tools._query_similar_players", AsyncMock(return_value=mock_result)) as mock_query:
         result = await mock_query(
-            user_id=TEST_USER_ID,
+            tenant_id="test-tenant-001",
+            current_user_id=TEST_USER_ID,
             playstyle="competitive",
             limit=5,
         )
 
-        assert len(result) == 5
-        assert all("similarity" in r for r in result)
+    assert len(result) == 5
+    assert all("similarity" in r for r in result)
 
 
 @pytest.mark.asyncio
@@ -231,10 +235,9 @@ async def test_structured_output_validation(client: AsyncClient, setup_rag_envir
     )
 
     mock_action = RecommendedAction(
-        action_type="quest",
+        skillName="observe_state",
         priority="high",
-        reason="提升等级",
-        payload={"quest_id": "main_10"},
+        reason="先观察状态",
     )
 
     # 验证结构化输出

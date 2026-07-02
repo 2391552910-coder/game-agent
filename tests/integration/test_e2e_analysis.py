@@ -7,7 +7,7 @@ import asyncio
 
 import pytest
 from httpx import AsyncClient
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 # 测试数据
@@ -37,10 +37,11 @@ async def setup_e2e_environment(mock_redis, mock_llm):
                 },
                 "recommended_actions": [
                     {
-                        "action_type": "quest",
+                        "skillName": "observe_state",
+                        "schemaVersion": "v1",
+                        "arguments": {},
                         "priority": "high",
-                        "reason": "获取资源提升装备",
-                        "payload": {},
+                        "reason": "先观察当前状态",
                     }
                 ],
             }
@@ -296,8 +297,11 @@ async def test_with_snapshot_data(client: AsyncClient, setup_e2e_environment):
 
 
 @pytest.mark.asyncio
-async def test_unauthorized_access(client: AsyncClient):
+async def test_unauthorized_access(client: AsyncClient, mock_session):
     """测试未授权访问（无效的 API Key）。"""
+    session, _ctx = mock_session
+    session.execute = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=None)))
+
     response = await client.post(
         "/webhooks/player-event",
         json={

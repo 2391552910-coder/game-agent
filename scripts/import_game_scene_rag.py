@@ -17,16 +17,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
-from dataclasses import dataclass
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 DEFAULT_IMPORT_DIR = PROJECT_ROOT / "game_docs" / "数据导入文件夹"
-SUPPORTED_SUFFIXES = {".jsonl", ".json", ".txt"}
+SUPPORTED_SUFFIXES = {".jsonl", ".json", ".txt", ".md"}
+
+_MAP_COORDINATE_RE = re.compile(
+    r"^-\s*(?P<name>[^：:]+)[：:]\s*坐标\s*(?P<coord>\([^)]+\))"
+    r"(?:，建筑 ID 为 `(?P<building_id>[^`]+)`)?"
+)
+_ACTIVITY_RULE_RE = re.compile(r"^-\s*(?P<name>[^（(]+)[（(]ID:\s*`(?P<activity_id>[^`]+)`[）)]：(?P<body>.+)$")
+_ITEM_PRICE_RE = re.compile(r"^-\s*(?P<name>[^：:]+)[：:]\s*(?P<price>.+?)[（(]ID:\s*`(?P<item_id>[^`]+)`[）)]")
+_MARKDOWN_TABLE_ROW_RE = re.compile(r"^\|(?P<cells>.+)\|$")
+_FAQ_RE = re.compile(r"^-\s*Q(?P<index>\d+)：(?P<question>.+?)答：(?P<answer>.+)$")
 
 
 @dataclass(frozen=True)
@@ -141,6 +151,138 @@ def _iter_text_documents(path: Path) -> Iterator[ImportDocument]:
         yield ImportDocument(doc_id=path.name, source_path=str(path), content=content)
 
 
+def _semantic_doc(source_path: str, doc_id_prefix: str, index: int, kind: str, lines: list[str]) -> ImportDocument:
+    doc_id = f"{doc_id_prefix}-{kind}-{index}"
+    content = "\n".join(line for line in lines if line).strip()
+    return ImportDocument(doc_id=doc_id, source_path=source_path, content=content)
+
+
+def iter_semantic_markdown_documents(source_path: str, content: str, doc_id_prefix: str) -> Iterator[ImportDocument]:
+    content = content.strip()
+    if not content:
+        return
+
+    emitted = 0
+    for line_no, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        map_match = _MAP_COORDINATE_RE.match(line)
+        if map_match:
+            emitted += 1
+            name = map_match.group("name").strip()
+            coord = map_match.group("coord").strip()
+            building_id = map_match.group("building_id") or ""
+            yield _semantic_doc(
+                source_path,
+                doc_id_prefix,
+                line_no,
+                "map-coordinate",
+                [
+                    "【map_coordinate】",
+                    f"名称: {name}",
+                    f"坐标: {coord}",
+                    f"建筑ID: {building_id}" if building_id else "",
+                    f"关键词: {name} 坐标 {building_id}".strip(),
+                    f"来源: {source_path}",
+                ],
+            )
+            continue
+
+        activity_match = _ACTIVITY_RULE_RE.match(line)
+        if activity_match:
+            emitted += 1
+            name = activity_match.group("name").strip()
+            activity_id = activity_match.group("activity_id").strip()
+            body = activity_match.group("body").strip()
+            yield _semantic_doc(
+                source_path,
+                doc_id_prefix,
+                line_no,
+                "activity-rule",
+                [
+                    "【activity_rule】",
+                    f"活动: {name}",
+                    f"ID: {activity_id}",
+                    f"规则: {body}",
+                    f"关键词: {name} {activity_id}",
+                    f"来源: {source_path}",
+                ],
+            )
+            continue
+
+        item_match = _ITEM_PRICE_RE.match(line)
+        if item_match:
+            emitted += 1
+            name = item_match.group("name").strip()
+            price = item_match.group("price").strip(" 。")
+            item_id = item_match.group("item_id").strip()
+            yield _semantic_doc(
+                source_path,
+                doc_id_prefix,
+                line_no,
+                "item-price",
+                [
+                    "【item_price】",
+                    f"名称: {name}",
+                    f"价格: {price}",
+                    f"ID: {item_id}",
+                    f"关键词: {name} 价格 {item_id}",
+                    f"来源: {source_path}",
+                ],
+            )
+            continue
+
+        table_match = _MARKDOWN_TABLE_ROW_RE.match(line)
+        if table_match and "---" not in line:
+            cells = [cell.strip() for cell in table_match.group("cells").split("|")]
+            if len(cells) >= 3 and cells[0] not in {"功能区域", ""}:
+                emitted += 1
+                yield _semantic_doc(
+                    source_path,
+                    doc_id_prefix,
+                    line_no,
+                    "open-time",
+                    [
+                        "【open_time_rule】",
+                        f"区域: {cells[0]}",
+                        f"开放时间: {cells[1]}",
+                        f"备注: {cells[2]}",
+                        f"关键词: {cells[0]} 开放时间",
+                        f"来源: {source_path}",
+                    ],
+                )
+            continue
+
+        faq_match = _FAQ_RE.match(line)
+        if faq_match:
+            emitted += 1
+            question = faq_match.group("question").strip()
+            answer = faq_match.group("answer").strip()
+            yield _semantic_doc(
+                source_path,
+                doc_id_prefix,
+                line_no,
+                "faq",
+                [
+                    "【faq】",
+                    f"问题: {question}",
+                    f"回答: {answer}",
+                    f"关键词: {question}",
+                    f"来源: {source_path}",
+                ],
+            )
+
+    if emitted == 0:
+        yield ImportDocument(doc_id=doc_id_prefix, source_path=source_path, content=content)
+
+
+def _iter_markdown_documents(path: Path) -> Iterator[ImportDocument]:
+    content = path.read_text(encoding="utf-8").strip()
+    yield from iter_semantic_markdown_documents(str(path), content, path.stem)
+
+
 def iter_import_documents(files: Iterable[Path]) -> Iterator[ImportDocument]:
     for path in files:
         suffix = path.suffix.lower()
@@ -150,6 +292,8 @@ def iter_import_documents(files: Iterable[Path]) -> Iterator[ImportDocument]:
             yield from _iter_json_documents(path)
         elif suffix == ".txt":
             yield from _iter_text_documents(path)
+        elif suffix == ".md":
+            yield from _iter_markdown_documents(path)
 
 
 async def main() -> None:

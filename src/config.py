@@ -24,16 +24,18 @@ class Settings(BaseSettings):
     openai_default_model: str = Field(default="deepseek-chat")
     openai_fast_model: str = Field(default="deepseek-chat")
 
-    # ── Embedding（DashScope / Qwen） ──
-    embedding_api_key: str = Field(...)
-    embedding_base_url: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1")
-    embedding_model: str = Field(default="text-embedding-v4")
+    # ── Embedding（Ollama / Qwen） ──
+    embedding_api_key: str = Field(default="")
+    embedding_base_url: str = Field(default="http://localhost:11434")
+    embedding_model: str = Field(default="qwen3-embedding:4b")
     embedding_dim: int = Field(default=1024)
 
-    # ── Rerank（DashScope / Qwen gte-rerank-v2） ──
-    rerank_enabled: bool = Field(default=False)
-    rerank_api_key: str = Field(...)
-    rerank_model: str = Field(default="gte-rerank-v2")
+    # ── Rerank（Ollama / Qwen3 Reranker） ──
+    rerank_enabled: bool = Field(default=True)
+    rerank_api_key: str = Field(default="")
+    rerank_base_url: str = Field(default="http://localhost:11434")
+    rerank_model: str = Field(default="dengcao/Qwen3-Reranker-4B:Q4_K_M")
+    rerank_max_concurrency: int = Field(default=1, ge=1, le=16)
 
     # ── PostgreSQL ──
     postgres_dsn: PostgresDsn = Field(...)
@@ -67,6 +69,10 @@ class Settings(BaseSettings):
     lightrag_llm_max_async: int = Field(default=1, ge=1)
     lightrag_chunk_token_size: int = Field(default=512, ge=1)
     lightrag_chunk_overlap_token_size: int = Field(default=256, ge=0)
+    lightrag_vector_cosine_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    lightrag_chunk_top_k: int = Field(default=50, ge=1, le=200)
+    rag_exact_match_enabled: bool = Field(default=True)
+    rag_exact_match_top_k: int = Field(default=5, ge=1, le=20)
 
     # ── 调度 ──
     max_concurrent_analyses: int = Field(default=20, ge=1, le=100)
@@ -76,6 +82,16 @@ class Settings(BaseSettings):
     robotgateway_callback_url: str | None = Field(default=None)
     robotgateway_callback_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     robotgateway_callback_api_key: str | None = Field(default=None)
+
+    # ── LLM Gateway v1 runtime ──
+    llm_gateway_app_secrets: dict[str, str] = Field(default_factory=dict)
+    llm_gateway_app_tenants: dict[str, str] = Field(default_factory=dict)
+    llm_gateway_timestamp_tolerance_ms: int = Field(default=300_000, ge=1)
+    llm_gateway_idempotency_ttl_seconds: int = Field(default=86_400, ge=60)
+    llm_gateway_decision_url: str | None = Field(default=None)
+    llm_gateway_decision_app_id: str | None = Field(default=None)
+    llm_gateway_decision_app_secret: str | None = Field(default=None)
+    llm_gateway_decision_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
 
     # ── Token 配额 ──
     default_monthly_tokens: int = Field(default=40_000_000)

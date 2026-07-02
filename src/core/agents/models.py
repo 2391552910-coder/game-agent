@@ -1,13 +1,13 @@
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-ActionType = Literal[
-    "observe_current_state",
-    "move_to_location",
-    "stop_moving",
+GatewaySkillName = Literal[
+    "observe_state",
+    "move_to",
+    "stop_move",
     "jump",
-    "play_basic_action",
+    "play_action",
 ]
 
 
@@ -23,21 +23,26 @@ class BehaviorProfile(BaseModel):
 class RecommendedAction(BaseModel):
     """推荐行动。
 
+    输出格式直接对齐 AiRobotGateway 的 skill 控制请求。
     goal_metric / goal_value / expected_hours 为可选追踪字段。
     LLM 在能明确量化完成条件时填写，否则留空。
     tracking_update_node 只处理有 goal_metric 的行动。
     """
-    action_type: ActionType = Field(description="第一版允许的基础行为动作类型")
-    priority: Literal["high", "medium", "low"]
-    reason: str = Field(description="推荐原因")
-    payload: dict = Field(
-        description=(
-            "执行参数。observe_current_state/stop_moving 可为空；"
-            "move_to_location 需要 location_id 或 position；"
-            "jump 可包含 count；play_basic_action 需要 action_id。"
-        ),
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    skill_name: GatewaySkillName = Field(alias="skillName", description="AiRobotGateway skill 名称")
+    schema_version: Literal["v1"] = Field(default="v1", alias="schemaVersion", description="skill 参数 schema 版本")
+    arguments: dict[str, Any] = Field(
         default_factory=dict,
+        description=(
+            "AiRobotGateway skill 参数。observe_state/stop_move/jump 使用空对象；"
+            "move_to 需要 target: {x,y,z}，可包含 stopDistance；"
+            "play_action 需要 action。"
+        ),
     )
+    reason: str = Field(description="推荐原因")
+    priority: Literal["high", "medium", "low"]
+    ttl_ms: int | None = Field(default=30000, alias="ttlMs", gt=0, description="skill 请求有效期，单位毫秒")
 
     # ── 监督机制追踪字段（可选）──
     goal_metric: str | None = Field(
@@ -56,6 +61,23 @@ class RecommendedAction(BaseModel):
         default=None,
         description="预计完成所需小时数，用于计算截止时间。不填则不设截止。",
     )
+
+    @model_validator(mode="after")
+    def validate_skill_arguments(self) -> "RecommendedAction":
+        """校验第一阶段开放 skill 的关键参数。"""
+        if self.skill_name == "move_to":
+            target = self.arguments.get("target")
+            if not isinstance(target, dict):
+                raise ValueError("move_to.arguments.target 必须是包含 x/y/z 的对象")
+            for axis in ("x", "y", "z"):
+                value = target.get(axis)
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise ValueError(f"move_to.arguments.target.{axis} 必须是数字")
+
+        if self.skill_name == "play_action" and "action" not in self.arguments:
+            raise ValueError("play_action.arguments.action 必填")
+
+        return self
 
 
 class PlayerAnalysisOutput(BaseModel):

@@ -111,6 +111,27 @@ class TestRetrieveRagContext:
         assert query_param.enable_rerank is False
 
     @pytest.mark.asyncio
+    async def test_retrieval_uses_configured_chunk_top_k_and_prepends_exact_context(self):
+        mock_rag = AsyncMock()
+        mock_rag.aquery = AsyncMock(return_value="向量检索内容")
+
+        with (
+            patch("src.config.settings.rag_exact_match_enabled", True, create=True),
+            patch("src.config.settings.lightrag_chunk_top_k", 50, create=True),
+            patch("src.core.agents.nodes.get_rag", AsyncMock(return_value=mock_rag)),
+            patch(
+                "src.core.agents.nodes.retrieve_exact_rag_context",
+                AsyncMock(return_value="精确匹配内容"),
+                create=True,
+            ),
+        ):
+            result = await retrieve_rag_context_node(_base_state())
+
+        query_param = mock_rag.aquery.call_args.kwargs["param"]
+        assert query_param.chunk_top_k == 50
+        assert result["rag_context"] == "精确匹配内容\n\n向量检索内容"
+
+    @pytest.mark.asyncio
     async def test_rag_failure_returns_error(self):
         with patch("src.core.agents.nodes.get_rag", AsyncMock(side_effect=Exception("RAG down"))):
             state = _base_state()
@@ -362,10 +383,16 @@ class TestActionReasoning:
             "goal_evaluation_result",
         }
 
+    def test_action_reasoning_prompt_requires_gateway_skill_output(self):
+        assert "skillName" in ACTION_REASONING_SYSTEM
+        assert "schemaVersion" in ACTION_REASONING_SYSTEM
+        assert "arguments" in ACTION_REASONING_SYSTEM
+        assert "action_type" not in ACTION_REASONING_SYSTEM
+
     @pytest.mark.asyncio
     async def test_successful_reasoning(self):
         actions = ActionList(actions=[
-            RecommendedAction(action_type="observe_current_state", priority="high", reason="观察状态"),
+            RecommendedAction(skillName="observe_state", priority="high", reason="观察状态"),
         ])
 
         mock_chain = MagicMock()
@@ -390,7 +417,8 @@ class TestActionReasoning:
                 result = await action_reasoning_node(state)
 
         assert len(result["reasoned_actions"]) == 1
-        assert result["reasoned_actions"][0]["action_type"] == "observe_current_state"
+        assert result["reasoned_actions"][0]["skillName"] == "observe_state"
+        assert result["reasoned_actions"][0]["arguments"] == {}
 
     @pytest.mark.asyncio
     async def test_null_result_returns_error(self):
@@ -458,7 +486,7 @@ class TestMergeOutput:
             bottlenecks=["time"],
             engagement_level="high",
         )
-        actions = [RecommendedAction(action_type="observe_current_state", priority="high", reason="r")]
+        actions = [RecommendedAction(skillName="observe_state", priority="high", reason="r")]
 
         state = _base_state(
             behavior_report=profile.model_dump_json(),
@@ -469,6 +497,7 @@ class TestMergeOutput:
         output = result["final_output"]
         assert output["player_profile"]["playstyle"] == "competitive"
         assert len(output["recommended_actions"]) == 1
+        assert output["recommended_actions"][0]["skillName"] == "observe_state"
 
     @pytest.mark.asyncio
     async def test_invalid_behavior_report(self):

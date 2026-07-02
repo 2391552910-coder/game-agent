@@ -6,6 +6,8 @@ import pytest
 from src.core.engine.embedding import (
     dashscope_multimodal_embed,
     is_dashscope_multimodal_embedding_model,
+    is_ollama_embedding_base_url,
+    ollama_embed,
     resolve_dashscope_multimodal_endpoint,
 )
 
@@ -16,6 +18,12 @@ def test_detects_dashscope_multimodal_embedding_models():
     assert is_dashscope_multimodal_embedding_model("qwen3-vl-embedding")
     assert is_dashscope_multimodal_embedding_model("multimodal-embedding-v1")
     assert not is_dashscope_multimodal_embedding_model("text-embedding-v4")
+
+
+def test_detects_ollama_embedding_base_url():
+    assert is_ollama_embedding_base_url("http://localhost:11434")
+    assert is_ollama_embedding_base_url("http://127.0.0.1:11434/v1")
+    assert not is_ollama_embedding_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 
 def test_resolves_compatible_mode_url_to_multimodal_endpoint():
@@ -100,3 +108,40 @@ async def test_dashscope_multimodal_embed_omits_dimension_for_flash_model():
 
     _, kwargs = client.post.call_args
     assert "dimension" not in kwargs["json"]["parameters"]
+
+
+@pytest.mark.asyncio
+async def test_ollama_embed_posts_dimensions_and_returns_numpy():
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    response.json.return_value = {
+        "model": "qwen3-embedding:4b",
+        "embeddings": [
+            [0.1, 0.2],
+            [0.3, 0.4],
+        ],
+    }
+
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.post = AsyncMock(return_value=response)
+
+    result = await ollama_embed(
+        ["第一段", "第二段"],
+        model="qwen3-embedding:4b",
+        base_url="http://localhost:11434/v1",
+        embedding_dim=1024,
+        client_factory=lambda **_: client,
+    )
+
+    client.post.assert_awaited_once()
+    endpoint, kwargs = client.post.call_args.args[0], client.post.call_args.kwargs
+    assert endpoint == "http://localhost:11434/api/embed"
+    assert kwargs["json"] == {
+        "model": "qwen3-embedding:4b",
+        "input": ["第一段", "第二段"],
+        "dimensions": 1024,
+    }
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_allclose(result, np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32))

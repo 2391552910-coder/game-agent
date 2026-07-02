@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Gateway Interface Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --panel-alt: #f9fbff;
+      --text: #172033;
+      --muted: #5d6b83;
+      --line: #d8e0ed;
+      --line-strong: #b8c3d6;
+      --accent: #2457d6;
+      --accent-soft: #eaf0ff;
+      --good: #1a7f37;
+      --warn: #9c6700;
+      --danger: #b42318;
+      --shadow: 0 8px 24px rgba(20, 35, 70, 0.06);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font: 14px/1.55 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre {
+      font-family: Consolas, "SFMono-Regular", "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+    .page {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .hero, .panel, details.section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .hero {
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+    .eyebrow {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0;
+      margin-bottom: 12px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 900px;
+    }
+    .toolbar {
+      margin-top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    button {
+      appearance: none;
+      border: 1px solid var(--line-strong);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    .meta {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .grid {
+      display: grid;
+      gap: 12px;
+    }
+    .cards {
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      margin: 16px 0;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-alt);
+      padding: 14px;
+    }
+    .card .label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .card .value {
+      font-weight: 600;
+      line-height: 1.35;
+    }
+    .panel, details.section {
+      margin: 16px 0;
+      padding: 16px;
+    }
+    .panel h2, details.section > summary {
+      margin: 0 0 12px;
+      font-size: 18px;
+      line-height: 1.35;
+    }
+    details.section > summary {
+      cursor: pointer;
+      list-style: none;
+      font-weight: 700;
+      outline: none;
+    }
+    details.section > summary::-webkit-details-marker { display: none; }
+    details.section > summary::after {
+      content: "展开";
+      float: right;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 400;
+    }
+    details.section[open] > summary::after { content: "收起"; }
+    .subtle {
+      color: var(--muted);
+      margin: 8px 0 0;
+    }
+    .toc {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      margin: 16px 0;
+    }
+    .toc a {
+      display: block;
+      padding: 10px 12px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0 14px;
+      background: var(--panel);
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      background: #f2f5fb;
+      font-weight: 600;
+    }
+    ul {
+      margin: 8px 0 14px 20px;
+      padding: 0;
+    }
+    li { margin: 4px 0; }
+    .ok { color: var(--good); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--danger); }
+    pre {
+      margin: 0 0 14px;
+      padding: 12px 14px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0f172a;
+      color: #e5eefc;
+      white-space: pre-wrap;
+    }
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #f7faff;
+      padding: 12px 14px;
+      border-radius: 8px;
+      margin: 12px 0 14px;
+    }
+    .mini {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .source-links {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+    .source-links a {
+      display: block;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    @media (max-width: 720px) {
+      .page { padding: 12px; }
+      .hero { padding: 18px; }
+      h1 { font-size: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div class="eyebrow">LLM Gateway / Gateway <-> LLM runtime HTTP</div>
+      <h1>LLM Gateway Interface Review</h1>
+      <p>这是一份给 LLM 同事做审核用的 HTML 版总览。它保留当前已经拍板的运行时接口主线，把 markdown 的细节拆成可折叠区块，方便直接扫结论、展开例子、定位争议点。</p>
+      <div class="toolbar">
+        <button type="button" id="expand-all">展开全部</button>
+        <button type="button" id="collapse-all">折叠全部</button>
+      </div>
+      <div class="meta">审核版文件：<code>.codestable/brainstorms/ai-hosting-robot-gateway/llm-gateway-interface-review.html</code></div>
+    </header>
+
+    <section class="panel">
+      <h2>快速结论</h2>
+      <div class="grid cards">
+        <div class="card">
+          <div class="label">主接口</div>
+          <div class="value">Gateway -> LLM events<br>LLM -> Gateway decision</div>
+        </div>
+        <div class="card">
+          <div class="label">不做</div>
+          <div class="value">batch、capabilities、token、动作列表</div>
+        </div>
+        <div class="card">
+          <div class="label">ID 规则</div>
+          <div class="value">业务 ID 全部 opaque string</div>
+        </div>
+        <div class="card">
+          <div class="label">格式规则</div>
+          <div class="value">字段名 / 枚举 / 字符串严格匹配</div>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>方向</th>
+            <th>接口</th>
+            <th>作用</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Gateway -> LLM</td>
+            <td><code>POST /api/gateway/events</code></td>
+            <td>托管开始、技能结束、状态观察、托管终止</td>
+            <td class="ok">v1 主接口</td>
+          </tr>
+          <tr>
+            <td>LLM -> Gateway</td>
+            <td><code>POST /api/v1/hosting/llm/decision</code></td>
+            <td>提交一次决策</td>
+            <td class="ok">v1 主接口</td>
+          </tr>
+          <tr>
+            <td>LLM -> Gateway</td>
+            <td><code>POST /api/v1/hosting/llm/query</code></td>
+            <td>只读查询</td>
+            <td class="warn">后续单开</td>
+          </tr>
+          <tr>
+            <td>运维</td>
+            <td><code>/health</code></td>
+            <td>部署探活</td>
+            <td class="warn">可选</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>结论：</strong>v1 只做 runtime 主线，不做 <code>/capabilities</code>；可用 skill、参数版本和权限靠双方配置或离线契约维护。
+      </div>
+    </section>
+
+    <nav class="toc">
+      <a href="#common">通用协议</a>
+      <a href="#events">Gateway -> LLM 事件</a>
+      <a href="#decision">LLM -> Gateway 决策</a>
+      <a href="#excluded">明确不做</a>
+      <a href="#future">后续单开</a>
+      <a href="#sources">源文件</a>
+    </nav>
+
+    <details class="section" id="common" open>
+      <summary>通用协议</summary>
+      <p class="subtle">这部分是两边共用的传输、鉴权、ID、幂等和格式规则。</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Header</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>X-AppId</code></td><td>调用方 AppId。Gateway 和 LLM 方向分开配置，不共用密钥。</td></tr>
+          <tr><td><code>X-TimestampMs</code></td><td>毫秒时间戳字符串，参与签名，同一次重试必须不变。</td></tr>
+          <tr><td><code>X-RequestId</code></td><td>HTTP 请求幂等 ID，同一次重试必须不变。</td></tr>
+          <tr><td><code>X-Signature</code></td><td>HMAC-SHA256 hex，不带前缀。</td></tr>
+        </tbody>
+      </table>
+
+      <pre>signature = hmac_sha256(appSecret,
+  method + "\n" +
+  path + "\n" +
+  timestampMs + "\n" +
+  requestId + "\n" +
+  sha256(rawBody).hexLower()
+).hexLower()</pre>
+
+      <table>
+        <thead>
+          <tr>
+            <th>规则</th>
+            <th>约束</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>传输</td><td>生产必须 HTTPS；内网联调可按部署配置例外使用 HTTP。</td></tr>
+          <tr><td>Body</td><td>只收 UTF-8 JSON，不收 form / multipart / plain text。</td></tr>
+          <tr><td>大小</td><td>双方都应配置 body size limit，超限返回请求级错误。</td></tr>
+          <tr><td>业务 ID</td><td>全部按 opaque string 处理，即使底层是 long 也不能用 JSON number。</td></tr>
+          <tr><td>枚举</td><td>严格字面量匹配，不做大小写兼容、别名兼容或 trim。</td></tr>
+          <tr><td>整数</td><td><code>occurredAtMs / sceneId / waitMs</code> 等只能用普通十进制整数写法。</td></tr>
+          <tr><td>未知字段</td><td>严格拒绝，不静默忽略。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>角色</th>
+            <th>规则</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>traceId</code></td><td>链路追踪</td><td>Gateway 生成，可在同一链路里复用，不是幂等键。</td></tr>
+          <tr><td><code>gatewayId</code></td><td>实例标识</td><td>只用于日志和来源识别，不参与幂等。</td></tr>
+          <tr><td><code>eventId</code></td><td>事件幂等</td><td>Gateway 全局唯一，LLM 只按 <code>eventId + bodySha256</code> 去重。</td></tr>
+          <tr><td><code>decisionId</code></td><td>决策幂等</td><td>LLM 全局唯一，不按 session 复用。</td></tr>
+          <tr><td><code>decisionLeaseId</code></td><td>决策许可</td><td>一次性、只消费一次。</td></tr>
+          <tr><td><code>skillCallId</code></td><td>技能执行标识</td><td>Gateway 生成，全局唯一。</td></tr>
+          <tr><td><code>sessionId</code></td><td>会话标识</td><td>一次托管生命周期只用一次，不复用。</td></tr>
+          <tr><td><code>accountId / roleId</code></td><td>业务标识</td><td>仍然按 string 传输，不传 number。</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>请求级错误：</strong> <code>bad_request / signature_invalid / timestamp_expired / internal_error</code> 四个 code。<br>
+        <strong>请求级错误不进业务处理。</strong>
+      </div>
+    </details>
+
+    <details class="section" id="events">
+      <summary>Gateway -> LLM 事件 API</summary>
+      <p class="subtle">入口：<code>POST /api/gateway/events</code>。每次只发单个 event，不用 batch。</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Envelope 字段</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>traceId</code></td><td>链路 ID。</td></tr>
+          <tr><td><code>gatewayId</code></td><td>Gateway 实例 ID。</td></tr>
+          <tr><td><code>contractVersion</code></td><td>固定 <code>llm-gateway-http-v1</code>。</td></tr>
+          <tr><td><code>event</code></td><td>单个事件对象。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>eventType</th>
+            <th>决策 lease</th>
+            <th>payload</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>session_started</code></td><td>必填</td><td><code>session</code></td><td>托管开始，LLM 做第一轮决策。</td></tr>
+          <tr><td><code>skill_finished</code></td><td>必填</td><td><code>session + skill</code></td><td>技能进入终态，LLM 做下一轮决策。</td></tr>
+          <tr><td><code>observation_updated</code></td><td>必填</td><td><code>session + observation</code></td><td>新的观察和下一轮决策机会。</td></tr>
+          <tr><td><code>session_stopped</code></td><td>不允许</td><td><code>session + stop</code></td><td>会话终态，不再决策。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>session 字段</th>
+            <th>类型</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>sessionId</code></td><td>string</td><td>一次托管生命周期一个 ID，不复用。</td></tr>
+          <tr><td><code>accountId</code></td><td>string</td><td>长期保留，但不赋予账号管理权限。</td></tr>
+          <tr><td><code>roleId</code></td><td>string</td><td>当前被托管角色 ID。</td></tr>
+          <tr><td><code>sceneId</code></td><td>integer</td><td>场景配置 ID，不能是字符串或小数。</td></tr>
+          <tr><td><code>state</code></td><td>string</td><td><code>Running / Stopped / Failed</code>。</td></tr>
+          <tr><td><code>position</code></td><td>object</td><td><code>{x,y,z}</code>，都必须是有限 number。</td></tr>
+          <tr><td><code>controllable</code></td><td>boolean</td><td>当前是否可操作。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>stop.reason</th>
+            <th>session.state</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>admin_stop</code></td><td><code>Stopped</code></td><td>后台/人工停止。</td></tr>
+          <tr><td><code>stop_hosting_requested</code></td><td><code>Stopped</code></td><td>LLM 自己要求停止。</td></tr>
+          <tr><td><code>player_online</code></td><td><code>Stopped</code></td><td>玩家本人上线。</td></tr>
+          <tr><td><code>server_kicked</code></td><td><code>Stopped</code></td><td>服务器踢下线。</td></tr>
+          <tr><td><code>gateway_shutdown</code></td><td><code>Stopped</code></td><td>Gateway 关闭或重启。</td></tr>
+          <tr><td><code>runtime_error</code></td><td><code>Failed</code></td><td>Gateway 内部错误。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>observation.reason</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>wait_completed</code></td><td>上一次 wait 到期。</td></tr>
+          <tr><td><code>state_changed</code></td><td>关键状态变化。</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>事件响应：</strong> LLM 只能返回 <code>accepted</code> 或 <code>duplicate</code>。<br>
+        <code>accepted</code> 代表可靠接收，不是“HTTP 到了但还没处理”。<br>
+        同一 <code>eventId</code> + 不同 body 视为协议错误，返回 <code>400 bad_request</code>。
+      </div>
+
+      <pre>{
+  "status": "accepted",
+  "eventId": "evt-001"
+}</pre>
+
+      <pre>{
+  "status": "duplicate",
+  "eventId": "evt-001"
+}</pre>
+
+      <p class="mini">完整字段、错误和重试规则：<a href="llm-gateway-event-api.md">llm-gateway-event-api.md</a></p>
+    </details>
+
+    <details class="section" id="decision">
+      <summary>LLM -> Gateway 决策 API</summary>
+      <p class="subtle">入口：<code>POST /api/v1/hosting/llm/decision</code>。一次决策只允许一个 action。</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Request 字段</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>contractVersion</code></td><td>固定 <code>llm-gateway-http-v1</code>。</td></tr>
+          <tr><td><code>decisionId</code></td><td>LLM 幂等 ID，全局唯一。</td></tr>
+          <tr><td><code>decisionLeaseId</code></td><td>Gateway 发放的一次性决策许可。</td></tr>
+          <tr><td><code>action</code></td><td><code>call_skill / wait / stop_hosting</code>。</td></tr>
+          <tr><td><code>skillName</code></td><td>仅 <code>call_skill</code> 时允许。</td></tr>
+          <tr><td><code>schemaVersion</code></td><td>仅 <code>call_skill</code> 时允许。</td></tr>
+          <tr><td><code>arguments</code></td><td><code>call_skill</code> 必填 object；<code>wait</code> 可省略或传 <code>{}</code>。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>action</th>
+            <th>约束</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>call_skill</code></td><td>必须带 canonical <code>skillName</code>、<code>schemaVersion</code> 和 <code>arguments</code>。</td></tr>
+          <tr><td><code>wait</code></td><td><code>waitMs</code> 默认 3000，最小 1000，最大 10000。</td></tr>
+          <tr><td><code>stop_hosting</code></td><td>结束本次托管，优先级最高。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Decision Response</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>status</code></td><td><code>accepted / rejected</code>。</td></tr>
+          <tr><td><code>reason</code></td><td><code>accepted</code> 时固定 <code>ok</code>；<code>rejected</code> 时返回固定枚举。</td></tr>
+          <tr><td><code>skillCallId</code></td><td>仅 <code>call_skill</code> 被接受时返回。</td></tr>
+          <tr><td><code>sessionId</code></td><td>可选，只用于可解析到 session 时的辅助返回。</td></tr>
+        </tbody>
+      </table>
+
+      <table>
+        <thead>
+          <tr>
+            <th>rejected reason</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>lease_expired</code></td><td>旧 lease、已失效、已消费、已被替代或会话终态。</td></tr>
+          <tr><td><code>schema_invalid</code></td><td>字段、结构、枚举或参数契约不合法。</td></tr>
+          <tr><td><code>skill_not_allowed</code></td><td>技能在账号/角色/场景/权限/配置维度不允许。</td></tr>
+          <tr><td><code>state_not_allowed</code></td><td>当前会话状态不允许这次动作。</td></tr>
+          <tr><td><code>skill_in_progress</code></td><td>当前运行中的 skill 不允许被打断或替换。</td></tr>
+          <tr><td><code>idempotency_key_conflict</code></td><td>同一个 decisionId 对应了不同 lease 或不同 body。</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>lease 规则：</strong>一张 lease 只消费一次；被消费后不能用同一张 lease 改参数重发。<br>
+        <strong>429 不消费 lease，500 只有在消费前失败时才不消费。</strong><br>
+        LLM 收到 <code>accepted</code> 后只等 Gateway 后续事件，不主动轮询。
+      </div>
+
+      <pre>{
+  "contractVersion": "llm-gateway-http-v1",
+  "decisionId": "decision-001",
+  "decisionLeaseId": "lease-001",
+  "action": "call_skill",
+  "skillName": "move_to",
+  "schemaVersion": "v1",
+  "arguments": {
+    "x": 20,
+    "y": 0,
+    "z": 30
+  }
+}</pre>
+
+      <pre>{
+  "status": "accepted",
+  "reason": "ok",
+  "sessionId": "session-001",
+  "skillCallId": "skill-call-001"
+}</pre>
+
+      <pre>{
+  "contractVersion": "llm-gateway-http-v1",
+  "decisionId": "decision-002",
+  "decisionLeaseId": "lease-002",
+  "action": "wait",
+  "arguments": {
+    "waitMs": 3000
+  }
+}</pre>
+
+      <pre>{
+  "contractVersion": "llm-gateway-http-v1",
+  "decisionId": "decision-003",
+  "decisionLeaseId": "lease-003",
+  "action": "stop_hosting"
+}</pre>
+
+      <p class="mini">完整字段、错误和 lease 生命周期：<a href="llm-gateway-decision-api.md">llm-gateway-decision-api.md</a></p>
+    </details>
+
+    <details class="section" id="excluded">
+      <summary>明确不做</summary>
+      <ul>
+        <li>不使用批量事件 <code>events[]</code>。</li>
+        <li>不在事件里传 <code>goal</code>、<code>availableSkills</code>、<code>skillArgumentHints</code>、<code>runningSkill</code>、<code>lastSkillResult</code>、<code>interruptedSkill</code>、LLM token、<code>message</code>。</li>
+        <li>不提供 <code>skill_started</code>、<code>heartbeat</code>、<code>decision_rejected</code>、<code>lease_revoked</code> 事件。</li>
+        <li>不做 <code>/capabilities</code> runtime 接口。</li>
+        <li><code>/decision</code> 不带 <code>traceId / sessionId / sourceEventId / stateVersion</code>。</li>
+        <li><code>/decision</code> 不支持 <code>confidence / ttlMs / message / reason</code> 这类额外字段。</li>
+        <li>不提供 <code>cancel_skill</code> action。</li>
+        <li>不把版本号、build 号塞进 runtime JSON body，只写日志或部署元数据。</li>
+      </ul>
+    </details>
+
+    <details class="section" id="future">
+      <summary>后续单开</summary>
+      <ul>
+        <li>首批 LLM 可调用 skill 清单。</li>
+        <li>每个 skill 的 <code>arguments / schemaVersion / skill_finished.reason / TTL / 可打断/抢占规则</code>。</li>
+        <li>自动射击、移动中打枪等复合行为，先作为 canonical skill 讨论。</li>
+        <li>只读 Query 的 <code>queryType / arguments / result / reason / 缓存和新鲜度</code>。</li>
+        <li>可选的运维 <code>/health</code> 实现细节。</li>
+      </ul>
+    </details>
+
+    <section class="panel" id="sources">
+      <h2>源文件</h2>
+      <div class="source-links">
+        <a href="llm-gateway-interface-summary.md">llm-gateway-interface-summary.md</a>
+        <a href="llm-gateway-event-api.md">llm-gateway-event-api.md</a>
+        <a href="llm-gateway-decision-api.md">llm-gateway-decision-api.md</a>
+        <a href="llm-gateway-auth-idempotency.md">llm-gateway-auth-idempotency.md</a>
+        <a href="llm-gateway-skill-contract-draft.md">llm-gateway-skill-contract-draft.md</a>
+        <a href="llm-gateway-query-contract-draft.md">llm-gateway-query-contract-draft.md</a>
+      </div>
+      <p class="subtle">HTML 只是审核版渲染，最终规则仍以 markdown 拆分文档为准。</p>
+    </section>
+  </div>
+
+  <script>
+    const details = Array.from(document.querySelectorAll('details.section'));
+    document.getElementById('expand-all').addEventListener('click', () => {
+      details.forEach(d => d.open = true);
+    });
+    document.getElementById('collapse-all').addEventListener('click', () => {
+      details.forEach((d, index) => d.open = index === 0);
+    });
+  </script>
+</body>
+</html>

@@ -21,6 +21,8 @@ from time import perf_counter
 
 from langchain_core.tools import tool
 
+from src.core.engine.rag_exact_match import retrieve_exact_rag_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,8 +119,8 @@ async def _query_similar_players(
             "bottlenecks": output.get("player_profile", {}).get("bottlenecks", []),
             "top_actions": [
                 {
-                    "action_type": a.get("action_type"),
-                    "target": a.get("target"),
+                    "skillName": a.get("skillName") or a.get("action_type"),
+                    "arguments": a.get("arguments") or a.get("payload") or {},
                     "priority": a.get("priority"),
                 }
                 for a in output.get("recommended_actions", [])[:3]
@@ -139,11 +141,26 @@ async def _dynamic_rag_query(query: str) -> str:
     rag = await get_rag()
     rag_get_elapsed_ms = (perf_counter() - rag_start) * 1000
 
+    exact_context = ""
+    if settings.rag_exact_match_enabled:
+        exact_context = await retrieve_exact_rag_context(query)
+
     query_start = perf_counter()
-    context = await rag.aquery(
-        query,
-        param=QueryParam(mode="hybrid", enable_rerank=settings.rerank_enabled),
-    )
+    try:
+        context = await rag.aquery(
+            query,
+            param=QueryParam(
+                mode="hybrid",
+                enable_rerank=settings.rerank_enabled,
+                chunk_top_k=settings.lightrag_chunk_top_k,
+            ),
+        )
+    except Exception:
+        if exact_context:
+            return exact_context
+        raise
+    if exact_context:
+        context = f"{exact_context}\n\n{context}" if context else exact_context
     query_elapsed_ms = (perf_counter() - query_start) * 1000
     logger.info(
         (

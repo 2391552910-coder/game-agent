@@ -10,7 +10,7 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from src.core.agents.models import BehaviorProfile, RecommendedAction
+from src.core.agents.models import BehaviorProfile, PlayerAnalysisOutput, RecommendedAction
 from src.core.agents.state import AnalysisState
 
 
@@ -113,40 +113,38 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
     snapshot = state["snapshot"]
 
     action = RecommendedAction(
-        action_type="play_basic_action",
+        skillName="move_to",
         priority="high",
         reason="玩家近期已经表现出学习倾向，继续安排课程能强化当前目标。",
-        payload={
-            "from_location": snapshot.get("current_area", "当前位置"),
-            "to_location": snapshot.get("target_area", "目标位置"),
-            "basic_action": "学习编程课程",
+        arguments={
+            "target": {"x": 61.3, "y": 0.94, "z": 154.0},
+            "stopDistance": 0.5,
+            "label": snapshot.get("target_area", "学习中心"),
         },
         goal_metric="learning_courses",
         goal_value=3,
         expected_hours=24,
     )
 
-    return {"reasoned_actions": [action.model_dump(mode="json")]}
+    return {"reasoned_actions": [action.model_dump(mode="json", by_alias=True)]}
 
 
 async def merge_output_node(state: AnalysisState) -> dict[str, Any]:
     action = RecommendedAction.model_validate(state["reasoned_actions"][0])
-    payload = action.payload
-
-    command = (
-        f"从{payload.get('from_location', '当前位置')}移动到"
-        f"{payload.get('to_location', '目标位置')}，"
-        f"到达后播放基础动作：{payload.get('basic_action', '默认基础动作')}。"
+    output = PlayerAnalysisOutput(
+        player_profile=BehaviorProfile.model_validate_json(state["behavior_report"]),
+        recommended_actions=[action],
     )
-
-    return {"final_output": command}
+    return {"final_output": output.model_dump(mode="json", by_alias=True)}
 
 
 async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
-    final_output = state.get("final_output", "")
+    final_output = state.get("final_output", {})
+    first_action = (final_output.get("recommended_actions") or [{}])[0]
     tracking_record = {
         "status": "tracking",
-        "command": final_output,
+        "skillName": first_action.get("skillName"),
+        "arguments": first_action.get("arguments", {}),
         "goal_metric": "learning_courses",
         "goal_value": 3,
     }
@@ -157,7 +155,7 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
 async def memory_update_node(state: AnalysisState) -> dict[str, Any]:
     return {
         "player_memory": {
-            "last_command": state.get("final_output", ""),
+            "last_recommended_actions": state.get("final_output", {}).get("recommended_actions", []),
             "last_intent": state.get("intent_result", {}).get("session_summary", ""),
             "last_goal_decision": state.get("goal_evaluation_result", {}).get("decision", ""),
         }

@@ -31,6 +31,7 @@ from src.core.agents.prompts import (
 from src.core.agents.state import AnalysisState
 from src.core.agents.tools import create_tools
 from src.core.engine.lightrag_engine import get_rag
+from src.core.engine.rag_exact_match import retrieve_exact_rag_context
 from src.core.llm.factory import get_llm
 
 # ── 防循环/防卡死常量 ──
@@ -71,6 +72,7 @@ async def retrieve_rag_context_node(state: AnalysisState) -> dict[str, Any]:
     """
     snapshot = state.get("snapshot", {})
     query = _build_rag_query(snapshot)
+    exact_context = ""
 
     try:
         import asyncio
@@ -83,14 +85,23 @@ async def retrieve_rag_context_node(state: AnalysisState) -> dict[str, Any]:
         rag = await get_rag()
         rag_get_elapsed_ms = (perf_counter() - rag_start) * 1000
 
+        if settings.rag_exact_match_enabled:
+            exact_context = await retrieve_exact_rag_context(query)
+
         query_start = perf_counter()
         context = await asyncio.wait_for(
             rag.aquery(
                 query,
-                param=QueryParam(mode="hybrid", enable_rerank=settings.rerank_enabled),
+                param=QueryParam(
+                    mode="hybrid",
+                    enable_rerank=settings.rerank_enabled,
+                    chunk_top_k=settings.lightrag_chunk_top_k,
+                ),
             ),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
+        if exact_context:
+            context = f"{exact_context}\n\n{context}" if context else exact_context
         query_elapsed_ms = (perf_counter() - query_start) * 1000
         logger.info(
             (
@@ -106,6 +117,11 @@ async def retrieve_rag_context_node(state: AnalysisState) -> dict[str, Any]:
         return {"rag_context": context}
     except Exception as e:
         logger.error("[retrieve_rag_context] RAG 检索失败: %s", e)
+        if exact_context:
+            return {
+                "rag_context": exact_context,
+                "errors": [f"RAG 检索失败，已返回精确匹配上下文: {e}"],
+            }
         return {
             "rag_context": "",
             "errors": [f"RAG 检索失败: {e}"],
@@ -373,7 +389,7 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
         logger.info(
             "[action_reasoning] 推理完成, actions_count=%d", len(action_list.actions)
         )
-        return {"reasoned_actions": [a.model_dump() for a in action_list.actions]}
+        return {"reasoned_actions": [a.model_dump(by_alias=True) for a in action_list.actions]}
     except Exception as e:
         logger.error("[action_reasoning] 行动推理失败: %s", e)
         return {
@@ -406,7 +422,7 @@ async def merge_output_node(state: AnalysisState) -> dict[str, Any]:
             profile.playstyle,
             len(actions),
         )
-        return {"final_output": output.model_dump(mode="json")}
+        return {"final_output": output.model_dump(mode="json", by_alias=True)}
     except Exception as e:
         logger.error("[merge_output] 输出组装失败: %s", e)
         return {
@@ -537,7 +553,7 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
                     {
                         "tenant_id": tenant_id,
                         "user_id": user_id,
-                        "action_type": action.get("action_type", ""),
+                        "action_type": action.get("skillName") or action.get("skill_name", ""),
                         "action_desc": action.get("reason", ""),
                         "goal_metric": goal_metric,
                         "goal_value": goal_value,
