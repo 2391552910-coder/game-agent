@@ -51,18 +51,30 @@ def _require_non_blank_string(value: Any, field_name: str) -> str:
     return value
 
 
+def _require_non_negative_int(value: Any, field_name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
 def build_llm_gateway_decision_payload(
     *,
+    trace_id: str,
+    session_id: str,
     decision_id: str,
     decision_lease_id: str,
+    state_version: int,
     recommended_action: dict[str, Any],
 ) -> dict[str, Any]:
     """将内部决策映射为 /decision 请求体。"""
     action = recommended_action.get("action", "call_skill")
     payload: dict[str, Any] = {
+        "traceId": _require_non_blank_string(trace_id, "traceId"),
         "contractVersion": "llm-gateway-http-v1",
+        "sessionId": _require_non_blank_string(session_id, "sessionId"),
         "decisionId": decision_id,
         "decisionLeaseId": decision_lease_id,
+        "stateVersion": _require_non_negative_int(state_version, "stateVersion"),
         "action": action,
     }
 
@@ -186,8 +198,11 @@ async def send_llm_gateway_decision(
     app_id: str,
     app_secret: str,
     timeout_seconds: float,
+    trace_id: str,
+    session_id: str,
     decision_id: str,
     decision_lease_id: str,
+    state_version: int,
     recommended_action: dict[str, Any],
     request_id: str | None = None,
     timestamp_ms: str | None = None,
@@ -195,8 +210,11 @@ async def send_llm_gateway_decision(
 ) -> dict[str, Any]:
     """向 RobotGateway v1 /decision 提交一次 call_skill 决策。"""
     payload = build_llm_gateway_decision_payload(
+        trace_id=trace_id,
+        session_id=session_id,
         decision_id=decision_id,
         decision_lease_id=decision_lease_id,
+        state_version=state_version,
         recommended_action=recommended_action,
     )
     body = _json_body_bytes(payload)

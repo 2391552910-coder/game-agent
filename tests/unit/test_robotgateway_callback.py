@@ -131,8 +131,11 @@ async def test_send_robotgateway_analysis_callback_raises_on_non_2xx():
 
 def test_build_llm_gateway_decision_payload_maps_recommended_action_to_call_skill():
     payload = build_llm_gateway_decision_payload(
+        trace_id="trace-001",
+        session_id="session-001",
         decision_id="decision-001",
         decision_lease_id="lease-001",
+        state_version=7,
         recommended_action={
             "skillName": "move_to",
             "schemaVersion": "v1",
@@ -145,9 +148,12 @@ def test_build_llm_gateway_decision_payload_maps_recommended_action_to_call_skil
     )
 
     assert payload == {
+        "traceId": "trace-001",
         "contractVersion": "llm-gateway-http-v1",
+        "sessionId": "session-001",
         "decisionId": "decision-001",
         "decisionLeaseId": "lease-001",
+        "stateVersion": 7,
         "action": "call_skill",
         "skillName": "move_to",
         "schemaVersion": "v1",
@@ -157,15 +163,21 @@ def test_build_llm_gateway_decision_payload_maps_recommended_action_to_call_skil
 
 def test_build_llm_gateway_decision_payload_supports_wait():
     payload = build_llm_gateway_decision_payload(
+        trace_id="trace-002",
+        session_id="session-002",
         decision_id="decision-002",
         decision_lease_id="lease-002",
+        state_version=8,
         recommended_action={"action": "wait", "arguments": {"waitMs": 3000}},
     )
 
     assert payload == {
+        "traceId": "trace-002",
         "contractVersion": "llm-gateway-http-v1",
+        "sessionId": "session-002",
         "decisionId": "decision-002",
         "decisionLeaseId": "lease-002",
+        "stateVersion": 8,
         "action": "wait",
         "arguments": {"waitMs": 3000},
     }
@@ -185,23 +197,32 @@ def test_build_llm_gateway_decision_payload_supports_wait():
 def test_build_llm_gateway_decision_payload_rejects_invalid_wait_arguments(recommended_action):
     with pytest.raises(ValueError):
         build_llm_gateway_decision_payload(
+            trace_id="trace-invalid-wait",
+            session_id="session-invalid-wait",
             decision_id="decision-invalid-wait",
             decision_lease_id="lease-invalid-wait",
+            state_version=9,
             recommended_action=recommended_action,
         )
 
 
 def test_build_llm_gateway_decision_payload_supports_stop_hosting():
     payload = build_llm_gateway_decision_payload(
+        trace_id="trace-003",
+        session_id="session-003",
         decision_id="decision-003",
         decision_lease_id="lease-003",
+        state_version=10,
         recommended_action={"action": "stop_hosting"},
     )
 
     assert payload == {
+        "traceId": "trace-003",
         "contractVersion": "llm-gateway-http-v1",
+        "sessionId": "session-003",
         "decisionId": "decision-003",
         "decisionLeaseId": "lease-003",
+        "stateVersion": 10,
         "action": "stop_hosting",
     }
 
@@ -209,8 +230,11 @@ def test_build_llm_gateway_decision_payload_supports_stop_hosting():
 def test_build_llm_gateway_decision_payload_rejects_stop_hosting_arguments():
     with pytest.raises(ValueError):
         build_llm_gateway_decision_payload(
+            trace_id="trace-invalid-stop",
+            session_id="session-invalid-stop",
             decision_id="decision-invalid-stop",
             decision_lease_id="lease-invalid-stop",
+            state_version=11,
             recommended_action={"action": "stop_hosting", "arguments": {}},
         )
 
@@ -227,8 +251,11 @@ def test_build_llm_gateway_decision_payload_rejects_stop_hosting_arguments():
 def test_build_llm_gateway_decision_payload_rejects_invalid_call_skill_fields(recommended_action):
     with pytest.raises(ValueError):
         build_llm_gateway_decision_payload(
+            trace_id="trace-invalid-skill",
+            session_id="session-invalid-skill",
             decision_id="decision-invalid-skill",
             decision_lease_id="lease-invalid-skill",
+            state_version=12,
             recommended_action=recommended_action,
         )
 
@@ -248,8 +275,11 @@ async def test_send_llm_gateway_decision_posts_signed_request():
         app_id="llm-to-gateway",
         app_secret="secret-llm",
         timeout_seconds=10.0,
+        trace_id="trace-001",
+        session_id="session-001",
         decision_id="decision-001",
         decision_lease_id="lease-001",
+        state_version=13,
         recommended_action={
             "skillName": "observe_state",
             "schemaVersion": "v1",
@@ -272,9 +302,12 @@ async def test_send_llm_gateway_decision_posts_signed_request():
     assert len(request.headers["X-Signature"]) == 64
     body = json.loads(request.content)
     assert body == {
+        "traceId": "trace-001",
         "contractVersion": "llm-gateway-http-v1",
+        "sessionId": "session-001",
         "decisionId": "decision-001",
         "decisionLeaseId": "lease-001",
+        "stateVersion": 13,
         "action": "call_skill",
         "skillName": "observe_state",
         "schemaVersion": "v1",
@@ -295,8 +328,11 @@ async def test_send_llm_gateway_decision_rejects_malformed_gateway_response():
             app_id="llm-to-gateway",
             app_secret="secret-llm",
             timeout_seconds=10.0,
+            trace_id="trace-001",
+            session_id="session-001",
             decision_id="decision-001",
             decision_lease_id="lease-001",
+            state_version=14,
             recommended_action={"skillName": "observe_state", "schemaVersion": "v1", "arguments": {}},
             request_id="req-llm-001",
             timestamp_ms="1719999999500",

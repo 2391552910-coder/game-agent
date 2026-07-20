@@ -54,6 +54,20 @@ def _session_started_payload(event_id: str = "evt-001") -> dict:
     }
 
 
+def _batch_event(event_id: str = "evt-001") -> dict:
+    return _session_started_payload(event_id=event_id)["event"]
+
+
+def _event_batch_payload(*events: dict, trace_id: str = "trace-001") -> dict:
+    return {
+        "traceId": trace_id,
+        "gatewayId": "gateway-01",
+        "contractVersion": "llm-gateway-http-v1",
+        "sentAtMs": 1719999999001,
+        "events": list(events),
+    }
+
+
 def _configure_gateway_settings(settings):
     settings.llm_gateway_app_secrets = {APP_ID: APP_SECRET}
     settings.llm_gateway_timestamp_tolerance_ms = 10**12
@@ -94,6 +108,70 @@ async def test_gateway_v1_event_accepts_signed_session_started(client, _mock_set
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted", "eventId": "evt-001"}
+
+
+@pytest.mark.asyncio
+async def test_gateway_v1_event_batch_with_one_event_uses_single_event_flow(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+
+    payload = _event_batch_payload(_batch_event())
+    response = await _post_gateway_payload(client, payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "eventId": "evt-001"}
+
+
+@pytest.mark.asyncio
+async def test_gateway_v1_event_batch_accepts_sgai_event_metadata(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+
+    event = _batch_event()
+    event["sessionId"] = "session-001"
+    event["stateVersion"] = 1
+    payload = _event_batch_payload(event)
+    response = await _post_gateway_payload(client, payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "eventId": "evt-001"}
+
+
+@pytest.mark.asyncio
+async def test_gateway_v1_event_batch_with_multiple_events_returns_batch_result(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+
+    payload = _event_batch_payload(_batch_event("evt-001"), _batch_event("evt-002"))
+    response = await _post_gateway_payload(client, payload)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "accepted",
+        "traceId": "trace-001",
+        "results": [
+            {"status": "accepted", "eventId": "evt-001"},
+            {"status": "accepted", "eventId": "evt-002"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_v1_event_batch_duplicate_returns_batch_duplicate_result(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+
+    first_payload = _event_batch_payload(_batch_event("evt-001"))
+    first = await _post_gateway_payload(client, first_payload)
+    second_payload = _event_batch_payload(_batch_event("evt-001"), _batch_event("evt-002"))
+    second = await _post_gateway_payload(client, second_payload, request_id="req-002")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json() == {
+        "status": "accepted",
+        "traceId": "trace-001",
+        "results": [
+            {"status": "duplicate", "eventId": "evt-001"},
+            {"status": "accepted", "eventId": "evt-002"},
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -323,6 +401,8 @@ async def test_gateway_v1_event_with_lease_runs_agent_and_posts_decision(client,
     _mock_settings.llm_gateway_decision_timeout_seconds = 10.0
 
     payload = _session_started_payload(event_id="evt-agent-001")
+    payload["event"]["sessionId"] = "session-001"
+    payload["event"]["stateVersion"] = 1
     body = _body_bytes(payload)
     agent_output = {
         "recommended_actions": [
@@ -353,11 +433,17 @@ async def test_gateway_v1_event_with_lease_runs_agent_and_posts_decision(client,
     assert response.status_code == 200
     mock_agent.assert_awaited_once()
     agent_kwargs = mock_agent.await_args.kwargs
+    assert agent_kwargs["trace_id"] == "trace-001"
     assert agent_kwargs["decision_lease_id"] == "lease-001"
+    assert agent_kwargs["session_id"] == "session-001"
+    assert agent_kwargs["state_version"] == 1
     assert agent_kwargs["session"]["sessionId"] == "session-001"
 
     mock_decision.assert_awaited_once()
     decision_kwargs = mock_decision.await_args.kwargs
     assert decision_kwargs["decision_url"] == "http://robotgateway.local/api/v1/hosting/llm/decision"
+    assert decision_kwargs["trace_id"] == "trace-001"
+    assert decision_kwargs["session_id"] == "session-001"
     assert decision_kwargs["decision_lease_id"] == "lease-001"
+    assert decision_kwargs["state_version"] == 1
     assert decision_kwargs["recommended_action"]["skillName"] == "observe_state"

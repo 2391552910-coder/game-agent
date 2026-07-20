@@ -1,6 +1,5 @@
 # myAgent v2.0
 
-<<<<<<< ours
 多租户游戏玩家行为分析与预测平台。游戏服务器通过 Webhook 发送玩家在线/离线事件，平台自动获取玩家数据，结合 RAG 知识库检索和 LLM 推理，生成结构化的行为分析和推荐行动。
 
 ## 核心能力
@@ -69,27 +68,27 @@ uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## 技术栈
 
-| 层级 | 技术 | 用途 |
-|------|------|------|
-| API | FastAPI + Uvicorn | HTTP 接口，异步框架 |
-| Agent | LangGraph | 有状态图编排，6 节点线性流程 |
-| RAG | LightRAG | 混合检索（向量 + 图谱 + 关键词） |
-| 向量库 | Milvus | 语义向量存储与检索 |
-| 图数据库 | Neo4j | 知识图谱存储 |
-| 缓存 | Redis | 认证缓存、去重、限流、健康追踪 |
-| 数据库 | PostgreSQL | 租户、配额、分析结果 |
-| LLM | DeepSeek / OpenAI / Anthropic | 行为分析与推理（可插拔多提供商） |
-| 包管理 | uv | Python 依赖管理 |
+| 层级     | 技术                          | 用途                             |
+| -------- | ----------------------------- | -------------------------------- |
+| API      | FastAPI + Uvicorn             | HTTP 接口，异步框架              |
+| Agent    | LangGraph                     | 有状态图编排，6 节点线性流程     |
+| RAG      | LightRAG                      | 混合检索（向量 + 图谱 + 关键词） |
+| 向量库   | Milvus                        | 语义向量存储与检索               |
+| 图数据库 | Neo4j                         | 知识图谱存储                     |
+| 缓存     | Redis                         | 认证缓存、去重、限流、健康追踪   |
+| 数据库   | PostgreSQL                    | 租户、配额、分析结果             |
+| LLM      | DeepSeek / OpenAI / Anthropic | 行为分析与推理（可插拔多提供商） |
+| 包管理   | uv                            | Python 依赖管理                  |
 
 ## 文档索引
 
-| 文档 | 受众 | 内容 |
-|------|------|------|
-| [平台总览](docs/overview.md) | 管理层 | 平台价值、业务流程、接入概要 |
-| [技术架构](docs/architecture.md) | 开发者 | 四层架构、数据流、数据库、Agent 图 |
+| 文档                               | 受众     | 内容                                 |
+| ---------------------------------- | -------- | ------------------------------------ |
+| [平台总览](docs/overview.md)          | 管理层   | 平台价值、业务流程、接入概要         |
+| [技术架构](docs/architecture.md)      | 开发者   | 四层架构、数据流、数据库、Agent 图   |
 | [对接指南](docs/integration-guide.md) | 游戏团队 | Webhook 接口、快照数据格式、接入步骤 |
-| [API 文档](docs/api-reference.md) | 开发者 | 全部端点的请求/响应/错误码 |
-| [部署指南](docs/deployment.md) | 运维 | 环境要求、Docker、配置、脚本 |
+| [API 文档](docs/api-reference.md)     | 开发者   | 全部端点的请求/响应/错误码           |
+| [部署指南](docs/deployment.md)        | 运维     | 环境要求、Docker、配置、脚本         |
 
 ## 项目结构
 
@@ -138,6 +137,7 @@ python -m scripts.tests.test_lightrag
 # 负载均衡器测试
 uv run python scripts/test_load_balancer.py
 ```
+
 =======
 多租户游戏玩家行为分析与决策推荐平台。游戏侧通过 Webhook 推送玩家在线、离线和行为检查点事件；平台基于 Redis 去重、Prefect 调度、LangGraph Agent、LightRAG 检索和多 LLM Provider 负载均衡，异步生成结构化玩家画像与可执行推荐行动，并可回调 RobotGateway。
 
@@ -219,29 +219,29 @@ uv run python scripts/test_load_balancer.py
 
 ## 技术栈
 
-| 层级 | 技术 | 用途 |
-|------|------|------|
-| API | FastAPI + Uvicorn | HTTP 接口、中间件、路由注册 |
-| 调度 | Prefect 3 | 离线分析 Flow、后台任务执行、重试 |
-| Agent | LangGraph | 状态图编排、动态决策与推荐生成 |
-| RAG | LightRAG | 混合检索、知识增强上下文 |
-| 向量库 | Milvus | 语义向量存储与检索 |
-| 图数据库 | Neo4j | 知识图谱存储 |
-| 缓存 | Redis | 鉴权缓存、限流、去重、LightRAG 缓存 |
-| 数据库 | PostgreSQL | 业务数据、分析结果、Provider、记忆、追踪 |
-| LLM | DeepSeek / OpenAI / Anthropic 等 | 行为分析、意图推断、行动推理 |
-| 包管理 | uv | Python 依赖和命令运行 |
-| 迁移 | Alembic | 数据库 Schema 管理 |
+| 层级     | 技术                             | 用途                                     |
+| -------- | -------------------------------- | ---------------------------------------- |
+| API      | FastAPI + Uvicorn                | HTTP 接口、中间件、路由注册              |
+| 调度     | Prefect 3                        | 离线分析 Flow、后台任务执行、重试        |
+| Agent    | LangGraph                        | 状态图编排、动态决策与推荐生成           |
+| RAG      | LightRAG                         | 混合检索、知识增强上下文                 |
+| 向量库   | Milvus                           | 语义向量存储与检索                       |
+| 图数据库 | Neo4j                            | 知识图谱存储                             |
+| 缓存     | Redis                            | 鉴权缓存、限流、去重、LightRAG 缓存      |
+| 数据库   | PostgreSQL                       | 业务数据、分析结果、Provider、记忆、追踪 |
+| LLM      | DeepSeek / OpenAI / Anthropic 等 | 行为分析、意图推断、行动推理             |
+| 包管理   | uv                               | Python 依赖和命令运行                    |
+| 迁移     | Alembic                          | 数据库 Schema 管理                       |
 
 ## 环境要求
 
-| 组件 | 要求 |
-|------|------|
-| Python | `>=3.11,<3.13` |
-| uv | 用于同步依赖和运行脚本 |
-| Docker / Docker Compose | 用于开发环境基础设施 |
-| LLM API Key | DeepSeek、OpenAI 或兼容 OpenAI API 的服务 |
-| DashScope API Key | Embedding 与 Rerank 默认使用 Qwen 相关服务 |
+| 组件                    | 要求                                       |
+| ----------------------- | ------------------------------------------ |
+| Python                  | `>=3.11,<3.13`                           |
+| uv                      | 用于同步依赖和运行脚本                     |
+| Docker / Docker Compose | 用于开发环境基础设施                       |
+| LLM API Key             | DeepSeek、OpenAI 或兼容 OpenAI API 的服务  |
+| DashScope API Key       | Embedding 与 Rerank 默认使用 Qwen 相关服务 |
 
 ## 快速开始
 
@@ -310,11 +310,11 @@ uv run python scripts/seed_provider.py
 
 常用测试 API Key：
 
-| 租户 | API Key | 权限 |
-|------|---------|------|
-| `admin_001` | `gap_test_admin_key_001` | 管理员，可访问 Provider 管理接口 |
-| `game_server_alpha` | `gap_test_alpha_key_002` | 普通租户 |
-| `game_server_beta` | `gap_test_beta_key_003` | 普通租户 |
+| 租户                  | API Key                    | 权限                             |
+| --------------------- | -------------------------- | -------------------------------- |
+| `admin_001`         | `gap_test_admin_key_001` | 管理员，可访问 Provider 管理接口 |
+| `game_server_alpha` | `gap_test_alpha_key_002` | 普通租户                         |
+| `game_server_beta`  | `gap_test_beta_key_003`  | 普通租户                         |
 
 ### 6. 注册 Prefect Deployment 并启动 Worker
 
@@ -337,11 +337,11 @@ uv run uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 启动后可访问：
 
-| 地址 | 说明 |
-|------|------|
-| `http://localhost:8000/health` | 健康检查 |
-| `http://localhost:8000/docs` | Swagger API 文档 |
-| `http://localhost:8000/redoc` | ReDoc API 文档 |
+| 地址                             | 说明             |
+| -------------------------------- | ---------------- |
+| `http://localhost:8000/health` | 健康检查         |
+| `http://localhost:8000/docs`   | Swagger API 文档 |
+| `http://localhost:8000/redoc`  | ReDoc API 文档   |
 
 ## 基础接口示例
 
@@ -464,43 +464,43 @@ curl http://localhost:8000/api/v1/providers `
 
 配置由 `src/config.py` 通过 `.env` 加载。字段名大小写不敏感。
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `ENV` | `development` | 运行环境 |
-| `LOG_LEVEL` | `INFO` | 日志级别 |
-| `APP_WORKERS` | `1` | 应用工作进程数 |
-| `CORS_ALLOWED_ORIGINS` | `["http://localhost:8000"]` | CORS 白名单 JSON 数组 |
-| `LLM_PROVIDER` | `deepseek` | 默认 LLM Provider 名称 |
-| `OPENAI_API_KEY` | 必填 | 兼容 OpenAI SDK 的 LLM API Key |
-| `OPENAI_BASE_URL` | 必填 | 兼容 OpenAI SDK 的 Base URL |
-| `OPENAI_DEFAULT_MODEL` | `deepseek-chat` | 主力模型，用于行动推理等任务 |
-| `OPENAI_FAST_MODEL` | `deepseek-chat` | 快速模型，用于轻量推断任务 |
-| `EMBEDDING_API_KEY` | 必填 | Embedding API Key |
-| `EMBEDDING_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Embedding Base URL |
-| `EMBEDDING_MODEL` | `text-embedding-v4` | Embedding 模型 |
-| `EMBEDDING_DIM` | `1024` | 向量维度 |
-| `RERANK_API_KEY` | 必填 | Rerank API Key |
-| `RERANK_MODEL` | `gte-rerank-v2` | Rerank 模型 |
-| `POSTGRES_DSN` | 必填 | PostgreSQL 异步连接串 |
-| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt 地址 |
-| `NEO4J_USERNAME` | `neo4j` | Neo4j 用户名 |
-| `NEO4J_PASSWORD` | 必填 | Neo4j 密码 |
-| `NEO4J_DATABASE` | `neo4j` | Neo4j 数据库名 |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis 连接串 |
-| `MILVUS_URI` | `http://localhost:19530` | Milvus 地址 |
-| `MILVUS_USER` | `root` | Milvus 用户名 |
-| `MILVUS_PASSWORD` | 空 | Milvus 密码 |
-| `MILVUS_DB_NAME` | `lightrag` | Milvus 数据库名 |
-| `GAME_DB_DSN` | 空 | 可选，主动拉取玩家快照时使用 |
-| `RAG_DEFAULT_STRATEGY` | `hybrid` | LightRAG 默认检索策略 |
-| `RAG_WORKING_DIR` | `./rag_storage` | LightRAG 工作目录 |
-| `MAX_CONCURRENT_ANALYSES` | `20` | 最大并发分析数 |
-| `OFFLINE_TRIGGER_MINUTES` | `5` | 离线去重 TTL，单位分钟 |
-| `ROBOTGATEWAY_CALLBACK_URL` | 空 | 分析完成回调地址 |
-| `ROBOTGATEWAY_CALLBACK_TIMEOUT_SECONDS` | `10.0` | 回调超时时间 |
-| `ROBOTGATEWAY_CALLBACK_API_KEY` | 空 | 回调请求头 `X-Callback-API-Key` |
-| `DEFAULT_MONTHLY_TOKENS` | `40000000` | 新租户默认月度 Token 配额 |
-| `QUOTA_WARNING_THRESHOLD` | `0.8` | 配额告警阈值 |
+| 环境变量                                  | 默认值                                                | 说明                              |
+| ----------------------------------------- | ----------------------------------------------------- | --------------------------------- |
+| `ENV`                                   | `development`                                       | 运行环境                          |
+| `LOG_LEVEL`                             | `INFO`                                              | 日志级别                          |
+| `APP_WORKERS`                           | `1`                                                 | 应用工作进程数                    |
+| `CORS_ALLOWED_ORIGINS`                  | `["http://localhost:8000"]`                         | CORS 白名单 JSON 数组             |
+| `LLM_PROVIDER`                          | `deepseek`                                          | 默认 LLM Provider 名称            |
+| `OPENAI_API_KEY`                        | 必填                                                  | 兼容 OpenAI SDK 的 LLM API Key    |
+| `OPENAI_BASE_URL`                       | 必填                                                  | 兼容 OpenAI SDK 的 Base URL       |
+| `OPENAI_DEFAULT_MODEL`                  | `deepseek-chat`                                     | 主力模型，用于行动推理等任务      |
+| `OPENAI_FAST_MODEL`                     | `deepseek-chat`                                     | 快速模型，用于轻量推断任务        |
+| `EMBEDDING_API_KEY`                     | 必填                                                  | Embedding API Key                 |
+| `EMBEDDING_BASE_URL`                    | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Embedding Base URL                |
+| `EMBEDDING_MODEL`                       | `text-embedding-v4`                                 | Embedding 模型                    |
+| `EMBEDDING_DIM`                         | `1024`                                              | 向量维度                          |
+| `RERANK_API_KEY`                        | 必填                                                  | Rerank API Key                    |
+| `RERANK_MODEL`                          | `gte-rerank-v2`                                     | Rerank 模型                       |
+| `POSTGRES_DSN`                          | 必填                                                  | PostgreSQL 异步连接串             |
+| `NEO4J_URI`                             | `bolt://localhost:7687`                             | Neo4j Bolt 地址                   |
+| `NEO4J_USERNAME`                        | `neo4j`                                             | Neo4j 用户名                      |
+| `NEO4J_PASSWORD`                        | 必填                                                  | Neo4j 密码                        |
+| `NEO4J_DATABASE`                        | `neo4j`                                             | Neo4j 数据库名                    |
+| `REDIS_URL`                             | `redis://localhost:6379/0`                          | Redis 连接串                      |
+| `MILVUS_URI`                            | `http://localhost:19530`                            | Milvus 地址                       |
+| `MILVUS_USER`                           | `root`                                              | Milvus 用户名                     |
+| `MILVUS_PASSWORD`                       | 空                                                    | Milvus 密码                       |
+| `MILVUS_DB_NAME`                        | `lightrag`                                          | Milvus 数据库名                   |
+| `GAME_DB_DSN`                           | 空                                                    | 可选，主动拉取玩家快照时使用      |
+| `RAG_DEFAULT_STRATEGY`                  | `hybrid`                                            | LightRAG 默认检索策略             |
+| `RAG_WORKING_DIR`                       | `./rag_storage`                                     | LightRAG 工作目录                 |
+| `MAX_CONCURRENT_ANALYSES`               | `20`                                                | 最大并发分析数                    |
+| `OFFLINE_TRIGGER_MINUTES`               | `5`                                                 | 离线去重 TTL，单位分钟            |
+| `ROBOTGATEWAY_CALLBACK_URL`             | 空                                                    | 分析完成回调地址                  |
+| `ROBOTGATEWAY_CALLBACK_TIMEOUT_SECONDS` | `10.0`                                              | 回调超时时间                      |
+| `ROBOTGATEWAY_CALLBACK_API_KEY`         | 空                                                    | 回调请求头 `X-Callback-API-Key` |
+| `DEFAULT_MONTHLY_TOKENS`                | `40000000`                                          | 新租户默认月度 Token 配额         |
+| `QUOTA_WARNING_THRESHOLD`               | `0.8`                                               | 配额告警阈值                      |
 
 ## 项目结构
 
@@ -579,31 +579,31 @@ uv run mypy src
 
 ## 关键开发入口
 
-| 文件 | 说明 |
-|------|------|
-| `src/api/main.py` | FastAPI 应用、生命周期、中间件、路由注册 |
-| `src/api/routes/webhooks.py` | 玩家事件入口，处理 `online`、`offline`、`behavior_checkpoint` |
-| `src/core/scheduler/triggers.py` | Redis 去重、Prefect Deployment 调度、Flow Run 取消 |
-| `src/core/scheduler/flows/analysis_flow.py` | 离线分析 Flow，串联快照、Agent、存储、回调 |
-| `src/core/agents/orchestrator.py` | LangGraph 主图构建 |
-| `src/core/agents/nodes.py` | 快照、RAG、上下文收集、行为分析、行动推理等节点 |
-| `src/core/agents/decision_nodes.py` | 意图推断、目标评估、玩家记忆更新 |
-| `src/core/agents/models.py` | 最终输出与推荐行动模型 |
-| `src/core/llm/balancer.py` | LLM Provider 加权轮询与健康降级 |
-| `src/core/engine/lightrag_engine.py` | LightRAG 初始化与查询封装 |
-| `src/game_specific/connector.py` | 游戏玩家快照适配接口 |
+| 文件                                          | 说明                                                                |
+| --------------------------------------------- | ------------------------------------------------------------------- |
+| `src/api/main.py`                           | FastAPI 应用、生命周期、中间件、路由注册                            |
+| `src/api/routes/webhooks.py`                | 玩家事件入口，处理 `online`、`offline`、`behavior_checkpoint` |
+| `src/core/scheduler/triggers.py`            | Redis 去重、Prefect Deployment 调度、Flow Run 取消                  |
+| `src/core/scheduler/flows/analysis_flow.py` | 离线分析 Flow，串联快照、Agent、存储、回调                          |
+| `src/core/agents/orchestrator.py`           | LangGraph 主图构建                                                  |
+| `src/core/agents/nodes.py`                  | 快照、RAG、上下文收集、行为分析、行动推理等节点                     |
+| `src/core/agents/decision_nodes.py`         | 意图推断、目标评估、玩家记忆更新                                    |
+| `src/core/agents/models.py`                 | 最终输出与推荐行动模型                                              |
+| `src/core/llm/balancer.py`                  | LLM Provider 加权轮询与健康降级                                     |
+| `src/core/engine/lightrag_engine.py`        | LightRAG 初始化与查询封装                                           |
+| `src/game_specific/connector.py`            | 游戏玩家快照适配接口                                                |
 
 ## 文档索引
 
-| 文档 | 内容 |
-|------|------|
-| `docs/overview.md` | 平台总览、业务价值、流程说明 |
-| `docs/architecture.md` | 技术架构、数据流、数据库设计 |
-| `docs/integration-guide.md` | RobotGateway / 游戏服务器对接指南 |
-| `docs/api-reference.md` | API 请求、响应、错误码 |
-| `docs/deployment.md` | 部署、配置、运维说明 |
-| `docs/技术栈/Agent执行流程.md` | Agent 从 Webhook 到 LangGraph 的执行链路 |
-| `docs/技术栈/Redis使用场景汇总.md` | Redis 在鉴权、限流、去重和缓存中的使用 |
+| 文档                                 | 内容                                     |
+| ------------------------------------ | ---------------------------------------- |
+| `docs/overview.md`                 | 平台总览、业务价值、流程说明             |
+| `docs/architecture.md`             | 技术架构、数据流、数据库设计             |
+| `docs/integration-guide.md`        | RobotGateway / 游戏服务器对接指南        |
+| `docs/api-reference.md`            | API 请求、响应、错误码                   |
+| `docs/deployment.md`               | 部署、配置、运维说明                     |
+| `docs/技术栈/Agent执行流程.md`     | Agent 从 Webhook 到 LangGraph 的执行链路 |
+| `docs/技术栈/Redis使用场景汇总.md` | Redis 在鉴权、限流、去重和缓存中的使用   |
 
 ## 注意事项
 
@@ -613,7 +613,7 @@ uv run mypy src
 - Provider 管理接口需要管理员租户，即 `request.state.is_admin = true`。
 - 开发环境 Redis 默认设置了密码，`.env` 中 `REDIS_URL` 需要使用 `redis://:myagent@localhost:6379/0`。
 - 如果 Webhook 已传入 `snapshot`，Prefect Flow 会直接使用该快照；否则会调用 `src.game_specific.fetch_player_snapshot()` 主动获取。
->>>>>>> theirs
+
 
 ## 许可证
 

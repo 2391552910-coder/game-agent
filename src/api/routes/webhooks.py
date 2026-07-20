@@ -5,6 +5,7 @@
 接收玩家在线期间的行为事件，写入 session_events 表。
 """
 
+import json
 import logging
 import math
 import re
@@ -112,6 +113,8 @@ class GatewayEvent(BaseModel):
     event_type: Literal["session_started", "skill_finished", "session_stopped", "observation_updated"] = Field(
         alias="eventType"
     )
+    session_id: StrictStr | None = Field(default=None, alias="sessionId")
+    state_version: StrictInt | None = Field(default=None, alias="stateVersion")
     decision_lease_id: StrictStr | None = Field(default=None, alias="decisionLeaseId")
     occurred_at_ms: StrictInt = Field(alias="occurredAtMs")
     payload: GatewayEventPayload
@@ -160,6 +163,23 @@ class GatewayEventEnvelope(BaseModel):
     gateway_id: StrictStr = Field(alias="gatewayId")
     contract_version: Literal["llm-gateway-http-v1"] = Field(alias="contractVersion")
     event: GatewayEvent
+
+
+class GatewayEventBatchEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: StrictStr = Field(alias="traceId")
+    gateway_id: StrictStr = Field(alias="gatewayId")
+    contract_version: Literal["llm-gateway-http-v1"] = Field(alias="contractVersion")
+    sent_at_ms: StrictInt | None = Field(default=None, alias="sentAtMs")
+    events: list[GatewayEvent]
+
+    @field_validator("events")
+    @classmethod
+    def validate_non_empty_events(cls, value: list[GatewayEvent]) -> list[GatewayEvent]:
+        if not value:
+            raise ValueError("events 不能为空")
+        return value
 
 
 def _protocol_error(code: str, status_code: int) -> JSONResponse:
@@ -265,12 +285,36 @@ async def _validate_gateway_event_request(request: Request) -> bytes | JSONRespo
 
 def _parse_gateway_event_envelope(raw_body: bytes) -> GatewayEventEnvelope | None:
     try:
-        import json
-
         payload = json.loads(raw_body)
         return GatewayEventEnvelope.model_validate(payload)
     except Exception:
         return None
+
+
+def _parse_gateway_event_batch_envelope(raw_body: bytes) -> GatewayEventBatchEnvelope | None:
+    try:
+        payload = json.loads(raw_body)
+        return GatewayEventBatchEnvelope.model_validate(payload)
+    except Exception:
+        return None
+
+
+def _envelope_from_batch_event(batch: GatewayEventBatchEnvelope, event: GatewayEvent) -> GatewayEventEnvelope:
+    return GatewayEventEnvelope(
+        traceId=batch.trace_id,
+        gatewayId=batch.gateway_id,
+        contractVersion=batch.contract_version,
+        event=event,
+    )
+
+
+def _json_body_bytes(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _single_event_body_hash(envelope: GatewayEventEnvelope) -> str:
+    payload = envelope.model_dump(mode="json", by_alias=True)
+    return sha256(_json_body_bytes(payload)).hexdigest()
 
 
 def _gateway_event_ids_are_valid(envelope: GatewayEventEnvelope) -> bool:
@@ -278,6 +322,7 @@ def _gateway_event_ids_are_valid(envelope: GatewayEventEnvelope) -> bool:
         envelope.trace_id,
         envelope.gateway_id,
         envelope.event.event_id,
+        envelope.event.session_id,
         envelope.event.decision_lease_id,
         envelope.event.payload.session.session_id,
         envelope.event.payload.session.account_id,
@@ -290,6 +335,14 @@ def _gateway_event_idempotency_response(event_id: str, status: str) -> JSONRespo
     if status == "conflict":
         return _protocol_error("bad_request", 400)
     return {"status": status, "eventId": event_id}
+
+
+def _gateway_batch_response(trace_id: str, results: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "status": "accepted",
+        "traceId": trace_id,
+        "results": results,
+    }
 
 
 class PlayerEvent(BaseModel):
@@ -311,13 +364,33 @@ async def handle_gateway_event(request: Request):
     raw_body = raw_body_or_error
 
     envelope = _parse_gateway_event_envelope(raw_body)
-    if envelope is None:
+    if envelope is not None:
+        return await _handle_single_gateway_event_envelope(envelope, sha256(raw_body).hexdigest())
+
+    batch = _parse_gateway_event_batch_envelope(raw_body)
+    if batch is None:
         return _protocol_error("bad_request", 400)
 
+    envelopes = [_envelope_from_batch_event(batch, event) for event in batch.events]
+    if len(envelopes) == 1:
+        return await _handle_single_gateway_event_envelope(envelopes[0], _single_event_body_hash(envelopes[0]))
+
+    results: list[dict[str, str]] = []
+    for item in envelopes:
+        response = await _handle_single_gateway_event_envelope(item, _single_event_body_hash(item))
+        if isinstance(response, JSONResponse):
+            return response
+        results.append(response)
+    return _gateway_batch_response(batch.trace_id, results)
+
+
+async def _handle_single_gateway_event_envelope(
+    envelope: GatewayEventEnvelope,
+    body_hash: str,
+) -> JSONResponse | dict[str, str]:
     if not _gateway_event_ids_are_valid(envelope):
         return _protocol_error("bad_request", 400)
 
-    body_hash = sha256(raw_body).hexdigest()
     idempotency_status = await _claim_gateway_event_idempotency(envelope.event.event_id, body_hash)
     response = _gateway_event_idempotency_response(envelope.event.event_id, idempotency_status)
     if isinstance(response, JSONResponse):
@@ -400,6 +473,8 @@ async def _handle_gateway_event_business(envelope: GatewayEventEnvelope) -> None
         trace_id=envelope.trace_id,
         event_id=envelope.event.event_id,
         event_type=envelope.event.event_type,
+        session_id=envelope.event.session_id or envelope.event.payload.session.session_id,
+        state_version=envelope.event.state_version if envelope.event.state_version is not None else 0,
         decision_lease_id=envelope.event.decision_lease_id,
         session=envelope.event.payload.session.model_dump(mode="json", by_alias=True),
     )
@@ -413,8 +488,11 @@ async def _handle_gateway_event_business(envelope: GatewayEventEnvelope) -> None
         app_id=decision_app_id,
         app_secret=decision_app_secret,
         timeout_seconds=float(getattr(current_settings, "llm_gateway_decision_timeout_seconds", 10.0)),
+        trace_id=envelope.trace_id,
+        session_id=envelope.event.session_id or envelope.event.payload.session.session_id,
         decision_id=f"decision-{uuid4().hex}",
         decision_lease_id=envelope.event.decision_lease_id,
+        state_version=envelope.event.state_version if envelope.event.state_version is not None else 0,
         recommended_action=actions[0],
     )
 
@@ -434,6 +512,8 @@ async def run_gateway_v1_agent(
     trace_id: str,
     event_id: str,
     event_type: str,
+    session_id: str,
+    state_version: int,
     decision_lease_id: str,
     session: dict,
 ) -> dict:
@@ -444,6 +524,8 @@ async def run_gateway_v1_agent(
         "traceId": trace_id,
         "eventId": event_id,
         "eventType": event_type,
+        "sessionId": session_id,
+        "stateVersion": state_version,
         "decisionLeaseId": decision_lease_id,
         "session": session,
         "position": session.get("position"),
