@@ -4,12 +4,28 @@
 """
 
 import json
+import os
 import uuid
 from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+for environment_name in tuple(os.environ):
+    if environment_name.upper().startswith("LLM_GATEWAY_"):
+        del os.environ[environment_name]
+
+os.environ["ENV"] = "test"
+os.environ["OPENAI_API_KEY"] = "test-openai-key"
+os.environ["OPENAI_BASE_URL"] = "https://llm.invalid/v1"
+os.environ["POSTGRES_DSN"] = "postgresql+asyncpg://test:test@postgres.invalid/test"
+os.environ["NEO4J_PASSWORD"] = "test-neo4j-password"
+os.environ["LLM_GATEWAY_V1_ENABLED"] = "true"
+os.environ["LLM_GATEWAY_V2_ENABLED"] = "false"
+os.environ["LLM_GATEWAY_APP_SECRETS"] = "{}"
+os.environ["LLM_GATEWAY_APP_GATEWAYS"] = "{}"
+os.environ["LLM_GATEWAY_APP_TENANTS"] = "{}"
 
 # ---------------------------------------------------------------------------
 # Mock 核心基础设施
@@ -27,11 +43,13 @@ def _mock_settings():
     mock.cors_allowed_origins = ["http://localhost:3000"]
     # LLM
     mock.llm_provider = "test"
+    mock.llm_provider_source = "env"
     mock.openai_api_key = "sk-test-key"
     mock.openai_base_url = "https://api.test.com/v1"
     mock.openai_default_model = "test-model-default"
     mock.openai_fast_model = "test-model-fast"
     # Embedding
+    mock.embedding_enabled = True
     mock.embedding_api_key = "sk-test-key"
     mock.embedding_base_url = "https://api.test.com/v1"
     mock.embedding_model = "text-embedding-v3"
@@ -76,11 +94,14 @@ def _mock_settings():
     # 调度
     mock.max_concurrent_analyses = 20
     mock.offline_trigger_minutes = 5
-    # RobotGateway callback / LLM Gateway v1
+    # RobotGateway callback / LLM Gateway shared and v1
     mock.robotgateway_callback_url = None
     mock.robotgateway_callback_timeout_seconds = 10.0
     mock.robotgateway_callback_api_key = None
+    mock.llm_gateway_v1_enabled = True
+    mock.llm_gateway_v2_enabled = False
     mock.llm_gateway_app_secrets = {}
+    mock.llm_gateway_app_gateways = {}
     mock.llm_gateway_app_tenants = {}
     mock.llm_gateway_timestamp_tolerance_ms = 300_000
     mock.llm_gateway_idempotency_ttl_seconds = 86_400
@@ -88,6 +109,26 @@ def _mock_settings():
     mock.llm_gateway_decision_app_id = None
     mock.llm_gateway_decision_app_secret = None
     mock.llm_gateway_decision_timeout_seconds = 10.0
+    mock.llm_gateway_decision_max_retries = 1
+    mock.llm_gateway_event_worker_enabled = False
+    mock.llm_gateway_event_stream_key = "llm-gateway:events"
+    mock.llm_gateway_event_consumer_group = "myagent2"
+    mock.llm_gateway_event_worker_block_ms = 1000
+    mock.llm_gateway_event_retry_idle_ms = 30_000
+    # LLM Gateway v2
+    mock.llm_gateway_v2_max_event_batch_size = 100
+    mock.llm_gateway_v2_max_decision_ttl_ms = 30_000
+    mock.llm_gateway_v2_event_max_attempts = 5
+    mock.llm_gateway_v2_decision_max_attempts = 5
+    mock.llm_gateway_v2_retry_base_ms = 1_000
+    mock.llm_gateway_v2_retry_max_ms = 300_000
+    mock.llm_gateway_v2_claim_ttl_ms = 30_000
+    mock.llm_gateway_v2_poll_ms = 250
+    mock.llm_gateway_v2_event_max_parallelism = 4
+    mock.llm_gateway_v2_decision_max_parallelism = 4
+    mock.llm_gateway_v2_shutdown_grace_seconds = 10
+    mock.llm_gateway_v2_readiness_timeout_seconds = 3
+    mock.llm_gateway_v2_readiness_cache_seconds = 5
     # Token 配额
     mock.default_monthly_tokens = 100000
     mock.quota_warning_threshold = 0.8
@@ -143,6 +184,7 @@ def mock_redis():
 @pytest.fixture(autouse=True)
 def _mock_redis_module(mock_redis):
     """全局替换 get_redis。"""
+
     async def _get_redis():
         return mock_redis
 
@@ -193,6 +235,7 @@ def mock_session():
             # 使对象可以被 await
             async def _():
                 return self
+
             return _()
 
         async def __aenter__(self):
@@ -311,23 +354,26 @@ def make_analysis_row(
 ) -> MagicMock:
     """创建模拟 analysis_results 行。"""
     row = MagicMock()
-    row.output_json = json.dumps(output_json or {
-        "player_profile": {
-            "playstyle": "competitive",
-            "engagement_level": "high",
-            "current_goal": ["level up"],
-            "bottlenecks": ["time"],
-        },
-        "recommended_actions": [
-            {
-                "skillName": "observe_state",
-                "schemaVersion": "v1",
-                "arguments": {},
-                "priority": "high",
-                "reason": "test",
+    row.output_json = json.dumps(
+        output_json
+        or {
+            "player_profile": {
+                "playstyle": "competitive",
+                "engagement_level": "high",
+                "current_goal": ["level up"],
+                "bottlenecks": ["time"],
             },
-        ],
-    })
+            "recommended_actions": [
+                {
+                    "skillName": "observe_state",
+                    "schemaVersion": "v1",
+                    "arguments": {},
+                    "priority": "high",
+                    "reason": "test",
+                },
+            ],
+        }
+    )
     row.analyzed_at = analyzed_at or datetime.now(UTC)
     row.user_id = user_id
     return row
@@ -346,9 +392,7 @@ def make_quota_row(
     today = date.today()
     row.period_start = period_start or today.replace(day=1)
     row.period_end = (
-        period_end or date(today.year, today.month + 1, 1)
-        if today.month < 12
-        else date(today.year + 1, 1, 1)
+        period_end or date(today.year, today.month + 1, 1) if today.month < 12 else date(today.year + 1, 1, 1)
     )
     return row
 

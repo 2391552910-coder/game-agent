@@ -1,4 +1,4 @@
-"""LLM Gateway v1 事件入口测试。"""
+"""Gateway 侧真实外部决策 HTTP 契约测试。"""
 
 import hashlib
 import hmac
@@ -29,36 +29,100 @@ def _signed_headers(path: str, body: bytes, request_id: str = "req-001") -> dict
     }
 
 
-def _session_started_payload(event_id: str = "evt-001") -> dict:
+def _session(*, pascal_case: bool = False) -> dict:
+    values = {
+        "sessionId": "session-001",
+        "accountId": "account-001",
+        "roleId": "role-001",
+        "sceneId": 1001,
+        "state": "Running",
+        "position": {"x": 12.3, "y": 0.0, "z": 45.6},
+        "controllable": True,
+        "roleName": "测试角色",
+        "runtimeObjectCatalog": {"role": {"roleId": "role-001"}},
+    }
+    if not pascal_case:
+        return values
     return {
-        "traceId": "trace-001",
-        "gatewayId": "gateway-01",
-        "contractVersion": "llm-gateway-http-v1",
-        "event": {
-            "eventId": event_id,
-            "eventType": "session_started",
-            "decisionLeaseId": "lease-001",
-            "occurredAtMs": 1719999999000,
-            "payload": {
-                "session": {
-                    "sessionId": "session-001",
-                    "accountId": "account-001",
-                    "roleId": "role-001",
-                    "sceneId": 1001,
-                    "state": "Running",
-                    "position": {"x": 12.3, "y": 0, "z": 45.6},
-                    "controllable": True,
-                }
-            },
-        },
+        "SessionId": values["sessionId"],
+        "AccountId": values["accountId"],
+        "RoleId": values["roleId"],
+        "SceneId": values["sceneId"],
+        "State": values["state"],
+        "Position": {"X": 12.3, "Y": 0.0, "Z": 45.6},
+        "Controllable": values["controllable"],
+        "RoleName": values["roleName"],
+        "RuntimeObjectCatalog": values["runtimeObjectCatalog"],
     }
 
 
-def _batch_event(event_id: str = "evt-001") -> dict:
-    return _session_started_payload(event_id=event_id)["event"]
+def _payload(event_type: str, *, pascal_case_session: bool = False) -> dict:
+    payload = {
+        "eventType": event_type,
+        "reason": "state_changed" if event_type == "observation_updated" else None,
+        "session": _session(pascal_case=pascal_case_session),
+        "availableSkills": [
+            {
+                "skillName": "observe_state",
+                "schemaVersion": "v1",
+                "requireRunning": True,
+                "cooldownMs": 0,
+                "exposure": {"enabled": True},
+            },
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "requireRunning": True,
+                "cooldownMs": 0,
+                "exposure": {"enabled": True},
+            },
+        ],
+        "skillArgumentHints": [
+            {
+                "skillName": "observe_state",
+                "schemaVersion": "v1",
+                "argumentStatus": "ready",
+                "allowedArgs": [],
+                "missingArgs": [],
+                "warnings": [],
+                "stateRefs": [],
+                "nextSteps": [],
+            },
+        ],
+        "lastSkillResult": None,
+    }
+    if event_type == "skill_finished":
+        payload["reason"] = "ok"
+        payload["lastSkillResult"] = {
+            "skillCallId": "skill-call-001",
+            "skillName": "observe_state",
+            "status": "success",
+            "reason": "ok",
+        }
+    if event_type == "decision_rejected":
+        payload["reason"] = "stale_state"
+        payload["lastSkillResult"] = {
+            "skillCallId": "skill-call-002",
+            "skillName": "move_to",
+            "status": "rejected",
+            "reason": "stale_state",
+        }
+    return payload
 
 
-def _event_batch_payload(*events: dict, trace_id: str = "trace-001") -> dict:
+def _event(event_type: str = "observation_updated", event_id: str = "evt-001", state_version: int = 1) -> dict:
+    return {
+        "eventId": event_id,
+        "eventType": event_type,
+        "sessionId": "session-001",
+        "stateVersion": state_version,
+        "decisionLeaseId": f"lease-{state_version}",
+        "occurredAtMs": 1719999999000 + state_version,
+        "payload": _payload(event_type),
+    }
+
+
+def _event_batch(*events: dict, trace_id: str = "trace-001") -> dict:
     return {
         "traceId": trace_id,
         "gatewayId": "gateway-01",
@@ -71,13 +135,6 @@ def _event_batch_payload(*events: dict, trace_id: str = "trace-001") -> dict:
 def _configure_gateway_settings(settings):
     settings.llm_gateway_app_secrets = {APP_ID: APP_SECRET}
     settings.llm_gateway_timestamp_tolerance_ms = 10**12
-
-
-def _set_nested(payload: dict, path: tuple[str, ...], value) -> None:
-    current = payload
-    for key in path[:-1]:
-        current = current[key]
-    current[path[-1]] = value
 
 
 async def _post_gateway_payload(client, payload: dict, request_id: str = "req-001"):
@@ -95,355 +152,197 @@ def _assert_bad_request(response) -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_v1_event_accepts_signed_session_started(client, _mock_settings):
+async def test_gateway_accepts_actual_batch_and_returns_ack(client, _mock_settings):
     _configure_gateway_settings(_mock_settings)
+    payload = _event_batch(_event("observation_updated", "evt-observe"), _event("skill_finished", "evt-finished", 2))
 
-    payload = _session_started_payload()
-    body = _body_bytes(payload)
-    response = await client.post(
-        "/api/gateway/events",
-        content=body,
-        headers=_signed_headers("/api/gateway/events", body),
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted", "eventId": "evt-001"}
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_batch_with_one_event_uses_single_event_flow(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _event_batch_payload(_batch_event())
-    response = await _post_gateway_payload(client, payload)
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted", "eventId": "evt-001"}
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_batch_accepts_sgai_event_metadata(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    event = _batch_event()
-    event["sessionId"] = "session-001"
-    event["stateVersion"] = 1
-    payload = _event_batch_payload(event)
-    response = await _post_gateway_payload(client, payload)
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted", "eventId": "evt-001"}
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_batch_with_multiple_events_returns_batch_result(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _event_batch_payload(_batch_event("evt-001"), _batch_event("evt-002"))
-    response = await _post_gateway_payload(client, payload)
+    with patch("src.api.routes.webhooks.enqueue_gateway_event", AsyncMock(return_value="accepted")) as enqueue:
+        response = await _post_gateway_payload(client, payload)
 
     assert response.status_code == 200
     assert response.json() == {
-        "status": "accepted",
+        "accepted": True,
         "traceId": "trace-001",
-        "results": [
-            {"status": "accepted", "eventId": "evt-001"},
-            {"status": "accepted", "eventId": "evt-002"},
-        ],
+        "receivedEventIds": ["evt-observe", "evt-finished"],
+        "duplicateEventIds": [],
     }
+    assert enqueue.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_gateway_v1_event_batch_duplicate_returns_batch_duplicate_result(client, _mock_settings):
+async def test_gateway_accepts_all_current_event_types(client, _mock_settings):
     _configure_gateway_settings(_mock_settings)
-
-    first_payload = _event_batch_payload(_batch_event("evt-001"))
-    first = await _post_gateway_payload(client, first_payload)
-    second_payload = _event_batch_payload(_batch_event("evt-001"), _batch_event("evt-002"))
-    second = await _post_gateway_payload(client, second_payload, request_id="req-002")
-
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert second.json() == {
-        "status": "accepted",
-        "traceId": "trace-001",
-        "results": [
-            {"status": "duplicate", "eventId": "evt-001"},
-            {"status": "accepted", "eventId": "evt-002"},
-        ],
-    }
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_query_parameters(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    body = _body_bytes(payload)
-    response = await client.post(
-        "/api/gateway/events?debug=1",
-        content=body,
-        headers=_signed_headers("/api/gateway/events", body),
+    payload = _event_batch(
+        _event("observation_updated", "evt-observe", 1),
+        _event("decision_rejected", "evt-rejected", 2),
+        _event("skill_finished", "evt-finished", 3),
     )
 
+    with patch("src.api.routes.webhooks.enqueue_gateway_event", AsyncMock(return_value="accepted")):
+        response = await _post_gateway_payload(client, payload)
+
+    assert response.status_code == 200
+    assert response.json()["receivedEventIds"] == ["evt-observe", "evt-rejected", "evt-finished"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_returns_ack_without_running_agent_in_request_handler(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+    payload = _event_batch(_event())
+
+    with (
+        patch("src.api.routes.webhooks.enqueue_gateway_event", AsyncMock(return_value="accepted")),
+        patch("src.api.routes.webhooks.run_gateway_v1_agent", AsyncMock()) as agent,
+        patch("src.api.routes.webhooks.send_llm_gateway_decision", AsyncMock()) as decision,
+    ):
+        response = await _post_gateway_payload(client, payload)
+
+    assert response.status_code == 200
+    agent.assert_not_awaited()
+    decision.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gateway_accepts_gateway_pascal_case_session_snapshot(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+    event = _event()
+    event["payload"] = _payload("observation_updated", pascal_case_session=True)
+
+    with patch("src.api.routes.webhooks.enqueue_gateway_event", AsyncMock(return_value="accepted")):
+        response = await _post_gateway_payload(client, _event_batch(event))
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_event_types_not_currently_emitted(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+    response = await _post_gateway_payload(client, _event_batch(_event("session_started")))
     _assert_bad_request(response)
 
 
 @pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_plain_text_body(client, _mock_settings):
+async def test_gateway_rejects_payload_event_type_mismatch(client, _mock_settings):
     _configure_gateway_settings(_mock_settings)
-
-    body = b"not json"
-    headers = _signed_headers("/api/gateway/events", body)
-    headers["Content-Type"] = "text/plain"
-
-    response = await client.post("/api/gateway/events", content=body, headers=headers)
-
+    event = _event("observation_updated")
+    event["payload"]["eventType"] = "skill_finished"
+    response = await _post_gateway_payload(client, _event_batch(event))
     _assert_bad_request(response)
 
 
 @pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_unknown_top_level_field(client, _mock_settings):
+async def test_gateway_rejects_missing_lease_for_current_event(client, _mock_settings):
     _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    payload["extra"] = "unexpected"
-
-    response = await _post_gateway_payload(client, payload)
-
+    event = _event()
+    del event["decisionLeaseId"]
+    response = await _post_gateway_payload(client, _event_batch(event))
     _assert_bad_request(response)
 
 
 @pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_missing_decision_lease_for_decision_event(client, _mock_settings):
+async def test_gateway_rejects_invalid_signature(client, _mock_settings):
     _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    del payload["event"]["decisionLeaseId"]
-
-    response = await _post_gateway_payload(client, payload)
-
-    _assert_bad_request(response)
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_session_stopped_with_decision_lease(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    payload["event"]["eventType"] = "session_stopped"
-    payload["event"]["payload"]["session"]["state"] = "Stopped"
-    payload["event"]["payload"]["session"]["controllable"] = False
-    payload["event"]["payload"]["stop"] = {"reason": "admin_stop"}
-
-    response = await _post_gateway_payload(client, payload)
-
-    _assert_bad_request(response)
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_uncontrollable_session_started(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    payload["event"]["payload"]["session"]["controllable"] = False
-
-    response = await _post_gateway_payload(client, payload)
-
-    _assert_bad_request(response)
-
-
-@pytest.mark.parametrize(
-    ("path", "value"),
-    [
-        (("event", "occurredAtMs"), True),
-        (("event", "occurredAtMs"), 1719999999000.0),
-        (("event", "occurredAtMs"), "1719999999000"),
-        (("event", "payload", "session", "sceneId"), True),
-        (("event", "payload", "session", "sceneId"), 1001.0),
-        (("event", "payload", "session", "sceneId"), "1001"),
-        (("event", "payload", "session", "controllable"), "true"),
-        (("event", "payload", "session", "position", "x"), True),
-        (("event", "payload", "session", "position", "x"), "12.3"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_type_coercion_attacks(client, _mock_settings, path, value):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    _set_nested(payload, path, value)
-
-    response = await _post_gateway_payload(client, payload)
-
-    _assert_bad_request(response)
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_non_finite_position_number(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    payload["event"]["payload"]["session"]["position"]["x"] = float("inf")
-
-    response = await _post_gateway_payload(client, payload)
-
-    _assert_bad_request(response)
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_explicit_null_optional_block(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    payload["event"]["payload"]["skill"] = None
-
-    response = await _post_gateway_payload(client, payload)
-
-    _assert_bad_request(response)
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_duplicate_returns_duplicate(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    body = _body_bytes(payload)
-    headers = _signed_headers("/api/gateway/events", body)
-
-    first = await client.post("/api/gateway/events", content=body, headers=headers)
-    second = await client.post("/api/gateway/events", content=body, headers=headers)
-
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert second.json() == {"status": "duplicate", "eventId": "evt-001"}
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_same_event_id_with_different_body(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    first_payload = _session_started_payload()
-    first_body = _body_bytes(first_payload)
-    await client.post(
-        "/api/gateway/events",
-        content=first_body,
-        headers=_signed_headers("/api/gateway/events", first_body),
-    )
-
-    second_payload = _session_started_payload()
-    second_payload["event"]["payload"]["session"]["position"]["x"] = 99
-    second_body = _body_bytes(second_payload)
-    response = await client.post(
-        "/api/gateway/events",
-        content=second_body,
-        headers=_signed_headers("/api/gateway/events", second_body, request_id="req-002"),
-    )
-
-    assert response.status_code == 400
-    assert response.json() == {"error": {"code": "bad_request", "message": "bad request"}}
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_idempotency_treats_failed_nx_set_as_duplicate(mock_redis, _mock_settings):
-    from src.api.routes.webhooks import _claim_gateway_event_idempotency
-
-    _mock_settings.llm_gateway_idempotency_ttl_seconds = 86_400
-    body_sha = "a" * 64
-    mock_redis.get = AsyncMock(side_effect=[None, body_sha])
-    mock_redis.set = AsyncMock(return_value=False)
-
-    status = await _claim_gateway_event_idempotency("evt-race-001", body_sha)
-
-    assert status == "duplicate"
-    mock_redis.set.assert_awaited_once_with("llm-gateway:event:evt-race-001", body_sha, ex=86_400, nx=True)
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_idempotency_treats_failed_nx_set_with_different_body_as_conflict(mock_redis, _mock_settings):
-    from src.api.routes.webhooks import _claim_gateway_event_idempotency
-
-    _mock_settings.llm_gateway_idempotency_ttl_seconds = 86_400
-    mock_redis.get = AsyncMock(side_effect=[None, "b" * 64])
-    mock_redis.set = AsyncMock(return_value=False)
-
-    status = await _claim_gateway_event_idempotency("evt-race-002", "a" * 64)
-
-    assert status == "conflict"
-
-
-@pytest.mark.asyncio
-async def test_gateway_v1_event_rejects_invalid_signature(client, _mock_settings):
-    _configure_gateway_settings(_mock_settings)
-
-    payload = _session_started_payload()
-    body = _body_bytes(payload)
+    body = _body_bytes(_event_batch(_event()))
     headers = _signed_headers("/api/gateway/events", body)
     headers["X-Signature"] = "0" * 64
-
     response = await client.post("/api/gateway/events", content=body, headers=headers)
-
     assert response.status_code == 401
     assert response.json() == {
-        "error": {
-            "code": "signature_invalid",
-            "message": "request signature invalid",
-        }
+        "error": {"code": "signature_invalid", "message": "request signature invalid"}
     }
 
 
 @pytest.mark.asyncio
-async def test_gateway_v1_event_with_lease_runs_agent_and_posts_decision(client, _mock_settings):
+async def test_gateway_duplicate_and_conflict_are_reported_per_event(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+    payload = _event_batch(_event())
+
+    with patch(
+        "src.api.routes.webhooks.enqueue_gateway_event",
+        AsyncMock(side_effect=["accepted", "duplicate"]),
+    ):
+        first = await _post_gateway_payload(client, payload)
+        second = await _post_gateway_payload(client, payload, request_id="req-002")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["receivedEventIds"] == ["evt-001"]
+    assert second.json()["duplicateEventIds"] == ["evt-001"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_conflict_is_request_error(client, _mock_settings):
+    _configure_gateway_settings(_mock_settings)
+    payload = _event_batch(_event())
+    with patch("src.api.routes.webhooks.enqueue_gateway_event", AsyncMock(return_value="conflict")):
+        response = await _post_gateway_payload(client, payload)
+    _assert_bad_request(response)
+
+
+@pytest.mark.asyncio
+async def test_gateway_worker_passes_full_event_context_to_agent(_mock_settings):
+    from src.api.routes.webhooks import process_gateway_event_record
+
     _configure_gateway_settings(_mock_settings)
     _mock_settings.llm_gateway_decision_url = "http://robotgateway.local/api/v1/hosting/llm/decision"
     _mock_settings.llm_gateway_decision_app_id = "llm-to-gateway"
     _mock_settings.llm_gateway_decision_app_secret = "secret-llm"
-    _mock_settings.llm_gateway_decision_timeout_seconds = 10.0
-
-    payload = _session_started_payload(event_id="evt-agent-001")
-    payload["event"]["sessionId"] = "session-001"
-    payload["event"]["stateVersion"] = 1
-    body = _body_bytes(payload)
+    event = _event("skill_finished")
     agent_output = {
         "recommended_actions": [
             {
                 "skillName": "observe_state",
                 "schemaVersion": "v1",
                 "arguments": {},
-                "reason": "先观察",
+                "reason": "观察",
                 "priority": "high",
-                "ttlMs": 30000,
+                "ttlMs": 3000,
             }
         ]
     }
-
     with (
-        patch("src.api.routes.webhooks.run_gateway_v1_agent", AsyncMock(return_value=agent_output)) as mock_agent,
+        patch("src.api.routes.webhooks.run_gateway_v1_agent", AsyncMock(return_value=agent_output)) as agent,
         patch(
             "src.api.routes.webhooks.send_llm_gateway_decision",
-            AsyncMock(return_value={"status": "accepted"}),
-        ) as mock_decision,
+            AsyncMock(return_value={"accepted": True, "status": "accepted", "reason": "ok"}),
+        ) as decision,
     ):
-        response = await client.post(
-            "/api/gateway/events",
-            content=body,
-            headers=_signed_headers("/api/gateway/events", body),
+        await process_gateway_event_record(
+            {
+                "traceId": "trace-001",
+                "gatewayId": "gateway-01",
+                "contractVersion": "llm-gateway-http-v1",
+                "event": event,
+            }
         )
 
-    assert response.status_code == 200
-    mock_agent.assert_awaited_once()
-    agent_kwargs = mock_agent.await_args.kwargs
-    assert agent_kwargs["trace_id"] == "trace-001"
-    assert agent_kwargs["decision_lease_id"] == "lease-001"
-    assert agent_kwargs["session_id"] == "session-001"
-    assert agent_kwargs["state_version"] == 1
-    assert agent_kwargs["session"]["sessionId"] == "session-001"
-
-    mock_decision.assert_awaited_once()
-    decision_kwargs = mock_decision.await_args.kwargs
-    assert decision_kwargs["decision_url"] == "http://robotgateway.local/api/v1/hosting/llm/decision"
-    assert decision_kwargs["trace_id"] == "trace-001"
+    agent_kwargs = agent.await_args.kwargs
+    assert agent_kwargs["event_type"] == "skill_finished"
+    assert agent_kwargs["event_payload"]["lastSkillResult"]["reason"] == "ok"
+    assert agent_kwargs["event_payload"]["availableSkills"][0]["skillName"] == "observe_state"
+    decision_kwargs = decision.await_args.kwargs
     assert decision_kwargs["session_id"] == "session-001"
-    assert decision_kwargs["decision_lease_id"] == "lease-001"
+    assert decision_kwargs["decision_lease_id"] == "lease-1"
     assert decision_kwargs["state_version"] == 1
-    assert decision_kwargs["recommended_action"]["skillName"] == "observe_state"
+
+
+def test_gateway_action_selection_rejects_skill_not_advertised():
+    from src.api.routes.webhooks import GatewayEventPayload, _select_gateway_action
+
+    payload = GatewayEventPayload.model_validate(_payload("observation_updated"))
+    payload.available_skills = [payload.available_skills[0]]
+
+    selected = _select_gateway_action(
+        [
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "arguments": {"target": {"x": 1, "y": 0, "z": 2}},
+                "reason": "不应发送",
+            }
+        ],
+        payload,
+    )
+
+    assert selected["action"] == "wait"
+    assert selected["arguments"] == {"waitMs": 1000}

@@ -32,6 +32,7 @@ from src.core.agents.state import AnalysisState
 from src.core.agents.tools import create_tools
 from src.core.engine.lightrag_engine import get_rag
 from src.core.engine.rag_exact_match import retrieve_exact_rag_context
+from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 from src.core.llm.factory import get_llm
 
 # ── 防循环/防卡死常量 ──
@@ -107,24 +108,30 @@ async def retrieve_rag_context_node(state: AnalysisState) -> dict[str, Any]:
             (
                 "[retrieve_rag_context] 检索完成, "
                 "lightrag_get_elapsed_ms=%.2f, lightrag_query_elapsed_ms=%.2f, "
-                "context_length=%d, query=%s"
+                "context_length=%d"
             ),
             rag_get_elapsed_ms,
             query_elapsed_ms,
             len(context),
-            query[:80],
         )
         return {"rag_context": context}
-    except Exception as e:
-        logger.error("[retrieve_rag_context] RAG 检索失败: %s", e)
+    except Exception as error:
+        logger.error(
+            "[retrieve_rag_context] RAG 检索失败",
+            extra=safe_exception_fields(
+                stage="agent",
+                category="rag_retrieval_failed",
+                error=error,
+            ),
+        )
         if exact_context:
             return {
                 "rag_context": exact_context,
-                "errors": [f"RAG 检索失败，已返回精确匹配上下文: {e}"],
+                "errors": ["RAG 检索失败，已返回精确匹配上下文"],
             }
         return {
             "rag_context": "",
-            "errors": [f"RAG 检索失败: {e}"],
+            "errors": ["RAG 检索失败"],
         }
 
 
@@ -241,9 +248,17 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
                     except TimeoutError:
                         logger.warning("[gather_context] 工具 %s 执行超时 (%ds)", tool_name, _SINGLE_CALL_TIMEOUT)
                         result = "工具执行超时"
-                    except Exception as e:
-                        logger.error("[gather_context] 工具 %s 执行失败: %s", tool_name, e)
-                        result = f"工具执行失败: {e}"
+                    except Exception as error:
+                        logger.error(
+                            "[gather_context] 工具 %s 执行失败",
+                            tool_name,
+                            extra=safe_exception_fields(
+                                stage="agent",
+                                category="tool_execution_failed",
+                                error=error,
+                            ),
+                        )
+                        result = f"工具执行失败 ({type(error).__name__})"
 
                 enriched_parts.append(f"[{tool_name}] {result}")
                 messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
@@ -256,12 +271,12 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
                     marker = "\n\nCONFLICT_IDS:"
                     if marker in result_str:
                         try:
-                            conflict_json = result_str[result_str.index(marker) + len(marker):]
+                            conflict_json = result_str[result_str.index(marker) + len(marker) :]
                             parsed = json.loads(conflict_json)
                             if isinstance(parsed, list):
                                 abandoned_ids_found.extend(parsed)
                             # 从 tracking_summary 中去掉 CONFLICT_IDS 行，保持可读性
-                            tracking_summary = result_str[:result_str.index(marker)]
+                            tracking_summary = result_str[: result_str.index(marker)]
                         except Exception:
                             pass
                 elif tool_name == "detect_anomaly" and str(result) != "无异常":
@@ -280,11 +295,18 @@ async def gather_context_node(state: AnalysisState) -> dict[str, Any]:
             result["abandoned_tracking_ids"] = abandoned_ids_found
         return result
 
-    except Exception as e:
-        logger.error("[gather_context] 上下文收集失败: %s", e)
+    except Exception as error:
+        logger.error(
+            "[gather_context] 上下文收集失败",
+            extra=safe_exception_fields(
+                stage="agent",
+                category="context_collection_failed",
+                error=error,
+            ),
+        )
         return {
             "enriched_context": "",
-            "errors": [f"上下文收集失败: {e}"],
+            "errors": ["上下文收集失败"],
         }
 
 
@@ -300,10 +322,12 @@ async def behavior_analysis_node(state: AnalysisState) -> dict[str, Any]:
     rag_context = state.get("rag_context", "") or "（无额外规则上下文）"
     enriched_context = state.get("enriched_context", "") or "（无额外历史信息）"
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", BEHAVIOR_ANALYSIS_SYSTEM),
-        ("human", BEHAVIOR_ANALYSIS_USER),
-    ])
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", BEHAVIOR_ANALYSIS_SYSTEM),
+            ("human", BEHAVIOR_ANALYSIS_USER),
+        ]
+    )
 
     llm = await get_llm(model_type="fast")
     llm = llm.with_structured_output(BehaviorProfile, method="json_mode")
@@ -313,11 +337,13 @@ async def behavior_analysis_node(state: AnalysisState) -> dict[str, Any]:
         import asyncio
 
         profile: BehaviorProfile = await asyncio.wait_for(
-            chain.ainvoke({
-                "snapshot_text": snapshot_text,
-                "rag_context": rag_context,
-                "enriched_context": enriched_context,
-            }),
+            chain.ainvoke(
+                {
+                    "snapshot_text": snapshot_text,
+                    "rag_context": rag_context,
+                    "enriched_context": enriched_context,
+                }
+            ),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
         logger.info(
@@ -326,11 +352,18 @@ async def behavior_analysis_node(state: AnalysisState) -> dict[str, Any]:
             profile.engagement_level,
         )
         return {"behavior_report": profile.model_dump_json()}
-    except Exception as e:
-        logger.error("[behavior_analysis] 行为分析失败: %s", e)
+    except Exception as error:
+        logger.error(
+            "[behavior_analysis] 行为分析失败",
+            extra=safe_exception_fields(
+                stage="agent",
+                category="behavior_analysis_failed",
+                error=error,
+            ),
+        )
         return {
             "behavior_report": "",
-            "errors": [f"行为分析失败: {e}"],
+            "errors": ["行为分析失败"],
         }
 
 
@@ -351,17 +384,24 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
     anomaly_text = "\n".join(anomalies) if anomalies else "（无异常）"
     intent_result = state.get("intent_result") or {}
     goal_evaluation_result = state.get("goal_evaluation_result") or {}
+    gateway_skill_context = json.dumps(
+        {
+            "availableSkills": snapshot.get("availableSkills", []) if isinstance(snapshot, dict) else [],
+            "skillArgumentHints": snapshot.get("skillArgumentHints", []) if isinstance(snapshot, dict) else [],
+        },
+        ensure_ascii=False,
+    )
     intent_text = json.dumps(intent_result, ensure_ascii=False) if intent_result else "（无意图推断数据）"
     goal_eval_text = (
-        json.dumps(goal_evaluation_result, ensure_ascii=False)
-        if goal_evaluation_result
-        else "（无目标校验数据）"
+        json.dumps(goal_evaluation_result, ensure_ascii=False) if goal_evaluation_result else "（无目标校验数据）"
     )
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", ACTION_REASONING_SYSTEM),
-        ("human", ACTION_REASONING_USER),
-    ])
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", ACTION_REASONING_SYSTEM),
+            ("human", ACTION_REASONING_USER),
+        ]
+    )
 
     llm = await get_llm(model_type="default")
     llm = llm.with_structured_output(ActionList, method="json_mode")
@@ -371,30 +411,38 @@ async def action_reasoning_node(state: AnalysisState) -> dict[str, Any]:
         import asyncio
 
         action_list: ActionList | None = await asyncio.wait_for(
-            chain.ainvoke({
-                "behavior_report": behavior_report,
-                "snapshot_text": snapshot_text,
-                "rag_context": rag_context,
-                "enriched_context": enriched_context,
-                "tracking_summary": tracking_summary,
-                "anomaly_text": anomaly_text,
-                "intent_result": intent_text,
-                "goal_evaluation_result": goal_eval_text,
-            }),
+            chain.ainvoke(
+                {
+                    "behavior_report": behavior_report,
+                    "snapshot_text": snapshot_text,
+                    "rag_context": rag_context,
+                    "enriched_context": enriched_context,
+                    "tracking_summary": tracking_summary,
+                    "anomaly_text": anomaly_text,
+                    "gateway_skill_context": gateway_skill_context,
+                    "intent_result": intent_text,
+                    "goal_evaluation_result": goal_eval_text,
+                }
+            ),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
         if action_list is None or not hasattr(action_list, "actions"):
             logger.warning("[action_reasoning] LLM 返回空结果，返回空列表")
             return {"reasoned_actions": [], "errors": ["行动推理返回空结果"]}
-        logger.info(
-            "[action_reasoning] 推理完成, actions_count=%d", len(action_list.actions)
-        )
+        logger.info("[action_reasoning] 推理完成, actions_count=%d", len(action_list.actions))
         return {"reasoned_actions": [a.model_dump(by_alias=True) for a in action_list.actions]}
-    except Exception as e:
-        logger.error("[action_reasoning] 行动推理失败: %s", e)
+    except Exception as error:
+        logger.error(
+            "[action_reasoning] 行动推理失败",
+            extra=safe_exception_fields(
+                stage="agent",
+                category="action_reasoning_failed",
+                error=error,
+            ),
+        )
         return {
             "reasoned_actions": [],
-            "errors": [f"行动推理失败: {e}"],
+            "errors": ["行动推理失败"],
         }
 
 
@@ -423,11 +471,18 @@ async def merge_output_node(state: AnalysisState) -> dict[str, Any]:
             len(actions),
         )
         return {"final_output": output.model_dump(mode="json", by_alias=True)}
-    except Exception as e:
-        logger.error("[merge_output] 输出组装失败: %s", e)
+    except Exception as error:
+        logger.error(
+            "[merge_output] 输出组装失败",
+            extra=safe_exception_fields(
+                stage="agent",
+                category="output_merge_failed",
+                error=error,
+            ),
+        )
         return {
             "final_output": {},
-            "errors": [f"输出组装失败: {e}"],
+            "errors": ["输出组装失败"],
         }
 
 
@@ -493,11 +548,7 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
 
                 # 截止时间判断超时（abandoned 和 completed 不再检查）
                 if new_status is None and row.deadline:
-                    deadline_dt = (
-                        row.deadline
-                        if row.deadline.tzinfo
-                        else row.deadline.replace(tzinfo=UTC)
-                    )
+                    deadline_dt = row.deadline if row.deadline.tzinfo else row.deadline.replace(tzinfo=UTC)
                     if now > deadline_dt:
                         new_status = "timeout"
 
@@ -519,9 +570,16 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
                             "id": row.id,
                         },
                     )
-    except Exception as e:
-        logger.error("[tracking_update] 旧记录状态更新失败: %s", e)
-        return {"errors": [f"追踪记录状态更新失败: {e}"]}
+    except Exception as error:
+        logger.error(
+            "[tracking_update] 旧记录状态更新失败",
+            extra=safe_exception_fields(
+                stage="database",
+                category="tracking_update_failed",
+                error=error,
+            ),
+        )
+        return {"errors": ["追踪记录状态更新失败"]}
 
     # ── 步骤2：写入本次可追踪行动（独立事务）──
     inserted = 0
@@ -564,9 +622,16 @@ async def tracking_update_node(state: AnalysisState) -> dict[str, Any]:
                     },
                 )
                 inserted += 1
-    except Exception as e:
-        logger.error("[tracking_update] 新追踪记录写入失败: %s", e)
-        return {"errors": [f"新追踪记录写入失败: {e}"]}
+    except Exception as error:
+        logger.error(
+            "[tracking_update] 新追踪记录写入失败",
+            extra=safe_exception_fields(
+                stage="database",
+                category="tracking_insert_failed",
+                error=error,
+            ),
+        )
+        return {"errors": ["新追踪记录写入失败"]}
 
     logger.info(
         "[tracking_update] 完成, user_id=%s, 旧记录更新=%d, 新记录写入=%d",

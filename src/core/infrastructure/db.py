@@ -7,14 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.config import settings
 
 # 创建异步引擎
-# echo=True 在开发环境下打印所有 SQL 语句，方便调试
 # pool_pre_ping=True 每次从连接池取连接前先 ping，自动剔除失效连接
 # pool_size=20 连接池保持的常驻连接数
 # max_overflow=40 连接池满时允许额外创建的连接数，超过则阻塞等待
 # pool_recycle=3600 连接存活超过 1 小时后强制重建，防止数据库主动断开
 engine = create_async_engine(
     str(settings.postgres_dsn),
-    echo=settings.env == "development",
+    echo=False,
     pool_pre_ping=True,
     pool_size=20,
     max_overflow=40,

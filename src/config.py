@@ -1,10 +1,12 @@
-from pydantic import Field, PostgresDsn
+import os
+from uuid import UUID
+
+from pydantic import Field, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -25,6 +27,7 @@ class Settings(BaseSettings):
     openai_fast_model: str = Field(default="deepseek-chat")
 
     # ── Embedding（Ollama / Qwen） ──
+    embedding_enabled: bool = Field(default=True)
     embedding_api_key: str = Field(default="")
     embedding_base_url: str = Field(default="http://localhost:11434")
     embedding_model: str = Field(default="qwen3-embedding:4b")
@@ -83,8 +86,11 @@ class Settings(BaseSettings):
     robotgateway_callback_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     robotgateway_callback_api_key: str | None = Field(default=None)
 
-    # ── LLM Gateway v1 runtime ──
+    # ── LLM Gateway shared / v1 runtime ──
+    llm_gateway_v1_enabled: bool = Field(default=True)
+    llm_gateway_v2_enabled: bool = Field(default=False)
     llm_gateway_app_secrets: dict[str, str] = Field(default_factory=dict)
+    llm_gateway_app_gateways: dict[str, list[str]] = Field(default_factory=dict)
     llm_gateway_app_tenants: dict[str, str] = Field(default_factory=dict)
     llm_gateway_timestamp_tolerance_ms: int = Field(default=300_000, ge=1)
     llm_gateway_idempotency_ttl_seconds: int = Field(default=86_400, ge=60)
@@ -92,10 +98,90 @@ class Settings(BaseSettings):
     llm_gateway_decision_app_id: str | None = Field(default=None)
     llm_gateway_decision_app_secret: str | None = Field(default=None)
     llm_gateway_decision_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    llm_gateway_decision_max_retries: int = Field(default=1, ge=0, le=5)
+    llm_gateway_event_worker_enabled: bool = Field(default=True)
+    llm_gateway_event_stream_key: str = Field(default="llm-gateway:events")
+    llm_gateway_event_consumer_group: str = Field(default="myagent2")
+    llm_gateway_event_worker_block_ms: int = Field(default=1000, ge=100, le=30_000)
+    llm_gateway_event_retry_idle_ms: int = Field(default=30_000, ge=1000, le=3_600_000)
+
+    # ── LLM Gateway v2 runtime ──
+    llm_gateway_v2_max_event_batch_size: int = Field(default=100, ge=1, le=1_000)
+    llm_gateway_v2_max_decision_ttl_ms: int = Field(default=30_000, ge=1, le=3_600_000)
+    llm_gateway_v2_event_max_attempts: int = Field(default=5, ge=1, le=100)
+    llm_gateway_v2_decision_max_attempts: int = Field(default=5, ge=1, le=100)
+    llm_gateway_v2_retry_base_ms: int = Field(default=1_000, ge=1, le=3_600_000)
+    llm_gateway_v2_retry_max_ms: int = Field(default=300_000, ge=1, le=3_600_000)
+    llm_gateway_v2_claim_ttl_ms: int = Field(default=30_000, ge=1, le=3_600_000)
+    llm_gateway_v2_poll_ms: int = Field(default=250, ge=1, le=60_000)
+    llm_gateway_v2_event_max_parallelism: int = Field(default=4, ge=1, le=64)
+    llm_gateway_v2_decision_max_parallelism: int = Field(default=4, ge=1, le=64)
+    llm_gateway_v2_shutdown_grace_seconds: int = Field(default=10, ge=1, le=300)
+    llm_gateway_v2_readiness_timeout_seconds: int = Field(default=3, ge=1, le=60)
+    llm_gateway_v2_readiness_cache_seconds: int = Field(default=5, ge=1, le=300)
 
     # ── Token 配额 ──
     default_monthly_tokens: int = Field(default=40_000_000)
     quota_warning_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
 
+    @model_validator(mode="after")
+    def validate_llm_gateway_v2(self) -> "Settings":
+        if self.llm_gateway_v2_retry_base_ms > self.llm_gateway_v2_retry_max_ms:
+            raise ValueError("llm_gateway_v2_retry_base_ms must not exceed llm_gateway_v2_retry_max_ms")
 
-settings = Settings()
+        if not self.llm_gateway_v2_enabled:
+            return self
+
+        v2_app_ids = set(self.llm_gateway_app_gateways)
+        if not v2_app_ids:
+            raise ValueError("llm_gateway_app_gateways must define at least one v2 AppId")
+
+        for app_id, gateway_ids in self.llm_gateway_app_gateways.items():
+            if not app_id.strip():
+                raise ValueError("llm_gateway_app_gateways contains an empty v2 AppId")
+
+            inbound_secret = self.llm_gateway_app_secrets.get(app_id)
+            if inbound_secret is None or not inbound_secret.strip():
+                raise ValueError(f"v2 AppId {app_id!r} must have a non-empty secret")
+            if not gateway_ids:
+                raise ValueError(f"v2 AppId {app_id!r} must have a non-empty gateway allowlist")
+
+            for gateway_id in gateway_ids:
+                if not gateway_id.strip():
+                    raise ValueError(f"v2 AppId {app_id!r} contains an empty gatewayId")
+                tenant_id = self.llm_gateway_app_tenants.get(gateway_id)
+                if tenant_id is None or not tenant_id.strip():
+                    raise ValueError(f"v2 gatewayId {gateway_id!r} must have a tenant mapping")
+                try:
+                    UUID(tenant_id)
+                except (ValueError, AttributeError) as exc:
+                    raise ValueError(f"v2 gatewayId {gateway_id!r} tenant must be a valid UUID") from exc
+
+        decision_url = self.llm_gateway_decision_url
+        if decision_url is None or not decision_url.strip():
+            raise ValueError("llm_gateway_decision_url must be non-empty when v2 is enabled")
+
+        decision_app_id = self.llm_gateway_decision_app_id
+        if decision_app_id is None or not decision_app_id.strip():
+            raise ValueError("llm_gateway_decision_app_id must be non-empty when v2 is enabled")
+        if decision_app_id in v2_app_ids:
+            raise ValueError("llm_gateway_decision_app_id must differ from every v2 inbound AppId")
+
+        decision_secret = self.llm_gateway_decision_app_secret
+        if decision_secret is None or not decision_secret.strip():
+            raise ValueError("llm_gateway_decision_app_secret must be non-empty when v2 is enabled")
+        inbound_secrets = {self.llm_gateway_app_secrets[app_id] for app_id in v2_app_ids}
+        if decision_secret in inbound_secrets:
+            raise ValueError("llm_gateway_decision_app_secret must differ from every v2 inbound secret")
+
+        return self
+
+
+def load_settings() -> Settings:
+    env = os.environ.get("ENV", "development").strip().lower()
+    if env == "test":
+        return Settings(_env_file=None)
+    return Settings(_env_file=".env")
+
+
+settings = load_settings()

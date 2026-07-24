@@ -207,10 +207,12 @@ class TestGatherContext:
         mock_llm = MagicMock()
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_bound)
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.create_tools", MagicMock(return_value=[])):
-                state = _base_state()
-                result = await gather_context_node(state)
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.create_tools", MagicMock(return_value=[])),
+        ):
+            state = _base_state()
+            result = await gather_context_node(state)
 
         assert result["enriched_context"] == ""
 
@@ -231,12 +233,14 @@ class TestGatherContext:
         history_tool = MagicMock()
         history_tool.name = "query_player_history"
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch(
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch(
                 "src.core.agents.nodes.create_tools",
                 MagicMock(return_value=[dynamic_tool, history_tool]),
-            ):
-                result = await gather_context_node(_base_state())
+            ),
+        ):
+            result = await gather_context_node(_base_state())
 
         bound_tools = mock_llm.bind_tools.call_args.args[0]
         assert result["enriched_context"] == ""
@@ -248,9 +252,7 @@ class TestGatherContext:
         from src.config import settings
 
         tool_response_1 = MagicMock()
-        tool_response_1.tool_calls = [
-            {"name": "dynamic_rag_query", "args": {"query": "PVP规则"}, "id": "tc-1"}
-        ]
+        tool_response_1.tool_calls = [{"name": "dynamic_rag_query", "args": {"query": "PVP规则"}, "id": "tc-1"}]
 
         tool_response_2 = MagicMock()
         tool_response_2.tool_calls = []
@@ -285,10 +287,12 @@ class TestGatherContext:
         mock_llm = MagicMock()
         mock_llm.bind_tools = MagicMock(return_value=mock_llm_bound)
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.create_tools", MagicMock(return_value=[])):
-                state = _base_state()
-                result = await gather_context_node(state)
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.create_tools", MagicMock(return_value=[])),
+        ):
+            state = _base_state()
+            result = await gather_context_node(state)
 
         assert result["enriched_context"] == ""
         assert any("上下文收集失败" in e for e in result["errors"])
@@ -319,11 +323,13 @@ class TestBehaviorAnalysis:
         mock_prompt = MagicMock()
         mock_prompt.__or__ = MagicMock(return_value=mock_chain)
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template:
-                mock_template.from_messages = MagicMock(return_value=mock_prompt)
-                state = _base_state()
-                result = await behavior_analysis_node(state)
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template,
+        ):
+            mock_template.from_messages = MagicMock(return_value=mock_prompt)
+            state = _base_state()
+            result = await behavior_analysis_node(state)
 
         assert result["behavior_report"] != ""
         restored = BehaviorProfile.model_validate_json(result["behavior_report"])
@@ -350,11 +356,13 @@ class TestBehaviorAnalysis:
         mock_prompt.__or__ = MagicMock(side_effect=or_side_effect)
         mock_llm_structured.__or__ = MagicMock(side_effect=or_side_effect)
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template:
-                mock_template.from_messages = MagicMock(return_value=mock_prompt)
-                state = _base_state()
-                result = await behavior_analysis_node(state)
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template,
+        ):
+            mock_template.from_messages = MagicMock(return_value=mock_prompt)
+            state = _base_state()
+            result = await behavior_analysis_node(state)
 
         assert result["behavior_report"] == ""
         assert any("行为分析失败" in e for e in result["errors"])
@@ -367,10 +375,12 @@ class TestActionReasoning:
     def test_action_reasoning_prompt_json_examples_are_escaped(self):
         from langchain_core.prompts import ChatPromptTemplate
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", ACTION_REASONING_SYSTEM),
-            ("human", ACTION_REASONING_USER),
-        ])
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", ACTION_REASONING_SYSTEM),
+                ("human", ACTION_REASONING_USER),
+            ]
+        )
 
         assert set(prompt.input_variables) == {
             "behavior_report",
@@ -381,6 +391,7 @@ class TestActionReasoning:
             "anomaly_text",
             "intent_result",
             "goal_evaluation_result",
+            "gateway_skill_context",
         }
 
     def test_action_reasoning_prompt_requires_gateway_skill_output(self):
@@ -391,9 +402,11 @@ class TestActionReasoning:
 
     @pytest.mark.asyncio
     async def test_successful_reasoning(self):
-        actions = ActionList(actions=[
-            RecommendedAction(skillName="observe_state", priority="high", reason="观察状态"),
-        ])
+        actions = ActionList(
+            actions=[
+                RecommendedAction(skillName="observe_state", priority="high", reason="观察状态"),
+            ]
+        )
 
         mock_chain = MagicMock()
         mock_chain.ainvoke = AsyncMock(return_value=actions)
@@ -410,11 +423,13 @@ class TestActionReasoning:
         mock_prompt.__or__ = MagicMock(side_effect=or_side_effect)
         mock_llm_structured.__or__ = MagicMock(side_effect=or_side_effect)
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template:
-                mock_template.from_messages = MagicMock(return_value=mock_prompt)
-                state = _base_state(behavior_report='{"playstyle":"competitive"}')
-                result = await action_reasoning_node(state)
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template,
+        ):
+            mock_template.from_messages = MagicMock(return_value=mock_prompt)
+            state = _base_state(behavior_report='{"playstyle":"competitive"}')
+            result = await action_reasoning_node(state)
 
         assert len(result["reasoned_actions"]) == 1
         assert result["reasoned_actions"][0]["skillName"] == "observe_state"
@@ -437,11 +452,13 @@ class TestActionReasoning:
         mock_prompt.__or__ = MagicMock(side_effect=or_side_effect)
         mock_llm_structured.__or__ = MagicMock(side_effect=or_side_effect)
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template:
-                mock_template.from_messages = MagicMock(return_value=mock_prompt)
-                state = _base_state()
-                result = await action_reasoning_node(state)
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template,
+        ):
+            mock_template.from_messages = MagicMock(return_value=mock_prompt)
+            state = _base_state()
+            result = await action_reasoning_node(state)
 
         assert result["reasoned_actions"] == []
         assert any("空结果" in e for e in result["errors"])
@@ -464,11 +481,13 @@ class TestActionReasoning:
         mock_prompt.__or__ = MagicMock(side_effect=or_side_effect)
         mock_llm_structured.__or__ = MagicMock(side_effect=or_side_effect)
 
-        with patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)):
-            with patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template:
-                mock_template.from_messages = MagicMock(return_value=mock_prompt)
-                state = _base_state()
-                result = await action_reasoning_node(state)
+        with (
+            patch("src.core.agents.nodes.get_llm", AsyncMock(return_value=mock_llm)),
+            patch("src.core.agents.nodes.ChatPromptTemplate") as mock_template,
+        ):
+            mock_template.from_messages = MagicMock(return_value=mock_prompt)
+            state = _base_state()
+            result = await action_reasoning_node(state)
 
         assert result["reasoned_actions"] == []
         assert any("行动推理失败" in e for e in result["errors"])

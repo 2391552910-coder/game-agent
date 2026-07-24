@@ -5,6 +5,7 @@
 接收玩家在线期间的行为事件，写入 session_events 表。
 """
 
+import hmac
 import json
 import logging
 import math
@@ -12,17 +13,30 @@ import re
 import time
 from hashlib import sha256
 from typing import Any, Literal
-from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Security
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
+from fastapi.security import APIKeyHeader
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
+from src.core.integration.gateway_event_queue import enqueue_gateway_event
+from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 from src.core.integration.robotgateway_callback import build_llm_gateway_hmac_headers, send_llm_gateway_decision
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
+router = APIRouter(dependencies=[Security(_api_key_header)])
 gateway_router = APIRouter()
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -37,9 +51,9 @@ def _settings():
 class GatewayPosition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    x: float
-    y: float
-    z: float
+    x: float = Field(validation_alias=AliasChoices("x", "X"))
+    y: float = Field(validation_alias=AliasChoices("y", "Y"))
+    z: float = Field(validation_alias=AliasChoices("z", "Z"))
 
     @field_validator("x", "y", "z", mode="before")
     @classmethod
@@ -50,119 +64,81 @@ class GatewayPosition(BaseModel):
 
 
 class GatewaySessionPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Gateway 的 RobotSessionSnapshot 会随运行时增加投影字段，不能使用 extra="forbid"。
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    session_id: StrictStr = Field(alias="sessionId")
-    account_id: StrictStr = Field(alias="accountId")
-    role_id: StrictStr = Field(alias="roleId")
-    scene_id: StrictInt = Field(alias="sceneId")
-    state: Literal["Running", "Stopped", "Failed"]
-    position: GatewayPosition
-    controllable: StrictBool
+    session_id: StrictStr = Field(
+        validation_alias=AliasChoices("sessionId", "SessionId"),
+        serialization_alias="sessionId",
+    )
+    account_id: StrictStr = Field(
+        validation_alias=AliasChoices("accountId", "AccountId"),
+        serialization_alias="accountId",
+    )
+    role_id: StrictStr = Field(
+        validation_alias=AliasChoices("roleId", "RoleId"),
+        serialization_alias="roleId",
+    )
+    scene_id: StrictInt | None = Field(
+        default=None,
+        validation_alias=AliasChoices("sceneId", "SceneId"),
+        serialization_alias="sceneId",
+    )
+    state: StrictStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("state", "State"),
+        serialization_alias="state",
+    )
+    position: GatewayPosition | None = Field(default=None, validation_alias=AliasChoices("position", "Position"))
+    controllable: StrictBool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("controllable", "Controllable"),
+        serialization_alias="controllable",
+    )
 
-
-class GatewaySkillPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    skill_call_id: StrictStr = Field(alias="skillCallId")
-    skill_name: StrictStr = Field(alias="skillName")
-    reason: StrictStr
-
-
-class GatewayStopPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    reason: Literal[
-        "admin_stop",
-        "stop_hosting_requested",
-        "player_online",
-        "server_kicked",
-        "gateway_shutdown",
-        "runtime_error",
-    ]
-
-
-class GatewayObservationPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    reason: Literal["wait_completed", "state_changed"]
+    @model_validator(mode="after")
+    def validate_identity(self) -> "GatewaySessionPayload":
+        for name, value in (
+            ("sessionId", self.session_id),
+            ("accountId", self.account_id),
+            ("roleId", self.role_id),
+        ):
+            if not _valid_id(value):
+                raise ValueError(f"{name} 格式无效")
+        return self
 
 
 class GatewayEventPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    event_type: Literal["observation_updated", "decision_rejected", "skill_finished"] = Field(alias="eventType")
+    reason: StrictStr | None = None
     session: GatewaySessionPayload
-    skill: GatewaySkillPayload | None = None
-    stop: GatewayStopPayload | None = None
-    observation: GatewayObservationPayload | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def reject_explicit_null_blocks(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            for block_name in ("skill", "stop", "observation"):
-                if block_name in data and data[block_name] is None:
-                    raise ValueError(f"{block_name} block 不允许显式 null")
-        return data
+    available_skills: list[dict[str, Any]] = Field(default_factory=list, alias="availableSkills")
+    skill_argument_hints: list[dict[str, Any]] = Field(default_factory=list, alias="skillArgumentHints")
+    last_skill_result: dict[str, Any] | None = Field(default=None, alias="lastSkillResult")
 
 
 class GatewayEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     event_id: StrictStr = Field(alias="eventId")
-    event_type: Literal["session_started", "skill_finished", "session_stopped", "observation_updated"] = Field(
-        alias="eventType"
-    )
-    session_id: StrictStr | None = Field(default=None, alias="sessionId")
-    state_version: StrictInt | None = Field(default=None, alias="stateVersion")
-    decision_lease_id: StrictStr | None = Field(default=None, alias="decisionLeaseId")
+    event_type: Literal["observation_updated", "decision_rejected", "skill_finished"] = Field(alias="eventType")
+    session_id: StrictStr = Field(alias="sessionId")
+    state_version: StrictInt = Field(alias="stateVersion", ge=0)
+    decision_lease_id: StrictStr = Field(alias="decisionLeaseId")
     occurred_at_ms: StrictInt = Field(alias="occurredAtMs")
     payload: GatewayEventPayload
 
-    @model_validator(mode="before")
-    @classmethod
-    def reject_null_decision_lease_id(cls, data: Any) -> Any:
-        if isinstance(data, dict) and data.get("decisionLeaseId", "") is None:
-            raise ValueError("decisionLeaseId 不允许显式 null")
-        return data
-
     @model_validator(mode="after")
     def validate_event_shape(self) -> "GatewayEvent":
-        if self.event_type == "session_stopped":
-            if self.decision_lease_id is not None or "decision_lease_id" in self.model_fields_set:
-                raise ValueError("session_stopped 不允许 decisionLeaseId")
-            if self.payload.stop is None or self.payload.skill is not None or self.payload.observation is not None:
-                raise ValueError("session_stopped 只能携带 session + stop")
-            if self.payload.session.state not in {"Stopped", "Failed"} or self.payload.session.controllable:
-                raise ValueError("session_stopped 必须是终态且不可控")
-            return self
-
-        if not self.decision_lease_id:
-            raise ValueError(f"{self.event_type} 必须携带 decisionLeaseId")
-        if self.payload.session.state != "Running" or not self.payload.session.controllable:
-            raise ValueError(f"{self.event_type} 必须是 Running 且 controllable=true")
-
-        if self.event_type == "session_started":
-            if self.payload.skill is not None or self.payload.stop is not None or self.payload.observation is not None:
-                raise ValueError("session_started 只能携带 session")
-        elif self.event_type == "skill_finished":
-            if self.payload.skill is None or self.payload.stop is not None or self.payload.observation is not None:
-                raise ValueError("skill_finished 只能携带 session + skill")
-        elif (
-            self.event_type == "observation_updated"
-            and (self.payload.observation is None or self.payload.skill is not None or self.payload.stop is not None)
-        ):
-            raise ValueError("observation_updated 只能携带 session + observation")
+        if not _valid_id(self.event_id) or not _valid_id(self.session_id) or not _valid_id(self.decision_lease_id):
+            raise ValueError("Gateway event ID 格式无效")
+        if self.payload.event_type != self.event_type:
+            raise ValueError("payload.eventType 必须与 eventType 一致")
+        if self.payload.session.session_id != self.session_id:
+            raise ValueError("event.sessionId 必须与 payload.session.sessionId 一致")
         return self
-
-
-class GatewayEventEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    trace_id: StrictStr = Field(alias="traceId")
-    gateway_id: StrictStr = Field(alias="gatewayId")
-    contract_version: Literal["llm-gateway-http-v1"] = Field(alias="contractVersion")
-    event: GatewayEvent
 
 
 class GatewayEventBatchEnvelope(BaseModel):
@@ -172,14 +148,180 @@ class GatewayEventBatchEnvelope(BaseModel):
     gateway_id: StrictStr = Field(alias="gatewayId")
     contract_version: Literal["llm-gateway-http-v1"] = Field(alias="contractVersion")
     sent_at_ms: StrictInt | None = Field(default=None, alias="sentAtMs")
-    events: list[GatewayEvent]
+    events: list[GatewayEvent] = Field(min_length=1)
 
-    @field_validator("events")
-    @classmethod
-    def validate_non_empty_events(cls, value: list[GatewayEvent]) -> list[GatewayEvent]:
-        if not value:
-            raise ValueError("events 不能为空")
-        return value
+
+_GATEWAY_EVENTS_EXAMPLE = {
+    "traceId": "trace-001",
+    "gatewayId": "gateway-01",
+    "contractVersion": "llm-gateway-http-v1",
+    "sentAtMs": 1750000000000,
+    "events": [
+        {
+            "eventId": "evt-001",
+            "eventType": "observation_updated",
+            "sessionId": "session-001",
+            "stateVersion": 1,
+            "decisionLeaseId": "lease-001",
+            "occurredAtMs": 1750000000001,
+            "payload": {
+                "eventType": "observation_updated",
+                "reason": "state_changed",
+                "session": {
+                    "sessionId": "session-001",
+                    "accountId": "account-001",
+                    "roleId": "role-001",
+                    "sceneId": 1001,
+                    "state": "Running",
+                    "position": {"x": 12.3, "y": 0.0, "z": 45.6},
+                    "controllable": True,
+                },
+                "availableSkills": [
+                    {
+                        "skillName": "observe_state",
+                        "schemaVersion": "v1",
+                        "requireRunning": True,
+                    }
+                ],
+                "skillArgumentHints": [
+                    {
+                        "skillName": "observe_state",
+                        "schemaVersion": "v1",
+                        "argumentStatus": "ready",
+                        "allowedArgs": [],
+                        "missingArgs": [],
+                    }
+                ],
+                "lastSkillResult": None,
+            },
+        }
+    ],
+}
+
+_GATEWAY_EVENTS_REQUEST_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["traceId", "gatewayId", "contractVersion", "events"],
+    "properties": {
+        "traceId": {"type": "string", "minLength": 1},
+        "gatewayId": {"type": "string", "minLength": 1},
+        "contractVersion": {"type": "string", "const": "llm-gateway-http-v1"},
+        "sentAtMs": {"type": "integer"},
+        "events": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "eventId",
+                    "eventType",
+                    "sessionId",
+                    "stateVersion",
+                    "decisionLeaseId",
+                    "occurredAtMs",
+                    "payload",
+                ],
+                "properties": {
+                    "eventId": {"type": "string", "minLength": 1},
+                    "eventType": {
+                        "type": "string",
+                        "enum": ["observation_updated", "decision_rejected", "skill_finished"],
+                    },
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "stateVersion": {"type": "integer", "minimum": 0},
+                    "decisionLeaseId": {"type": "string", "minLength": 1},
+                    "occurredAtMs": {"type": "integer"},
+                    "payload": {
+                        "type": "object",
+                        "required": ["eventType", "session"],
+                        "properties": {
+                            "eventType": {
+                                "type": "string",
+                                "enum": ["observation_updated", "decision_rejected", "skill_finished"],
+                            },
+                            "reason": {"type": ["string", "null"]},
+                            "session": {
+                                "type": "object",
+                                "required": ["sessionId", "accountId", "roleId"],
+                                "properties": {
+                                    "sessionId": {"type": "string"},
+                                    "accountId": {"type": "string"},
+                                    "roleId": {"type": "string"},
+                                    "sceneId": {"type": ["integer", "null"]},
+                                    "state": {"type": ["string", "null"]},
+                                    "position": {
+                                        "type": ["object", "null"],
+                                        "properties": {
+                                            "x": {"type": "number"},
+                                            "y": {"type": "number"},
+                                            "z": {"type": "number"},
+                                        },
+                                    },
+                                    "controllable": {"type": ["boolean", "null"]},
+                                },
+                            },
+                            "availableSkills": {"type": "array", "items": {"type": "object"}},
+                            "skillArgumentHints": {"type": "array", "items": {"type": "object"}},
+                            "lastSkillResult": {"type": ["object", "null"]},
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+_GATEWAY_EVENTS_OPENAPI_EXTRA = {
+    "parameters": [
+        {
+            "name": "X-AppId",
+            "in": "header",
+            "required": True,
+            "description": "Gateway HMAC AppId，必须存在于服务端 LLM_GATEWAY_APP_SECRETS 配置中。",
+            "schema": {"type": "string"},
+            "example": "gateway-to-llm",
+        },
+        {
+            "name": "X-TimestampMs",
+            "in": "header",
+            "required": True,
+            "description": "生成签名时使用的当前 Unix 毫秒时间戳。",
+            "schema": {"type": "string", "pattern": "^[0-9]+$"},
+        },
+        {
+            "name": "X-RequestId",
+            "in": "header",
+            "required": True,
+            "description": "本次请求的幂等请求标识；Gateway 重试时保持不变。",
+            "schema": {"type": "string"},
+            "example": "req-001",
+        },
+        {
+            "name": "X-Signature",
+            "in": "header",
+            "required": True,
+            "description": "按原始请求体计算的十六进制 HMAC-SHA256 签名。",
+            "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        },
+    ],
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": _GATEWAY_EVENTS_REQUEST_SCHEMA,
+                "example": _GATEWAY_EVENTS_EXAMPLE,
+            }
+        },
+    },
+}
+
+_GATEWAY_PROTOCOL_RESPONSES = {
+    400: {"description": "请求体、事件契约或幂等内容冲突。"},
+    401: {"description": "HMAC 身份、时间戳或签名无效。"},
+    500: {"description": "事件写入持久队列失败。"},
+    503: {"description": "LLM Gateway v1 runtime 已禁用。"},
+}
 
 
 def _protocol_error(code: str, status_code: int) -> JSONResponse:
@@ -188,6 +330,7 @@ def _protocol_error(code: str, status_code: int) -> JSONResponse:
         "signature_invalid": "request signature invalid",
         "timestamp_expired": "request timestamp expired",
         "internal_error": "internal error",
+        "service_disabled": "service disabled",
     }
     return JSONResponse(status_code=status_code, content={"error": {"code": code, "message": messages[code]}})
 
@@ -235,7 +378,7 @@ def _validate_hmac_headers(request: Request, raw_body: bytes) -> JSONResponse | 
         request_id=request_id,
         timestamp_ms=timestamp_ms,
     )["X-Signature"]
-    if signature != expected:
+    if not hmac.compare_digest(signature, expected):
         return _protocol_error("signature_invalid", 401)
     return None
 
@@ -283,14 +426,6 @@ async def _validate_gateway_event_request(request: Request) -> bytes | JSONRespo
     return raw_body
 
 
-def _parse_gateway_event_envelope(raw_body: bytes) -> GatewayEventEnvelope | None:
-    try:
-        payload = json.loads(raw_body)
-        return GatewayEventEnvelope.model_validate(payload)
-    except Exception:
-        return None
-
-
 def _parse_gateway_event_batch_envelope(raw_body: bytes) -> GatewayEventBatchEnvelope | None:
     try:
         payload = json.loads(raw_body)
@@ -299,49 +434,41 @@ def _parse_gateway_event_batch_envelope(raw_body: bytes) -> GatewayEventBatchEnv
         return None
 
 
-def _envelope_from_batch_event(batch: GatewayEventBatchEnvelope, event: GatewayEvent) -> GatewayEventEnvelope:
-    return GatewayEventEnvelope(
-        traceId=batch.trace_id,
-        gatewayId=batch.gateway_id,
-        contractVersion=batch.contract_version,
-        event=event,
-    )
-
-
 def _json_body_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _single_event_body_hash(envelope: GatewayEventEnvelope) -> str:
-    payload = envelope.model_dump(mode="json", by_alias=True)
-    return sha256(_json_body_bytes(payload)).hexdigest()
+def _gateway_event_record(batch: GatewayEventBatchEnvelope, event: GatewayEvent) -> dict[str, Any]:
+    return {
+        "traceId": batch.trace_id,
+        "gatewayId": batch.gateway_id,
+        "contractVersion": batch.contract_version,
+        "event": event.model_dump(mode="json", by_alias=True, exclude_none=False),
+    }
 
 
-def _gateway_event_ids_are_valid(envelope: GatewayEventEnvelope) -> bool:
+def _gateway_event_ids_are_valid(event: GatewayEvent) -> bool:
     values = (
-        envelope.trace_id,
-        envelope.gateway_id,
-        envelope.event.event_id,
-        envelope.event.session_id,
-        envelope.event.decision_lease_id,
-        envelope.event.payload.session.session_id,
-        envelope.event.payload.session.account_id,
-        envelope.event.payload.session.role_id,
+        event.event_id,
+        event.session_id,
+        event.decision_lease_id,
+        event.payload.session.session_id,
+        event.payload.session.account_id,
+        event.payload.session.role_id,
     )
     return all(value is None or _valid_id(value) for value in values)
 
 
-def _gateway_event_idempotency_response(event_id: str, status: str) -> JSONResponse | dict[str, str]:
-    if status == "conflict":
-        return _protocol_error("bad_request", 400)
-    return {"status": status, "eventId": event_id}
-
-
-def _gateway_batch_response(trace_id: str, results: list[dict[str, str]]) -> dict[str, Any]:
+def _gateway_batch_response(
+    trace_id: str,
+    received_event_ids: list[str],
+    duplicate_event_ids: list[str],
+) -> dict[str, Any]:
     return {
-        "status": "accepted",
+        "accepted": True,
         "traceId": trace_id,
-        "results": results,
+        "receivedEventIds": received_event_ids,
+        "duplicateEventIds": duplicate_event_ids,
     }
 
 
@@ -355,7 +482,11 @@ class PlayerEvent(BaseModel):
     behavior_event: dict | None = Field(default=None, description="行为事件详情")
 
 
-@gateway_router.post("/events")
+@gateway_router.post(
+    "/events",
+    responses=_GATEWAY_PROTOCOL_RESPONSES,
+    openapi_extra=_GATEWAY_EVENTS_OPENAPI_EXTRA,
+)
 async def handle_gateway_event(request: Request):
     """接收 LLM Gateway v1 runtime 事件。"""
     raw_body_or_error = await _validate_gateway_event_request(request)
@@ -363,43 +494,46 @@ async def handle_gateway_event(request: Request):
         return raw_body_or_error
     raw_body = raw_body_or_error
 
-    envelope = _parse_gateway_event_envelope(raw_body)
-    if envelope is not None:
-        return await _handle_single_gateway_event_envelope(envelope, sha256(raw_body).hexdigest())
-
     batch = _parse_gateway_event_batch_envelope(raw_body)
     if batch is None:
         return _protocol_error("bad_request", 400)
+    if not bool(getattr(_settings(), "llm_gateway_v1_enabled", True)):
+        return _protocol_error("service_disabled", 503)
 
-    envelopes = [_envelope_from_batch_event(batch, event) for event in batch.events]
-    if len(envelopes) == 1:
-        return await _handle_single_gateway_event_envelope(envelopes[0], _single_event_body_hash(envelopes[0]))
+    received_event_ids: list[str] = []
+    duplicate_event_ids: list[str] = []
+    for event in batch.events:
+        if not _gateway_event_ids_are_valid(event):
+            return _protocol_error("bad_request", 400)
+        record = _gateway_event_record(batch, event)
+        event_body_hash = sha256(_json_body_bytes(record)).hexdigest()
+        try:
+            status = await enqueue_gateway_event(
+                event_id=event.event_id,
+                body_sha256=event_body_hash,
+                record=record,
+            )
+        except Exception as error:
+            logger.error(
+                "Gateway event enqueue failed, event_id=%s",
+                event.event_id,
+                extra=safe_exception_fields(
+                    stage="event_queue",
+                    category="enqueue_failed",
+                    error=error,
+                    event_id=event.event_id,
+                    trace_id=batch.trace_id,
+                ),
+            )
+            return _protocol_error("internal_error", 500)
+        if status == "accepted":
+            received_event_ids.append(event.event_id)
+        elif status == "duplicate":
+            duplicate_event_ids.append(event.event_id)
+        else:
+            return _protocol_error("bad_request", 400)
 
-    results: list[dict[str, str]] = []
-    for item in envelopes:
-        response = await _handle_single_gateway_event_envelope(item, _single_event_body_hash(item))
-        if isinstance(response, JSONResponse):
-            return response
-        results.append(response)
-    return _gateway_batch_response(batch.trace_id, results)
-
-
-async def _handle_single_gateway_event_envelope(
-    envelope: GatewayEventEnvelope,
-    body_hash: str,
-) -> JSONResponse | dict[str, str]:
-    if not _gateway_event_ids_are_valid(envelope):
-        return _protocol_error("bad_request", 400)
-
-    idempotency_status = await _claim_gateway_event_idempotency(envelope.event.event_id, body_hash)
-    response = _gateway_event_idempotency_response(envelope.event.event_id, idempotency_status)
-    if isinstance(response, JSONResponse):
-        return response
-
-    if idempotency_status == "accepted":
-        await _handle_gateway_event_business(envelope)
-
-    return response
+    return _gateway_batch_response(batch.trace_id, received_event_ids, duplicate_event_ids)
 
 
 @router.post("/player-event")
@@ -445,65 +579,152 @@ async def handle_player_event(event: PlayerEvent, request: Request):
         )
 
 
-async def _handle_gateway_event_business(envelope: GatewayEventEnvelope) -> None:
-    """v1 事件业务接管点。
-
-    首版先保证事件可靠接收和幂等；session_stopped 仅记录，带 lease 的事件后续接入 Agent 决策。
-    """
+async def process_gateway_event_record(record: dict[str, Any]) -> None:
+    """消费 Redis Stream 中的 Gateway 事件并提交一次决策。"""
+    batch_fields = {
+        "traceId": record.get("traceId"),
+        "gatewayId": record.get("gatewayId"),
+        "contractVersion": record.get("contractVersion"),
+        "events": [record.get("event")],
+    }
+    batch = GatewayEventBatchEnvelope.model_validate(batch_fields)
+    event = batch.events[0]
     logger.info(
-        "[gateway_v1] event accepted, trace_id=%s, event_id=%s, event_type=%s, session_id=%s",
-        envelope.trace_id,
-        envelope.event.event_id,
-        envelope.event.event_type,
-        envelope.event.payload.session.session_id,
+        "[gateway_v1] event processing, trace_id=%s, event_id=%s, event_type=%s, session_id=%s",
+        batch.trace_id,
+        event.event_id,
+        event.event_type,
+        event.session_id,
     )
-    if envelope.event.decision_lease_id is None or envelope.event.event_type == "session_stopped":
-        return
 
     current_settings = _settings()
     decision_url = getattr(current_settings, "llm_gateway_decision_url", None)
     decision_app_id = getattr(current_settings, "llm_gateway_decision_app_id", None)
     decision_app_secret = getattr(current_settings, "llm_gateway_decision_app_secret", None)
     if not decision_url or not decision_app_id or not decision_app_secret:
-        logger.warning("[gateway_v1] /decision 未配置，跳过 Agent 和决策发送, event_id=%s", envelope.event.event_id)
-        return
+        raise RuntimeError("Gateway decision client is not configured")
 
     output = await run_gateway_v1_agent(
-        tenant_id=_tenant_id_for_gateway_event(envelope),
-        trace_id=envelope.trace_id,
-        event_id=envelope.event.event_id,
-        event_type=envelope.event.event_type,
-        session_id=envelope.event.session_id or envelope.event.payload.session.session_id,
-        state_version=envelope.event.state_version if envelope.event.state_version is not None else 0,
-        decision_lease_id=envelope.event.decision_lease_id,
-        session=envelope.event.payload.session.model_dump(mode="json", by_alias=True),
+        tenant_id=_tenant_id_for_gateway_event(batch.gateway_id),
+        trace_id=batch.trace_id,
+        event_id=event.event_id,
+        event_type=event.event_type,
+        session_id=event.session_id,
+        state_version=event.state_version,
+        decision_lease_id=event.decision_lease_id,
+        session=event.payload.session.model_dump(mode="json", by_alias=True, exclude_none=False),
+        event_payload=event.payload.model_dump(mode="json", by_alias=True, exclude_none=False),
     )
-    actions = output.get("recommended_actions") if isinstance(output, dict) else None
-    if not actions:
-        logger.warning("[gateway_v1] Agent 未返回 recommended_actions, event_id=%s", envelope.event.event_id)
-        return
+    actions = output.get("recommended_actions") if isinstance(output, dict) else []
+    recommended_action = _select_gateway_action(actions or [], event.payload)
 
     await send_llm_gateway_decision(
         decision_url=decision_url,
         app_id=decision_app_id,
         app_secret=decision_app_secret,
         timeout_seconds=float(getattr(current_settings, "llm_gateway_decision_timeout_seconds", 10.0)),
-        trace_id=envelope.trace_id,
-        session_id=envelope.event.session_id or envelope.event.payload.session.session_id,
-        decision_id=f"decision-{uuid4().hex}",
-        decision_lease_id=envelope.event.decision_lease_id,
-        state_version=envelope.event.state_version if envelope.event.state_version is not None else 0,
-        recommended_action=actions[0],
+        trace_id=batch.trace_id,
+        session_id=event.session_id,
+        decision_id=f"decision-{event.event_id}",
+        decision_lease_id=event.decision_lease_id,
+        state_version=event.state_version,
+        recommended_action=recommended_action,
+        max_retries=int(getattr(current_settings, "llm_gateway_decision_max_retries", 0)),
     )
 
 
-def _tenant_id_for_gateway_event(envelope: GatewayEventEnvelope) -> str:
+def _tenant_id_for_gateway_event(gateway_id: str) -> str:
     app_tenants = getattr(_settings(), "llm_gateway_app_tenants", {}) or {}
     if isinstance(app_tenants, dict):
-        tenant_id = app_tenants.get(envelope.gateway_id)
+        tenant_id = app_tenants.get(gateway_id)
         if isinstance(tenant_id, str) and tenant_id:
             return tenant_id
-    return envelope.gateway_id
+    return gateway_id
+
+
+def _mapping_value(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _skill_name(skill: dict[str, Any]) -> str | None:
+    return _mapping_value(skill, "skillName", "SkillName")
+
+
+def _schema_version(skill: dict[str, Any]) -> str | None:
+    return _mapping_value(skill, "schemaVersion", "SchemaVersion")
+
+
+def _flatten_argument_paths(value: Any, prefix: str = "") -> set[str]:
+    if isinstance(value, dict):
+        paths: set[str] = set()
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            paths.add(path)
+            paths.update(_flatten_argument_paths(child, path))
+        return paths
+    if isinstance(value, list):
+        paths = set()
+        for child in value:
+            paths.update(_flatten_argument_paths(child, f"{prefix}[]"))
+        return paths
+    return {prefix} if prefix else set()
+
+
+def _action_matches_hint(action: dict[str, Any], hint: dict[str, Any] | None) -> bool:
+    if hint is None:
+        return True
+    missing_args = _mapping_value(hint, "missingArgs", "MissingArgs") or []
+    if missing_args:
+        return False
+    arguments = action.get("arguments", {})
+    if not isinstance(arguments, dict):
+        return False
+    allowed_args = _mapping_value(hint, "allowedArgs", "AllowedArgs") or []
+    allowed_paths = {
+        str(_mapping_value(item, "path", "Path"))
+        for item in allowed_args
+        if isinstance(item, dict) and _mapping_value(item, "path", "Path")
+    }
+    if not allowed_paths:
+        return not arguments
+    argument_paths = _flatten_argument_paths(arguments)
+    return all(
+        path in allowed_paths or any(path.startswith(f"{allowed}.") for allowed in allowed_paths)
+        for path in argument_paths
+    )
+
+
+def _select_gateway_action(actions: list[dict[str, Any]], payload: GatewayEventPayload) -> dict[str, Any]:
+    available = {
+        (_skill_name(item), _schema_version(item)): item for item in payload.available_skills if _skill_name(item)
+    }
+    hints = {
+        (_skill_name(item), _schema_version(item)): item for item in payload.skill_argument_hints if _skill_name(item)
+    }
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        skill_name = action.get("skillName") or action.get("SkillName")
+        schema_version = action.get("schemaVersion") or action.get("SchemaVersion") or "v1"
+        if (skill_name, schema_version) not in available:
+            continue
+        if not _action_matches_hint(action, hints.get((skill_name, schema_version))):
+            continue
+        normalized = dict(action)
+        normalized["skillName"] = skill_name
+        normalized["schemaVersion"] = schema_version
+        return normalized
+
+    return {
+        "action": "wait",
+        "arguments": {"waitMs": 1000},
+        "reason": "Agent 没有生成当前 Gateway 允许且参数完整的 skill，等待下一次观察",
+        "confidence": 0.0,
+        "ttlMs": 1000,
+    }
 
 
 async def run_gateway_v1_agent(
@@ -516,9 +737,17 @@ async def run_gateway_v1_agent(
     state_version: int,
     decision_lease_id: str,
     session: dict,
+    event_payload: dict[str, Any],
 ) -> dict:
     """用 v1 Gateway event 触发现有 LangGraph Agent。"""
-    user_id = session.get("roleId") or session.get("accountId") or session["sessionId"]
+    user_id = (
+        session.get("roleId")
+        or session.get("RoleId")
+        or session.get("accountId")
+        or session.get("AccountId")
+        or session.get("sessionId")
+        or session.get("SessionId")
+    )
     snapshot = {
         "user_id": user_id,
         "traceId": trace_id,
@@ -528,10 +757,14 @@ async def run_gateway_v1_agent(
         "stateVersion": state_version,
         "decisionLeaseId": decision_lease_id,
         "session": session,
-        "position": session.get("position"),
-        "sceneId": session.get("sceneId"),
-        "accountId": session.get("accountId"),
-        "roleId": session.get("roleId"),
+        "eventReason": event_payload.get("reason"),
+        "availableSkills": event_payload.get("availableSkills", []),
+        "skillArgumentHints": event_payload.get("skillArgumentHints", []),
+        "lastSkillResult": event_payload.get("lastSkillResult"),
+        "position": session.get("position") or session.get("Position"),
+        "sceneId": session.get("sceneId") or session.get("SceneId"),
+        "accountId": session.get("accountId") or session.get("AccountId"),
+        "roleId": session.get("roleId") or session.get("RoleId"),
     }
     from src.core.agents.orchestrator import build_orchestrator
 
@@ -574,6 +807,8 @@ async def _write_behavior_event(
 
     event_type = behavior_event.get("type", "unknown")
     event_data = behavior_event.get("data")
+    event_data_json = json.dumps(event_data, ensure_ascii=False) if event_data is not None else None
+    snapshot_json = json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None
 
     async with get_session() as session:
         await session.execute(
@@ -591,8 +826,8 @@ async def _write_behavior_event(
                 "user_id": user_id,
                 "session_id": session_id,
                 "event_type": event_type,
-                "event_data": event_data,
-                "snapshot": snapshot,
+                "event_data": event_data_json,
+                "snapshot": snapshot_json,
             },
         )
     logger.debug(

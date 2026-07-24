@@ -7,20 +7,25 @@ Alembic 异步迁移环境配置。
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
-from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from src.config import settings
+from alembic import context
 
 # Alembic 配置对象，提供 .ini 文件中的配置值
 config = context.config
 
-# 用 settings 中的真实 DSN 覆盖 .ini 中的占位符
-# asyncpg 驱动不兼容 Alembic 同步迁移，替换为 psycopg2 驱动格式
+# 集成测试通过 Config attribute 注入隔离数据库；普通运行仍读取应用配置。
+database_url = config.attributes.get("database_url_override")
+if database_url is None:
+    from src.config import settings
+
+    database_url = settings.postgres_dsn
+
+# ConfigParser 把百分号用于 interpolation，URL 中的百分号必须先转义。
 config.set_main_option(
     "sqlalchemy.url",
-    str(settings.postgres_dsn),
+    str(database_url).replace("%", "%%"),
 )
 
 # 读取 .ini 中的日志配置

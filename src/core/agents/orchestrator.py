@@ -32,6 +32,7 @@ from src.core.agents.nodes import (
     tracking_update_node,
 )
 from src.core.agents.state import AnalysisState
+from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +49,22 @@ def _timed_node(
         logger.info("[agent_node_timing] node=%s status=started", node_name)
         try:
             result = await node_func(state)
-        except Exception:
+        except Exception as error:
             elapsed_ms = (perf_counter() - started) * 1000
             print(
                 f"TIMING kind=agent_node node={node_name} status=failed elapsed_ms={elapsed_ms:.2f}",
                 flush=True,
             )
-            logger.exception(
+            logger.error(
                 "[agent_node_timing] node=%s status=failed elapsed_ms=%.2f",
                 node_name,
                 elapsed_ms,
+                extra=safe_exception_fields(
+                    stage="agent",
+                    category="node_failed",
+                    error=error,
+                    elapsed_ms=elapsed_ms,
+                ),
             )
             raise
 

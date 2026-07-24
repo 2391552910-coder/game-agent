@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 
+#docs
+docs/技术栈
+
 # 虚拟环境
 .venv/
 

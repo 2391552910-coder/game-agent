@@ -23,6 +23,7 @@ from lightrag.utils import EmbeddingFunc
 from src.config import settings
 from src.core.engine.embedding import embed_texts
 from src.core.engine.rerank import is_ollama_rerank_base_url, ollama_rerank
+from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,7 @@ async def warmup_connections() -> None:
     print("[WARMUP] Step 1/5: Warming up Redis connections...")
     redis_start = time.time()
     from redis import asyncio as aioredis
+
     redis_conn = aioredis.from_url(settings.redis_url)
     try:
         await redis_conn.ping()
@@ -178,6 +180,7 @@ async def warmup_connections() -> None:
     print("[WARMUP] Step 2/5: Warming up Milvus connections...")
     milvus_start = time.time()
     from pymilvus import MilvusClient
+
     milvus_client = MilvusClient(uri=settings.milvus_uri)
     try:
         milvus_client.has_collection("chunks")
@@ -189,9 +192,9 @@ async def warmup_connections() -> None:
     print("[WARMUP] Step 3/5: Warming up Neo4j connections...")
     neo4j_start = time.time()
     from neo4j import AsyncGraphDatabase
+
     neo4j_driver = AsyncGraphDatabase.driver(
-        settings.neo4j_uri.replace("bolt://", "neo4j://", 1),
-        auth=(settings.neo4j_username, settings.neo4j_password)
+        settings.neo4j_uri.replace("bolt://", "neo4j://", 1), auth=(settings.neo4j_username, settings.neo4j_password)
     )
     try:
         async with neo4j_driver.session() as session:
@@ -207,13 +210,21 @@ async def warmup_connections() -> None:
         # 使用我们已经定义的 embedding_func
         await embedding_func(["warmup test"])
         print(f"[WARMUP] Embedding warmup completed in {time.time() - embedding_start:.2f}s")
-    except Exception as e:
-        print(f"[WARMUP] Embedding warmup failed (may be expected): {e}")
+    except Exception as error:
+        logger.error(
+            "Embedding warmup failed",
+            extra=safe_exception_fields(
+                stage="startup",
+                category="embedding_unavailable",
+                error=error,
+            ),
+        )
 
     # 5. 预热 LLM 服务
     print("[WARMUP] Step 5/5: Warming up LLM service...")
     llm_start = time.time()
     from langchain_openai import ChatOpenAI
+
     llm = ChatOpenAI(
         model=settings.openai_default_model,
         temperature=0.1,
@@ -225,8 +236,15 @@ async def warmup_connections() -> None:
     try:
         await llm.ainvoke("Hello, this is a warmup request.")
         print(f"[WARMUP] LLM warmup completed in {time.time() - llm_start:.2f}s")
-    except Exception as e:
-        print(f"[WARMUP] LLM warmup failed (may be expected): {e}")
+    except Exception as error:
+        logger.error(
+            "LLM warmup failed",
+            extra=safe_exception_fields(
+                stage="startup",
+                category="llm_unavailable",
+                error=error,
+            ),
+        )
 
     total_time = time.time() - start
     print(f"[WARMUP] All connections warmed up in {total_time:.2f}s")

@@ -1,0 +1,39 @@
+{
+  "fixtureOnly": true,
+  "source": {
+    "repository": "Shichengzhi/SG-Client",
+    "commit": "fee33bf012b590807df502e658de88f20f3c6dd0",
+    "algorithmSource": "Unity/Assets/Scripts/Codes/Hotfix/Server/AiRobotGateway/Runtime/RobotExternalDecisionRuntimeComponentSystem.cs::ComputeExternalSignature",
+    "cryptoSource": "Unity/Assets/Scripts/Codes/Model/Server/AiRobotGateway/RobotGatewayCryptoHelper.cs",
+    "exportedAtUtc": "2026-07-22T10:02:50.3881322Z",
+    "exportCommand": "PowerShell HMACSHA256 over Gateway canonical signing text"
+  },
+  "vectors": {
+    "events": {
+      "direction": "gateway_to_myagent",
+      "method": "POST",
+      "path": "/api/gateway/v2/events",
+      "appId": "gateway-events-v2",
+      "appSecret": "fixture-only-inbound-vector-secret",
+      "timestampMs": 1719999999000,
+      "requestId": "req-events-001",
+      "rawBodyBase64": "eyJjb250cmFjdFZlcnNpb24iOiJsbG0tZ2F0ZXdheS1odHRwLXYyIiwiZ2F0ZXdheUlkIjoiZ2F0ZXdheS12MiIsImV2ZW50cyI6W119",
+      "bodySha256": "12886d8b7dcd222ad4980fa3f03c7531a3bc4b4eccdb01fe369e4248f7fb0845",
+      "canonicalSigningText": "POST\n/api/gateway/v2/events\n1719999999000\nreq-events-001\n12886d8b7dcd222ad4980fa3f03c7531a3bc4b4eccdb01fe369e4248f7fb0845",
+      "expectedSignature": "aaa5307454c0bfbe819ee1433602f98708b6c1b31c4215caab2e078aaf2c8d1a"
+    },
+    "decision": {
+      "direction": "myagent_to_gateway",
+      "method": "POST",
+      "path": "/api/v1/hosting/llm/decision",
+      "appId": "myagent2-decisions-v2",
+      "appSecret": "fixture-only-decision-vector-secret",
+      "timestampMs": 1719999999555,
+      "requestId": "req-decision-001",
+      "rawBodyBase64": "eyJjb250cmFjdFZlcnNpb24iOiJsbG0tZ2F0ZXdheS1odHRwLXYyIiwiZGVjaXNpb25JZCI6ImRlY2lzaW9uLTAwMSJ9",
+      "bodySha256": "dda6960846b96ff545179d181221449eda20e54cf0143849c246b3f21e03a434",
+      "canonicalSigningText": "POST\n/api/v1/hosting/llm/decision\n1719999999555\nreq-decision-001\ndda6960846b96ff545179d181221449eda20e54cf0143849c246b3f21e03a434",
+      "expectedSignature": "f0c9c5b6c4a1a9c832c0e1ea09af2723c80dabca0d2133dca8be977cc63f2bca"
+    }
+  }
+}

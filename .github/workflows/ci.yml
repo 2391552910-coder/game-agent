@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-api:
+    runs-on: ubuntu-latest
+    env:
+      ENV: test
+      OPENAI_API_KEY: test-openai-key
+      OPENAI_BASE_URL: https://llm.invalid/v1
+      POSTGRES_DSN: postgresql+asyncpg://test:test@postgres.invalid/test
+      NEO4J_PASSWORD: test-neo4j-password
+      LLM_GATEWAY_V1_ENABLED: "true"
+      LLM_GATEWAY_V2_ENABLED: "false"
+      LLM_GATEWAY_APP_SECRETS: "{}"
+      LLM_GATEWAY_APP_GATEWAYS: "{}"
+      LLM_GATEWAY_APP_TENANTS: "{}"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --dev
+      - name: Scoped Ruff
+        run: >-
+          uv run ruff check
+          src/api/main.py
+          src/api/routes/gateway_v2.py
+          src/api/routes/webhooks.py
+          src/config.py
+          src/logging_config.py
+          src/core/infrastructure/db.py
+          src/core/agents/gateway_v2.py
+          src/core/agents/gateway_v2_models.py
+          src/core/agents/gateway_v2_prompts.py
+          src/core/agents/nodes.py
+          src/core/agents/decision_nodes.py
+          src/core/agents/orchestrator.py
+          src/core/engine/lightrag_engine.py
+          src/core/integration/gateway_event_queue.py
+          src/core/integration/robotgateway_callback.py
+          src/core/integration/llm_gateway_v2
+          alembic/env.py
+          alembic/versions/008_llm_gateway_v2_inbox.py
+          alembic/versions/009_llm_gateway_v2_outbox.py
+          scripts/v2_e2e_common.py
+          scripts/seed_gateway_v2_test_tenant.py
+          scripts/invoke_gateway_v2_e2e.py
+          scripts/assert_gateway_v2_state.py
+          tests/conftest.py
+          tests/unit/test_config.py
+          tests/unit/llm_gateway_v2
+          tests/api/test_gateway_v2.py
+          tests/api/test_gateway_v2_lifespan.py
+          tests/api/test_readiness.py
+          tests/unit/test_decision_nodes.py
+          tests/unit/test_nodes.py
+          tests/integration/conftest.py
+          tests/integration/test_gateway_v2_migrations.py
+          tests/integration/test_gateway_v2_recovery.py
+          tests/integration/llm_gateway_v2
+          .codex/skills/myagent2-sgai-http-e2e/scripts/simulation_driver.py
+          .codex/skills/myagent2-sgai-http-e2e/scripts/simulation_myagent_app.py
+      - name: Unit and API without external network
+        run: >-
+          uv run pytest tests/unit tests/api -q
+          --disable-socket
+          --allow-hosts=127.0.0.1,localhost,::1
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: myagent
+          POSTGRES_PASSWORD: myagent
+          POSTGRES_DB: myagent_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U myagent -d myagent_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENV: test
+      OPENAI_API_KEY: test-openai-key
+      OPENAI_BASE_URL: https://llm.invalid/v1
+      POSTGRES_DSN: postgresql+asyncpg://test:test@postgres.invalid/test
+      NEO4J_PASSWORD: test-neo4j-password
+      LLM_GATEWAY_V1_ENABLED: "true"
+      LLM_GATEWAY_V2_ENABLED: "false"
+      LLM_GATEWAY_APP_SECRETS: "{}"
+      LLM_GATEWAY_APP_GATEWAYS: "{}"
+      LLM_GATEWAY_APP_TENANTS: "{}"
+      TEST_POSTGRES_DSN: postgresql+asyncpg://myagent:myagent@127.0.0.1:5432/myagent_test_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --dev
+      - name: Migration and recovery integration
+        run: >-
+          uv run pytest
+          tests/integration/test_gateway_v2_migrations.py
+          tests/integration/test_gateway_v2_recovery.py
+          tests/integration/llm_gateway_v2/test_inbox_repository.py
+          -q

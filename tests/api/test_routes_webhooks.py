@@ -105,3 +105,28 @@ class TestPlayerEvent:
         )
 
         assert response.status_code == 422  # Validation error
+
+    @pytest.mark.asyncio
+    async def test_behavior_checkpoint_serializes_json_before_database_insert(self, client, mock_redis, mock_session):
+        _setup_auth(mock_redis)
+        session, _ = mock_session
+        behavior_data = {"x": 10, "y": 0, "z": 20}
+        snapshot = {"scene": "test"}
+
+        response = await client.post(
+            "/webhooks/player-event",
+            json={
+                "user_id": "user-001",
+                "event_type": "behavior_checkpoint",
+                "timestamp": 1750000000.0,
+                "session_id": "session-001",
+                "behavior_event": {"type": "move", "data": behavior_data},
+                "snapshot": snapshot,
+            },
+            headers=_auth_headers(),
+        )
+
+        assert response.status_code == 200
+        _, params = session.execute.call_args.args
+        assert json.loads(params["event_data"]) == behavior_data
+        assert json.loads(params["snapshot"]) == snapshot

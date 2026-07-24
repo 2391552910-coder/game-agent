@@ -122,6 +122,8 @@ AiRobotGateway 输出格式要求：
 - goal_metric 必须是快照中实际存在的数值字段，如 learning_courses、shopping_count、play_hours
 
 决策对齐要求：
+- Gateway 事件中的 availableSkills 是本次 session 的唯一可执行 skill 白名单；不得选择列表之外的 skill。
+- skillArgumentHints 是本次事件的参数约束；缺少必填参数时必须改为 observe_state 或等待，不得编造参数。
 - 如果 goal_evaluation_result 中 decision=continue，推荐行动应与现有目标方向一致，但必须降级到第一版允许动作范围内
 - 如果 decision=downgrade，推荐更容易达成的基础行为子目标
 - 如果 decision=switch，推荐与 suggested_goal 对齐的新方向，但不得输出暂不开放能力
@@ -153,6 +155,9 @@ ACTION_REASONING_USER = """行为分析报告：
 
 当前异常检测结果：
 {anomaly_text}
+
+Gateway 本次事件允许的 skill 与参数提示：
+{gateway_skill_context}
 
 意图推断结果（玩家本次想做什么 / 下次最可能做什么）：
 {intent_result}

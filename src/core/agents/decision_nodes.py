@@ -24,6 +24,7 @@ from src.core.agents.decision_prompts import (
     INTENT_INFERENCE_USER,
 )
 from src.core.agents.state import AnalysisState
+from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 from src.core.llm.factory import get_llm
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ _SINGLE_CALL_TIMEOUT = 60
 
 
 # ── 节点1：意图推断 ──
+
 
 async def intent_inference_node(state: AnalysisState) -> dict[str, Any]:
     """推断玩家本次会话意图和下次可能的行为方向。
@@ -50,37 +52,35 @@ async def intent_inference_node(state: AnalysisState) -> dict[str, Any]:
         recent_intents = await _load_recent_intents(user_id, tenant_id, limit=3)
 
         session_events_text = (
-            json.dumps(session_events, ensure_ascii=False, indent=2)
-            if session_events
-            else "（本次会话无行为事件数据）"
+            json.dumps(session_events, ensure_ascii=False, indent=2) if session_events else "（本次会话无行为事件数据）"
         )
         player_memory_text = (
-            json.dumps(player_memory, ensure_ascii=False, indent=2)
-            if player_memory
-            else "（暂无玩家记忆，首次分析）"
+            json.dumps(player_memory, ensure_ascii=False, indent=2) if player_memory else "（暂无玩家记忆，首次分析）"
         )
         recent_intents_text = (
-            json.dumps(recent_intents, ensure_ascii=False, indent=2)
-            if recent_intents
-            else "（无历史意图记录）"
+            json.dumps(recent_intents, ensure_ascii=False, indent=2) if recent_intents else "（无历史意图记录）"
         )
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", INTENT_INFERENCE_SYSTEM),
-            ("human", INTENT_INFERENCE_USER),
-        ])
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", INTENT_INFERENCE_SYSTEM),
+                ("human", INTENT_INFERENCE_USER),
+            ]
+        )
 
         llm = await get_llm(model_type="fast")
         llm_structured = llm.with_structured_output(InferredIntent, method="json_mode")
         chain = prompt | llm_structured
 
         intent: InferredIntent = await asyncio.wait_for(
-            chain.ainvoke({
-                "user_id": user_id,
-                "session_events": session_events_text,
-                "player_memory": player_memory_text,
-                "recent_intents": recent_intents_text,
-            }),
+            chain.ainvoke(
+                {
+                    "user_id": user_id,
+                    "session_events": session_events_text,
+                    "player_memory": player_memory_text,
+                    "recent_intents": recent_intents_text,
+                }
+            ),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
 
@@ -92,18 +92,26 @@ async def intent_inference_node(state: AnalysisState) -> dict[str, Any]:
         )
         return {"intent_result": intent.model_dump()}
 
-    except Exception as e:
-        logger.error("[intent_inference] 意图推断失败: %s", e)
+    except Exception as error:
+        logger.error(
+            "[intent_inference] 意图推断失败",
+            extra=safe_exception_fields(
+                stage="agent",
+                category="intent_inference_failed",
+                error=error,
+            ),
+        )
         return {
             "intent_result": InferredIntent(
                 session_summary="意图推断失败，使用空默认值",
                 intent_confidence="low",
             ).model_dump(),
-            "errors": [f"意图推断失败: {e}"],
+            "errors": ["意图推断失败"],
         }
 
 
 # ── 节点2：目标校验与决策 ──
+
 
 async def goal_evaluation_node(state: AnalysisState) -> dict[str, Any]:
     """校验当前目标进度，做出继续/降级/切换决策。
@@ -124,33 +132,31 @@ async def goal_evaluation_node(state: AnalysisState) -> dict[str, Any]:
 
         snapshot_text = json.dumps(snapshot, ensure_ascii=False)
         intent_text = json.dumps(intent_result, ensure_ascii=False, indent=2)
-        memory_text = (
-            json.dumps(player_memory, ensure_ascii=False, indent=2)
-            if player_memory
-            else "（暂无玩家记忆）"
-        )
+        memory_text = json.dumps(player_memory, ensure_ascii=False, indent=2) if player_memory else "（暂无玩家记忆）"
         last_intent_text = (
-            json.dumps(last_intent, ensure_ascii=False, indent=2)
-            if last_intent
-            else "（无历史目标，首次分析）"
+            json.dumps(last_intent, ensure_ascii=False, indent=2) if last_intent else "（无历史目标，首次分析）"
         )
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", GOAL_EVALUATION_SYSTEM),
-            ("human", GOAL_EVALUATION_USER),
-        ])
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", GOAL_EVALUATION_SYSTEM),
+                ("human", GOAL_EVALUATION_USER),
+            ]
+        )
 
         llm = await get_llm(model_type="default")
         llm_structured = llm.with_structured_output(GoalEvaluationResult, method="json_mode")
         chain = prompt | llm_structured
 
         evaluation: GoalEvaluationResult = await asyncio.wait_for(
-            chain.ainvoke({
-                "snapshot_text": snapshot_text,
-                "intent_result": intent_text,
-                "player_memory": memory_text,
-                "last_intent_record": last_intent_text,
-            }),
+            chain.ainvoke(
+                {
+                    "snapshot_text": snapshot_text,
+                    "intent_result": intent_text,
+                    "player_memory": memory_text,
+                    "last_intent_record": last_intent_text,
+                }
+            ),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
 
@@ -162,19 +168,27 @@ async def goal_evaluation_node(state: AnalysisState) -> dict[str, Any]:
         )
         return {"goal_evaluation_result": evaluation.model_dump()}
 
-    except Exception as e:
-        logger.error("[goal_evaluation] 目标校验失败: %s", e)
+    except Exception as error:
+        logger.error(
+            "[goal_evaluation] 目标校验失败",
+            extra=safe_exception_fields(
+                stage="agent",
+                category="goal_evaluation_failed",
+                error=error,
+            ),
+        )
         return {
             "goal_evaluation_result": GoalEvaluationResult(
                 has_active_goal=False,
                 decision="new",
-                decision_reason=f"目标校验失败，回退到新目标模式: {e}",
+                decision_reason="目标校验失败，回退到新目标模式",
             ).model_dump(),
-            "errors": [f"目标校验失败: {e}"],
+            "errors": ["目标校验失败"],
         }
 
 
 # ── 节点3：更新玩家长期记忆 ──
+
 
 async def memory_update_node(state: AnalysisState) -> dict[str, Any]:
     """更新玩家长期记忆。
@@ -203,12 +217,20 @@ async def memory_update_node(state: AnalysisState) -> dict[str, Any]:
         logger.info("[memory_update] 完成, user_id=%s", user_id)
         return {}
 
-    except Exception as e:
-        logger.error("[memory_update] 记忆更新失败: %s", e)
-        return {"errors": [f"记忆更新失败: {e}"]}
+    except Exception as error:
+        logger.error(
+            "[memory_update] 记忆更新失败",
+            extra=safe_exception_fields(
+                stage="database",
+                category="memory_update_failed",
+                error=error,
+            ),
+        )
+        return {"errors": ["记忆更新失败"]}
 
 
 # ── 内部辅助函数 ──
+
 
 async def _load_session_events(user_id: str, tenant_id: str) -> list[dict]:
     """加载最近一次会话的事件序列（按 session_id 最新的一组）。"""
@@ -423,14 +445,8 @@ def _update_behavior_profile(existing: dict, snapshot: dict, count: int) -> dict
     new_spend = float(snapshot.get("gold_spent", 0) or 0)
     new_minutes = float(snapshot.get("session_minutes", 0) or 0)
 
-    profile.avg_spend_per_session = (
-        profile.avg_spend_per_session * (n - 1) / n + new_spend / n
-        if n > 0 else new_spend
-    )
-    profile.avg_session_minutes = (
-        profile.avg_session_minutes * (n - 1) / n + new_minutes / n
-        if n > 0 else new_minutes
-    )
+    profile.avg_spend_per_session = profile.avg_spend_per_session * (n - 1) / n + new_spend / n if n > 0 else new_spend
+    profile.avg_session_minutes = profile.avg_session_minutes * (n - 1) / n + new_minutes / n if n > 0 else new_minutes
 
     avg = profile.avg_spend_per_session
     if avg > 500:
@@ -468,10 +484,7 @@ def _update_goal_history(existing: dict, goal_eval: dict, analysis_count: int) -
     cost_deviation = goal_eval.get("cost_deviation")
     if cost_deviation is not None:
         n = entry["total"]
-        entry["avg_cost"] = (
-            entry.get("avg_cost", 0.0) * (n - 1) / n + cost_deviation / n
-            if n > 0 else cost_deviation
-        )
+        entry["avg_cost"] = entry.get("avg_cost", 0.0) * (n - 1) / n + cost_deviation / n if n > 0 else cost_deviation
 
     # 出现 >=2 次才写入 history
     if entry["total"] >= 2:

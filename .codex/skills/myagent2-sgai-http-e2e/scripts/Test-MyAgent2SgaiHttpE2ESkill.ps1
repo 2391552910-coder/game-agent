@@ -23,8 +23,11 @@ if ($parseErrors.Count -gt 0) {
 }
 
 $parameterNames = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-if ($parameterNames -notcontains 'Mode') {
-    throw 'Entry script must expose a Mode parameter.'
+if ($parameterNames -notcontains 'ContractVersion') {
+    throw 'Entry script must expose a ContractVersion parameter.'
+}
+if ($parameterNames -notcontains 'GatewayMode') {
+    throw 'Entry script must expose a GatewayMode parameter.'
 }
 if ($parameterNames -notcontains 'SkipDependencyManagement') {
     throw 'Entry script must expose SkipDependencyManagement for externally managed infrastructure.'
@@ -34,14 +37,36 @@ if ($parameterNames -notcontains 'KeepDependencies') {
 }
 
 $entryText = Get-Content -Raw -LiteralPath $entryScript
+if ($entryText -notmatch "ValidateSet\('v1',\s*'v2'\)") {
+    throw 'ContractVersion must only accept v1 or v2.'
+}
 if ($entryText -notmatch "ValidateSet\('Simulation',\s*'Real'\)") {
-    throw 'Mode must only accept Simulation or Real.'
+    throw 'GatewayMode must only accept Simulation or Real.'
 }
 if ($entryText -match '(?im)^\s*\$pid\s*=') {
     throw 'Do not assign to $pid because PowerShell treats it as the read-only $PID variable.'
 }
 if ($entryText -notmatch '(?s)--timeout-seconds\s+\$DecisionTimeoutSeconds') {
     throw 'Simulation mode must pass DecisionTimeoutSeconds to the driver.'
+}
+foreach ($requiredPattern in @(
+    '--contract-version\s+\$ContractVersion',
+    'seed_gateway_v2_test_tenant\.py',
+    'assert_gateway_v2_state\.py',
+    'gateway_runtime_config_keys\.json',
+    'LLM_GATEWAY_APP_GATEWAYS',
+    'LLM_GATEWAY_EVENT_STREAM_KEY',
+    'LLM_GATEWAY_EVENT_CONSUMER_GROUP',
+    'SGAI_SIM_EVENT_APP_ID',
+    'SGAI_SIM_DECISION_APP_ID',
+    'SGAI_SIM_CONTROL_APP_ID'
+)) {
+    if ($entryText -notmatch $requiredPattern) {
+        throw "Entry script is missing required v2 behavior: $requiredPattern"
+    }
+}
+if ($entryText -notmatch 'llm-gateway:e2e:\$runId' -or $entryText -notmatch 'simulation-\$runId') {
+    throw 'Each Simulation run must use an isolated v1 Redis stream and consumer group.'
 }
 
 $buildIndex = $entryText.IndexOf('if (-not $SkipBuild)', [System.StringComparison]::Ordinal)
@@ -67,7 +92,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $skillText = Get-Content -Raw -LiteralPath $skillDocument
-foreach ($requiredText in @('-Mode Simulation', '-Mode Real', 'does not prove real SGAI')) {
+foreach ($requiredText in @(
+    '-ContractVersion v1 -GatewayMode Simulation',
+    '-ContractVersion v2 -GatewayMode Simulation',
+    '-ContractVersion v2 -GatewayMode Real',
+    'does not prove real SGAI'
+)) {
     if (-not $skillText.Contains($requiredText)) {
         throw "SKILL.md must document: $requiredText"
     }
@@ -87,5 +117,6 @@ foreach ($requiredPattern in @('.run/', '__pycache__/')) {
     success = $true
     entryScript = $entryScript
     simulationResources = @($simulationApp, $simulationDriver)
-    documentedModes = @('Simulation', 'Real')
+    documentedContractVersions = @('v1', 'v2')
+    documentedGatewayModes = @('Simulation', 'Real')
 } | ConvertTo-Json -Depth 4

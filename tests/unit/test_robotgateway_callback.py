@@ -1,5 +1,6 @@
 """RobotGateway 回调客户端测试。"""
 
+import hashlib
 import json
 from datetime import UTC, datetime
 
@@ -10,6 +11,7 @@ from src.core.integration.robotgateway_callback import (
     RobotGatewayCallbackError,
     RobotGatewayCallbackSkipped,
     build_llm_gateway_decision_payload,
+    build_llm_gateway_hmac_headers,
     build_robotgateway_callback_headers,
     build_robotgateway_callback_payload,
     send_llm_gateway_decision,
@@ -59,6 +61,22 @@ def test_build_robotgateway_callback_headers():
         "Content-Type": "application/json",
         "X-Callback-API-Key": "secret",
     }
+
+
+def test_gateway_hmac_matches_fixed_vector():
+    body = b'{"contractVersion":"llm-gateway-http-v1","eventId":"evt-001"}'
+    headers = build_llm_gateway_hmac_headers(
+        method="POST",
+        path="/api/gateway/events",
+        body=body,
+        app_id="gateway-to-llm",
+        app_secret="vector-secret",
+        request_id="req-vector-001",
+        timestamp_ms="1719999999000",
+    )
+
+    assert hashlib.sha256(body).hexdigest() == "e6004667831c3686870e818ca0c1e4a50ec061b9cf57682b17772646a54e8a1e"
+    assert headers["X-Signature"] == "984d3865c024866313a55e7dc132071f7ce8008fad0a7a0b74f142ab504371e8"
 
 
 @pytest.mark.asyncio
@@ -155,6 +173,9 @@ def test_build_llm_gateway_decision_payload_maps_recommended_action_to_call_skil
         "decisionLeaseId": "lease-001",
         "stateVersion": 7,
         "action": "call_skill",
+        "reason": "内部分析原因不进入 decision 协议",
+        "confidence": 0.0,
+        "ttlMs": 30000,
         "skillName": "move_to",
         "schemaVersion": "v1",
         "arguments": {"target": {"x": 1, "y": 0, "z": 2}},
@@ -179,6 +200,9 @@ def test_build_llm_gateway_decision_payload_supports_wait():
         "decisionLeaseId": "lease-002",
         "stateVersion": 8,
         "action": "wait",
+        "reason": "Agent decision",
+        "confidence": 0.0,
+        "ttlMs": 30000,
         "arguments": {"waitMs": 3000},
     }
 
@@ -224,6 +248,9 @@ def test_build_llm_gateway_decision_payload_supports_stop_hosting():
         "decisionLeaseId": "lease-003",
         "stateVersion": 10,
         "action": "stop_hosting",
+        "reason": "Agent decision",
+        "confidence": 0.0,
+        "ttlMs": 30000,
     }
 
 
@@ -266,7 +293,10 @@ async def test_send_llm_gateway_decision_posts_signed_request():
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json={"status": "accepted", "reason": "ok", "skillCallId": "skill-001"})
+        return httpx.Response(
+            200,
+            json={"accepted": True, "status": "accepted", "reason": "ok", "skillCallId": "skill-001"},
+        )
 
     transport = httpx.MockTransport(handler)
 
@@ -292,7 +322,7 @@ async def test_send_llm_gateway_decision_posts_signed_request():
         transport=transport,
     )
 
-    assert response_payload == {"status": "accepted", "reason": "ok", "skillCallId": "skill-001"}
+    assert response_payload == {"accepted": True, "status": "accepted", "reason": "ok", "skillCallId": "skill-001"}
     assert len(requests) == 1
     request = requests[0]
     assert str(request.url) == "http://robotgateway.local/api/v1/hosting/llm/decision"
@@ -309,6 +339,9 @@ async def test_send_llm_gateway_decision_posts_signed_request():
         "decisionLeaseId": "lease-001",
         "stateVersion": 13,
         "action": "call_skill",
+        "reason": "只用于内部日志",
+        "confidence": 0.0,
+        "ttlMs": 30000,
         "skillName": "observe_state",
         "schemaVersion": "v1",
         "arguments": {},
@@ -338,3 +371,39 @@ async def test_send_llm_gateway_decision_rejects_malformed_gateway_response():
             timestamp_ms="1719999999500",
             transport=transport,
         )
+
+
+@pytest.mark.asyncio
+async def test_send_llm_gateway_decision_retries_network_error_with_identical_body_and_headers():
+    requests: list[httpx.Request] = []
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        requests.append(request)
+        if attempts == 1:
+            raise httpx.ConnectError("gateway unavailable", request=request)
+        return httpx.Response(200, json={"accepted": True, "status": "accepted", "reason": "ok"})
+
+    await send_llm_gateway_decision(
+        decision_url="http://robotgateway.local/api/v1/hosting/llm/decision",
+        app_id="llm-to-gateway",
+        app_secret="secret-llm",
+        timeout_seconds=10.0,
+        trace_id="trace-retry",
+        session_id="session-retry",
+        decision_id="decision-retry",
+        decision_lease_id="lease-retry",
+        state_version=1,
+        recommended_action={"skillName": "observe_state", "schemaVersion": "v1", "arguments": {}},
+        request_id="req-retry",
+        timestamp_ms="1719999999500",
+        transport=httpx.MockTransport(handler),
+        max_retries=1,
+    )
+
+    assert attempts == 2
+    assert requests[0].content == requests[1].content
+    assert requests[0].headers["X-RequestId"] == requests[1].headers["X-RequestId"]
+    assert requests[0].headers["X-Signature"] == requests[1].headers["X-Signature"]

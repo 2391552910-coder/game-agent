@@ -1,9 +1,11 @@
 """RobotGateway 回调客户端。"""
 
+import asyncio
 import hashlib
 import hmac
 import json
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +18,10 @@ class RobotGatewayCallbackSkipped(Exception):  # noqa: N818
 
 class RobotGatewayCallbackError(Exception):
     """RobotGateway callback 发送失败。"""
+
+    def __init__(self, category: str) -> None:
+        self.category = category
+        super().__init__("RobotGateway callback failed")
 
 
 def _json_body_bytes(payload: dict[str, Any]) -> bytes:
@@ -57,6 +63,12 @@ def _require_non_negative_int(value: Any, field_name: str) -> int:
     return value
 
 
+def _require_finite_number(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(float(value)):
+        raise ValueError(f"{field_name} must be a finite JSON number")
+    return float(value)
+
+
 def build_llm_gateway_decision_payload(
     *,
     trace_id: str,
@@ -76,6 +88,9 @@ def build_llm_gateway_decision_payload(
         "decisionLeaseId": decision_lease_id,
         "stateVersion": _require_non_negative_int(state_version, "stateVersion"),
         "action": action,
+        "reason": str(recommended_action.get("reason") or "Agent decision"),
+        "confidence": _require_finite_number(recommended_action.get("confidence", 0.0), "confidence"),
+        "ttlMs": _require_non_negative_int(recommended_action.get("ttlMs", 30_000), "ttlMs"),
     }
 
     if action == "call_skill":
@@ -83,11 +98,13 @@ def build_llm_gateway_decision_payload(
         schema_version = _require_non_blank_string(recommended_action.get("schemaVersion"), "schemaVersion")
         if "arguments" not in recommended_action or not isinstance(recommended_action["arguments"], dict):
             raise ValueError("call_skill arguments must be a JSON object")
-        payload.update({
-            "skillName": skill_name,
-            "schemaVersion": schema_version,
-            "arguments": recommended_action["arguments"],
-        })
+        payload.update(
+            {
+                "skillName": skill_name,
+                "schemaVersion": schema_version,
+                "arguments": recommended_action["arguments"],
+            }
+        )
     elif action == "wait":
         if "arguments" in recommended_action:
             arguments = recommended_action["arguments"]
@@ -110,29 +127,45 @@ def build_llm_gateway_decision_payload(
 def _validate_llm_gateway_decision_response(payload: dict[str, Any]) -> None:
     status = payload.get("status")
     reason = payload.get("reason")
+    accepted = payload.get("accepted")
+    if accepted is not None and not isinstance(accepted, bool):
+        raise RobotGatewayCallbackError("accepted_type_invalid")
     if status == "accepted":
+        if accepted is False:
+            raise RobotGatewayCallbackError("accepted_flag_invalid")
         if reason != "ok":
-            raise RobotGatewayCallbackError("RobotGateway decision accepted response must include reason=ok")
+            raise RobotGatewayCallbackError("accepted_reason_invalid")
         skill_call_id = payload.get("skillCallId")
         if skill_call_id is not None and (not isinstance(skill_call_id, str) or not skill_call_id):
-            raise RobotGatewayCallbackError("RobotGateway decision skillCallId must be a non-empty string")
+            raise RobotGatewayCallbackError("skill_call_id_invalid")
         return
 
     if status == "rejected":
         if reason not in {
             "lease_expired",
+            "lease_not_found",
+            "lease_session_mismatch",
+            "stale_state",
             "schema_invalid",
             "skill_not_allowed",
+            "skill_not_found",
             "state_not_allowed",
             "skill_in_progress",
+            "session_not_running",
+            "circuit_breaker_open",
             "idempotency_key_conflict",
         }:
-            raise RobotGatewayCallbackError("RobotGateway decision rejected response has invalid reason")
+            raise RobotGatewayCallbackError("rejected_reason_invalid")
         if "skillCallId" in payload:
-            raise RobotGatewayCallbackError("RobotGateway decision rejected response must not include skillCallId")
+            raise RobotGatewayCallbackError("rejected_skill_call_id_invalid")
         return
 
-    raise RobotGatewayCallbackError("RobotGateway decision response has invalid status")
+    if status == "duplicate":
+        if accepted is True:
+            raise RobotGatewayCallbackError("duplicate_flag_invalid")
+        return
+
+    raise RobotGatewayCallbackError("response_status_invalid")
 
 
 def build_robotgateway_callback_payload(
@@ -188,8 +221,10 @@ async def send_robotgateway_analysis_callback(
         async with httpx.AsyncClient(timeout=timeout_seconds, transport=transport) as client:
             response = await client.post(callback_url, json=payload, headers=headers)
             response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise RobotGatewayCallbackError(str(exc)) from exc
+    except httpx.TimeoutException:
+        raise RobotGatewayCallbackError("timeout") from None
+    except httpx.HTTPError:
+        raise RobotGatewayCallbackError("request_failed") from None
 
 
 async def send_llm_gateway_decision(
@@ -207,6 +242,7 @@ async def send_llm_gateway_decision(
     request_id: str | None = None,
     timestamp_ms: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    max_retries: int = 0,
 ) -> dict[str, Any]:
     """向 RobotGateway v1 /decision 提交一次 call_skill 决策。"""
     payload = build_llm_gateway_decision_payload(
@@ -231,17 +267,33 @@ async def send_llm_gateway_decision(
         timestamp_ms=timestamp_ms,
     )
 
+    attempts = max(0, int(max_retries)) + 1
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds, transport=transport) as client:
-            response = await client.post(decision_url, content=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
-    except httpx.HTTPError as exc:
-        raise RobotGatewayCallbackError(str(exc)) from exc
-    except ValueError as exc:
-        raise RobotGatewayCallbackError("RobotGateway decision response is not valid JSON") from exc
+            for attempt in range(attempts):
+                try:
+                    response = await client.post(decision_url, content=body, headers=headers)
+                except httpx.RequestError:
+                    if attempt >= attempts - 1:
+                        raise RobotGatewayCallbackError("request_failed") from None
+                    await asyncio.sleep(0.05 * (attempt + 1))
+                    continue
 
-    if not isinstance(payload, dict):
-        raise RobotGatewayCallbackError("RobotGateway decision response must be a JSON object")
-    _validate_llm_gateway_decision_response(payload)
-    return payload
+                try:
+                    response.raise_for_status()
+                    response_payload = response.json()
+                except httpx.HTTPError:
+                    raise RobotGatewayCallbackError("http_status_invalid") from None
+                except ValueError:
+                    raise RobotGatewayCallbackError("response_not_json") from None
+
+                if not isinstance(response_payload, dict):
+                    raise RobotGatewayCallbackError("response_object_invalid")
+                _validate_llm_gateway_decision_response(response_payload)
+                return response_payload
+    except RobotGatewayCallbackError:
+        raise
+    except httpx.HTTPError:
+        raise RobotGatewayCallbackError("request_failed") from None
+
+    raise RobotGatewayCallbackError("response_missing")
