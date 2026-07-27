@@ -275,21 +275,42 @@ def _v2_lease(state: SimulationState, *, state_version: int, index: int) -> dict
         "controlGeneration": 1,
     }
     return {
+        "sessionId": state.session_id,
+        "controlGeneration": 1,
         "decisionLeaseId": lease_id,
         "stateVersion": state_version,
         "leaseKind": "hosting_control",
-        "allowedDecisionActions": ["call_skill"],
+        "allowedActions": ["call_skill"],
+        "allowedSkillName": "observe_state",
+        "allowedSkillNames": ["observe_state"],
+        "parentSkillName": None,
+    }
+
+
+def _v2_decision_context(state: SimulationState) -> dict[str, Any]:
+    return {
         "session": {
             **_session_payload(state),
             "status": "active",
         },
-        "availableSkills": [{"skillName": "observe_state", "schemaVersion": "v1"}],
+        "availableSkills": [
+            {
+                "SkillName": "observe_state",
+                "SchemaVersion": "v1",
+                "RequireRunning": True,
+                "CooldownMs": 0,
+            }
+        ],
         "skillArgumentHints": [
             {
                 "skillName": "observe_state",
                 "schemaVersion": "v1",
+                "argumentStatus": "ready",
+                "suggestedArgs": {},
                 "allowedArgs": [],
                 "missingArgs": [],
+                "warnings": [],
+                "nextSteps": [],
             }
         ],
     }
@@ -305,19 +326,46 @@ def _v2_event_batch(
 ) -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
     event_id = f"event-{state.run_id}-{sequence}"
+    state_version = 1
+    decision_lease_id: str | None = None
     if event_type == "session_started":
-        payload: dict[str, Any] = {"lease": _v2_lease(state, state_version=1, index=1)}
+        lease = _v2_lease(state, state_version=1, index=1)
+        decision_lease_id = str(lease["decisionLeaseId"])
+        payload: dict[str, Any] = {
+            "reason": "decision_requested",
+            "lease": lease,
+            "decisionContext": _v2_decision_context(state),
+        }
     elif event_type == "skill_started":
-        payload = {"decisionId": decision_id, "skillCallId": skill_call_id}
-    elif event_type == "skill_finished":
         payload = {
             "decisionId": decision_id,
+            "skillName": "observe_state",
             "skillCallId": skill_call_id,
-            "terminal": {"status": "success"},
-            "lease": _v2_lease(state, state_version=2, index=2),
+            "startedAtMs": now_ms,
+        }
+    elif event_type == "skill_finished":
+        state_version = 2
+        lease = _v2_lease(state, state_version=state_version, index=2)
+        decision_lease_id = str(lease["decisionLeaseId"])
+        payload = {
+            "decisionId": decision_id,
+            "skillName": "observe_state",
+            "skillCallId": skill_call_id,
+            "status": "success",
+            "reason": "ok",
+            "failureCategory": None,
+            "retryable": False,
+            "startedAtMs": now_ms - 1,
+            "finishedAtMs": now_ms,
+            "lease": lease,
+            "decisionContext": _v2_decision_context(state),
         }
     elif event_type == "session_stopped":
-        payload = {"reason": "simulation control stop"}
+        state_version = 2
+        payload = {
+            "reason": "simulation control stop",
+            "stoppedAtMs": now_ms,
+        }
     else:
         raise ValueError("unsupported v2 simulation event type")
     event = {
@@ -326,6 +374,8 @@ def _v2_event_batch(
         "sessionId": state.session_id,
         "controlGeneration": 1,
         "eventSequence": sequence,
+        "stateVersion": state_version,
+        "decisionLeaseId": decision_lease_id,
         "occurredAtMs": now_ms,
         "payload": payload,
     }

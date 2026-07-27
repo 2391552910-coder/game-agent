@@ -26,25 +26,40 @@ def _event(event_id: str = "event-1", *, sequence: int = 1) -> dict:
     if sequence == 1:
         event_type = "session_started"
         payload = {
+            "reason": "decision_requested",
             "lease": {
+                "sessionId": "session-1",
+                "controlGeneration": 1,
                 "decisionLeaseId": "lease-1",
                 "stateVersion": 1,
                 "leaseKind": "hosting_control",
-                "allowedDecisionActions": ["wait"],
+                "allowedActions": ["wait"],
+                "allowedSkillName": None,
+                "allowedSkillNames": [],
+                "parentSkillName": None,
+            },
+            "decisionContext": {
                 "session": {"status": "active"},
                 "availableSkills": [],
                 "skillArgumentHints": [],
-            }
+            },
         }
+        decision_lease_id = "lease-1"
     else:
         event_type = "session_stopped"
-        payload = {"reason": "stopped"}
+        payload = {
+            "reason": "stopped",
+            "stoppedAtMs": 1_700_000_000_000 + sequence,
+        }
+        decision_lease_id = None
     return {
         "eventId": event_id,
         "eventType": event_type,
         "sessionId": "session-1",
         "controlGeneration": 1,
         "eventSequence": sequence,
+        "stateVersion": 1,
+        "decisionLeaseId": decision_lease_id,
         "occurredAtMs": 1_700_000_000_000 + sequence,
         "payload": payload,
     }

@@ -98,17 +98,27 @@ def _v2_payload() -> dict[str, Any]:
                 "sessionId": "session-1",
                 "controlGeneration": 1,
                 "eventSequence": 1,
+                "stateVersion": 1,
+                "decisionLeaseId": "v2-lease-1",
                 "occurredAtMs": 1_700_000_000_001,
                 "payload": {
+                    "reason": "decision_requested",
                     "lease": {
+                        "sessionId": "session-1",
+                        "controlGeneration": 1,
                         "decisionLeaseId": "v2-lease-1",
                         "stateVersion": 1,
                         "leaseKind": "hosting_control",
-                        "allowedDecisionActions": ["wait"],
+                        "allowedActions": ["wait"],
+                        "allowedSkillName": None,
+                        "allowedSkillNames": [],
+                        "parentSkillName": None,
+                    },
+                    "decisionContext": {
                         "session": {"accountId": "account-1", "status": "active"},
                         "availableSkills": [],
                         "skillArgumentHints": [],
-                    }
+                    },
                 },
             }
         ],

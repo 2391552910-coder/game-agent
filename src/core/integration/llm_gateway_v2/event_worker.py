@@ -25,6 +25,7 @@ ProcessOutcome = Literal["succeeded", "retryable_failed", "manual"]
 class GenerationDisposition(StrEnum):
     ACTIVATE_NEW = "activate_new"
     CURRENT = "current"
+    HISTORICAL_RECOVERY = "historical_recovery"
     STALE = "stale"
     WAIT = "wait"
 
@@ -41,6 +42,8 @@ def classify_generation(
         return GenerationDisposition.WAIT
     if incoming_generation == current_generation:
         return GenerationDisposition.CURRENT
+    if event_type in {"skill_started", "skill_finished", "decision_rejected"}:
+        return GenerationDisposition.HISTORICAL_RECOVERY
     return GenerationDisposition.STALE
 
 
@@ -63,6 +66,7 @@ class ClaimedGatewayEvent:
     attempt_count: int
     locked_by: str
     lock_until: datetime
+    historical_recovery: bool = False
 
 
 @dataclass(frozen=True)

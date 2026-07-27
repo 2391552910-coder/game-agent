@@ -13,7 +13,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 for environment_name in tuple(os.environ):
-    if environment_name.upper().startswith("LLM_GATEWAY_"):
+    if environment_name.upper().startswith("LLM_GATEWAY_") or environment_name.upper() in {
+        "EMBEDDING_ENABLED",
+        "RERANK_ENABLED",
+    }:
         del os.environ[environment_name]
 
 os.environ["ENV"] = "test"
@@ -123,6 +126,7 @@ def _mock_settings():
     mock.llm_gateway_v2_retry_base_ms = 1_000
     mock.llm_gateway_v2_retry_max_ms = 300_000
     mock.llm_gateway_v2_claim_ttl_ms = 30_000
+    mock.llm_gateway_v2_agent_timeout_seconds = 30.0
     mock.llm_gateway_v2_poll_ms = 250
     mock.llm_gateway_v2_event_max_parallelism = 4
     mock.llm_gateway_v2_decision_max_parallelism = 4

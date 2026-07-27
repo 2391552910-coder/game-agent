@@ -176,6 +176,9 @@ class GatewayV2AgentContext(_GatewayV2AgentModel):
     state_version: int = Field(ge=0)
     lease_kind: str = Field(min_length=1, max_length=128)
     allowed_decision_actions: tuple[DecisionAction, ...]
+    parent_skill_name: str | None = Field(default=None, max_length=128)
+    allowed_skill_name: str | None = Field(default=None, max_length=128)
+    allowed_skill_names: tuple[str, ...]
     session_snapshot: Mapping[str, Any]
     available_skills: tuple[AvailableSkill, ...]
     skill_argument_hints: tuple[SkillArgumentHint, ...]
@@ -210,6 +213,9 @@ class GatewayV2AgentContext(_GatewayV2AgentModel):
             "stateVersion": self.state_version,
             "leaseKind": self.lease_kind,
             "allowedDecisionActions": list(self.allowed_decision_actions),
+            "parentSkillName": self.parent_skill_name,
+            "allowedSkillName": self.allowed_skill_name,
+            "allowedSkillNames": list(self.allowed_skill_names),
             "session": _thaw_json(self.session_snapshot),
             "availableSkills": [skill.model_dump(mode="json", by_alias=True) for skill in self.available_skills],
             "skillArgumentHints": [hint.model_dump(mode="json", by_alias=True) for hint in self.skill_argument_hints],

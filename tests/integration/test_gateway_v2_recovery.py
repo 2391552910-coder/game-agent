@@ -58,20 +58,34 @@ def _event(
     state_version: int | None = None,
 ) -> GatewayV2Event:
     resolved_type = event_type or ("session_started" if sequence == 1 else "observation_updated")
+    resolved_state_version = sequence if state_version is None else state_version
+    occurred_at_ms = 1_700_000_000_000 + generation * 100 + sequence
+    root_lease_id: str | None = None
     if resolved_type in {"session_started", "observation_updated"}:
+        root_lease_id = decision_lease_id or f"lease-{session_id}-{generation}-{sequence}"
         payload = {
+            "reason": "decision_requested",
             "lease": {
-                "decisionLeaseId": decision_lease_id or f"lease-{session_id}-{generation}-{sequence}",
-                "stateVersion": sequence if state_version is None else state_version,
+                "sessionId": session_id,
+                "controlGeneration": generation,
+                "decisionLeaseId": root_lease_id,
+                "stateVersion": resolved_state_version,
                 "leaseKind": "hosting_control",
-                "allowedDecisionActions": ["wait"],
+                "allowedActions": ["wait"],
+                "allowedSkillName": None,
+                "allowedSkillNames": [],
+                "parentSkillName": None,
+            },
+            "decisionContext": {
                 "session": {"status": "active", "generation": generation},
                 "availableSkills": [],
                 "skillArgumentHints": [],
-            }
+            },
         }
     elif resolved_type == "session_stopped":
-        payload = {"reason": stop_reason}
+        payload = {"reason": stop_reason, "stoppedAtMs": occurred_at_ms}
+    elif resolved_type == "decision_rejected":
+        payload = {"decisionId": "decision-1", "reason": "stale_state"}
     else:
         raise AssertionError(f"unsupported test event type: {resolved_type}")
     return parse_gateway_v2_event(
@@ -81,7 +95,9 @@ def _event(
             "sessionId": session_id,
             "controlGeneration": generation,
             "eventSequence": sequence,
-            "occurredAtMs": 1_700_000_000_000 + generation * 100 + sequence,
+            "stateVersion": resolved_state_version,
+            "decisionLeaseId": root_lease_id,
+            "occurredAtMs": occurred_at_ms,
             "payload": payload,
         }
     )
@@ -89,7 +105,7 @@ def _event(
 
 @pytest.fixture(scope="module", autouse=True)
 def _upgrade_schema(migration_config) -> None:
-    command.upgrade(migration_config, "009")
+    command.upgrade(migration_config, "head")
 
 
 @pytest.fixture
@@ -226,13 +242,30 @@ def _skill_event(
     sequence: int,
     event_type: str,
     terminal: dict[str, object] | None = None,
+    decision_id: str = "decision-1",
+    skill_name: str = "jump",
+    skill_call_id: str = "call-1",
 ) -> GatewayV2Event:
+    occurred_at_ms = 1_700_000_001_000 + sequence
     payload: dict[str, object] = {
-        "decisionId": "decision-1",
-        "skillCallId": "call-1",
+        "decisionId": decision_id,
+        "skillName": skill_name,
+        "skillCallId": skill_call_id,
     }
     if event_type == "skill_finished":
-        payload["terminal"] = terminal or {"status": "success"}
+        terminal_payload = terminal or {"status": "success"}
+        payload.update(
+            {
+                "status": terminal_payload["status"],
+                "reason": terminal_payload.get("reason", "ok"),
+                "failureCategory": terminal_payload.get("failureCategory"),
+                "retryable": terminal_payload.get("retryable", False),
+                "startedAtMs": occurred_at_ms - 1,
+                "finishedAtMs": occurred_at_ms,
+            }
+        )
+    else:
+        payload["startedAtMs"] = occurred_at_ms
     return parse_gateway_v2_event(
         {
             "eventId": event_id,
@@ -240,7 +273,9 @@ def _skill_event(
             "sessionId": "session-1",
             "controlGeneration": 1,
             "eventSequence": sequence,
-            "occurredAtMs": 1_700_000_001_000 + sequence,
+            "stateVersion": sequence,
+            "decisionLeaseId": None,
+            "occurredAtMs": occurred_at_ms,
             "payload": payload,
         }
     )
@@ -256,10 +291,11 @@ async def _seed_decision(
     action: str = "call_skill",
     status: str = "accepted",
     action_tracking_id: UUID | None = None,
+    skill_name: str = "jump",
 ) -> UUID:
     decision_row_id = uuid4()
     body = (
-        {"action": "call_skill", "skillName": "jump", "schemaVersion": "v1", "arguments": {}}
+        {"action": "call_skill", "skillName": skill_name, "schemaVersion": "v1", "arguments": {}}
         if action == "call_skill"
         else {"action": action}
     )
@@ -297,6 +333,116 @@ async def _seed_decision(
             },
         )
     return decision_row_id
+
+
+async def _complete_successfully(
+    inbox: InboxRepository,
+    event,
+) -> None:
+    assert await inbox.complete_event(
+        event,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+
+async def _seed_paired_skill_decisions(
+    session_factory,
+    *,
+    prefix: str,
+    parent_skill_name: str,
+    paired_skill_name: str,
+) -> InboxRepository:
+    inbox = InboxRepository(session_factory)
+    await _admit(
+        inbox,
+        _event(f"{prefix}-source-parent"),
+        _event(f"{prefix}-source-paired", sequence=2),
+    )
+    parent_source = await inbox.claim_next_event(
+        worker_id=f"{prefix}-source-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert parent_source is not None
+    await _complete_successfully(inbox, parent_source)
+    paired_source = await inbox.claim_next_event(
+        worker_id=f"{prefix}-source-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert paired_source is not None
+    await _complete_successfully(inbox, paired_source)
+    await _seed_decision(
+        session_factory,
+        cycle_id=parent_source.cycle_id,
+        source_event_id=parent_source.row_id,
+        decision_id=f"{prefix}-decision-parent",
+        decision_lease_id=f"{prefix}-lease-parent",
+        skill_name=parent_skill_name,
+    )
+    await _seed_decision(
+        session_factory,
+        cycle_id=paired_source.cycle_id,
+        source_event_id=paired_source.row_id,
+        decision_id=f"{prefix}-decision-paired",
+        decision_lease_id=f"{prefix}-lease-paired",
+        skill_name=paired_skill_name,
+    )
+    return inbox
+
+
+async def _record_paired_terminals(
+    session_factory,
+    inbox: InboxRepository,
+    *,
+    prefix: str,
+    parent_skill_name: str,
+    paired_skill_name: str,
+    parent_status: str,
+) -> None:
+    await _admit(
+        inbox,
+        _skill_event(
+            f"{prefix}-terminal-parent",
+            sequence=3,
+            event_type="skill_finished",
+            decision_id=f"{prefix}-decision-parent",
+            skill_name=parent_skill_name,
+            skill_call_id=f"{prefix}-call-parent",
+            terminal={
+                "status": parent_status,
+                "reason": "paired action took control",
+                "retryable": False,
+            },
+        ),
+        _skill_event(
+            f"{prefix}-terminal-paired",
+            sequence=4,
+            event_type="skill_finished",
+            decision_id=f"{prefix}-decision-paired",
+            skill_name=paired_skill_name,
+            skill_call_id=f"{prefix}-call-paired",
+            terminal={"status": "success", "reason": "ok", "retryable": False},
+        ),
+    )
+    terminal_repository = TerminalRepository(session_factory)
+    for expected_event_id in (
+        f"{prefix}-terminal-parent",
+        f"{prefix}-terminal-paired",
+    ):
+        claimed = await inbox.claim_next_event(
+            worker_id=f"{prefix}-terminal-worker",
+            claim_ttl_ms=30_000,
+            max_attempts=3,
+        )
+        assert claimed is not None and claimed.event_id == expected_event_id
+        assert (
+            await terminal_repository.record_skill_finished(claimed)
+        ).disposition is MutationDisposition.APPLIED
+        await _complete_successfully(inbox, claimed)
 
 
 async def test_after_ack_commit_hook_preserves_durable_batch_on_cancellation(session_factory) -> None:
@@ -1284,6 +1430,204 @@ async def test_terminal_transition_applies_tracking_effect_once(session_factory)
     assert tracking_status == "completed"
 
 
+async def test_move_to_cancelled_and_stop_move_succeeded_converge_in_separate_skill_rows(
+    session_factory,
+) -> None:
+    prefix = "movement-pair"
+    inbox = await _seed_paired_skill_decisions(
+        session_factory,
+        prefix=prefix,
+        parent_skill_name="move_to",
+        paired_skill_name="stop_move",
+    )
+    await _record_paired_terminals(
+        session_factory,
+        inbox,
+        prefix=prefix,
+        parent_skill_name="move_to",
+        paired_skill_name="stop_move",
+        parent_status="cancelled",
+    )
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT skill_call_id, skill_name, status FROM llm_gateway_skill_calls "
+                        "WHERE gateway_id=:gateway_id ORDER BY skill_call_id"
+                    ),
+                    {"gateway_id": IDENTITY.gateway_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert [dict(row) for row in rows] == [
+        {
+            "skill_call_id": f"{prefix}-call-paired",
+            "skill_name": "stop_move",
+            "status": "succeeded",
+        },
+        {
+            "skill_call_id": f"{prefix}-call-parent",
+            "skill_name": "move_to",
+            "status": "cancelled",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "parent_skill_name", "exit_skill_name", "parent_status"),
+    [
+        (
+            "balloon-timeout",
+            "hot_air_balloon_auto_schedule",
+            "hot_air_balloon_exit",
+            "timeout",
+        ),
+        (
+            "balloon-cancelled",
+            "hot_air_balloon_auto_schedule",
+            "hot_air_balloon_exit",
+            "cancelled",
+        ),
+        (
+            "helicopter-timeout",
+            "helicopter_auto_schedule",
+            "helicopter_exit",
+            "timeout",
+        ),
+        (
+            "helicopter-cancelled",
+            "helicopter_auto_schedule",
+            "helicopter_exit",
+            "cancelled",
+        ),
+    ],
+)
+async def test_vehicle_parent_terminal_and_exit_success_converge_in_separate_skill_rows(
+    session_factory,
+    prefix: str,
+    parent_skill_name: str,
+    exit_skill_name: str,
+    parent_status: str,
+) -> None:
+    inbox = await _seed_paired_skill_decisions(
+        session_factory,
+        prefix=prefix,
+        parent_skill_name=parent_skill_name,
+        paired_skill_name=exit_skill_name,
+    )
+    await _record_paired_terminals(
+        session_factory,
+        inbox,
+        prefix=prefix,
+        parent_skill_name=parent_skill_name,
+        paired_skill_name=exit_skill_name,
+        parent_status=parent_status,
+    )
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT skill_call_id, skill_name, status FROM llm_gateway_skill_calls "
+                        "WHERE gateway_id=:gateway_id ORDER BY skill_call_id"
+                    ),
+                    {"gateway_id": IDENTITY.gateway_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert [dict(row) for row in rows] == [
+        {
+            "skill_call_id": f"{prefix}-call-paired",
+            "skill_name": exit_skill_name,
+            "status": "succeeded",
+        },
+        {
+            "skill_call_id": f"{prefix}-call-parent",
+            "skill_name": parent_skill_name,
+            "status": parent_status,
+        },
+    ]
+
+
+async def test_pending_terminal_is_reclaimed_after_repository_restart_without_duplicate_call(
+    session_factory,
+) -> None:
+    first_inbox = InboxRepository(session_factory)
+    await _admit(first_inbox, _event("restart-source"))
+    source = await first_inbox.claim_next_event(
+        worker_id="restart-source-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert source is not None
+    await _seed_decision(
+        session_factory,
+        cycle_id=source.cycle_id,
+        source_event_id=source.row_id,
+        decision_id="restart-decision",
+        decision_lease_id="restart-lease",
+        skill_name="jump",
+    )
+    await _complete_successfully(first_inbox, source)
+    await _admit(
+        first_inbox,
+        _skill_event(
+            "restart-terminal",
+            sequence=2,
+            event_type="skill_finished",
+            decision_id="restart-decision",
+            skill_name="jump",
+            skill_call_id="restart-call",
+        ),
+    )
+    abandoned = await first_inbox.claim_next_event(
+        worker_id="worker-before-restart",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert abandoned is not None
+    await _expire_claim(session_factory, abandoned.event_id)
+
+    restarted_inbox = InboxRepository(session_factory)
+    reclaimed = await restarted_inbox.claim_next_event(
+        worker_id="worker-after-restart",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert reclaimed is not None
+    assert reclaimed.row_id == abandoned.row_id
+    assert reclaimed.claim_token != abandoned.claim_token
+    assert (
+        await TerminalRepository(session_factory).record_skill_finished(reclaimed)
+    ).disposition is MutationDisposition.APPLIED
+    await _complete_successfully(restarted_inbox, reclaimed)
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT skill_call_id, status FROM llm_gateway_skill_calls "
+                        "WHERE gateway_id=:gateway_id"
+                    ),
+                    {"gateway_id": IDENTITY.gateway_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert [dict(row) for row in rows] == [
+        {"skill_call_id": "restart-call", "status": "succeeded"}
+    ]
+
+
 async def test_session_stop_converges_event_outbox_and_stop_call_atomically(session_factory) -> None:
     inbox = InboxRepository(session_factory)
     await _admit(inbox, _event("stop-source", generation=1))
@@ -1633,6 +1977,217 @@ async def test_stale_generation_is_superseded_without_returning_it_to_processor(
     assert current_cycle["latest_decision_context"] == {"marker": "new"}
 
 
+async def test_old_generation_skill_terminal_recovers_after_new_generation_is_active(
+    session_factory,
+) -> None:
+    inbox = InboxRepository(session_factory)
+    await _admit(inbox, _event("historical-g1-start", generation=1))
+    g1 = await inbox.claim_next_event(
+        worker_id="historical-g1-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert g1 is not None
+    assert await inbox.complete_event(
+        g1,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    await _seed_decision(
+        session_factory,
+        cycle_id=g1.cycle_id,
+        source_event_id=g1.row_id,
+    )
+
+    await _admit(inbox, _event("historical-g2-start", generation=2))
+    g2 = await inbox.claim_next_event(
+        worker_id="historical-g2-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert g2 is not None
+    assert await inbox.complete_event(
+        g2,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    await _admit(
+        inbox,
+        _skill_event(
+            "historical-skill-started",
+            sequence=2,
+            event_type="skill_started",
+        ),
+        _skill_event(
+            "historical-skill-finished",
+            sequence=3,
+            event_type="skill_finished",
+        ),
+    )
+    terminal_repository = TerminalRepository(session_factory)
+
+    started = await inbox.claim_next_event(
+        worker_id="historical-terminal-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert started is not None and started.historical_recovery
+    assert await inbox.renew_event_claim(started, claim_ttl_ms=30_000)
+    assert (
+        await terminal_repository.record_skill_started(started)
+    ).disposition is MutationDisposition.APPLIED
+    assert await inbox.complete_event(
+        started,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    finished = await inbox.claim_next_event(
+        worker_id="historical-terminal-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert finished is not None and finished.historical_recovery
+    assert (
+        await terminal_repository.record_skill_finished(finished)
+    ).disposition is MutationDisposition.APPLIED
+    assert await inbox.complete_event(
+        finished,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    async with session_factory() as session:
+        skill_status = await session.scalar(
+            sa.text(
+                "SELECT status FROM llm_gateway_skill_calls "
+                "WHERE gateway_id=:gateway_id AND skill_call_id='call-1'"
+            ),
+            {"gateway_id": IDENTITY.gateway_id},
+        )
+        decision_count = await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM llm_gateway_decisions "
+                "WHERE gateway_id=:gateway_id"
+            ),
+            {"gateway_id": IDENTITY.gateway_id},
+        )
+
+    assert skill_status == "succeeded"
+    assert decision_count == 1
+    assert (await _runtime(session_factory))["current_generation"] == 2
+    assert (await _cycle(session_factory, 2))["status"] == "active"
+
+
+async def test_old_generation_decision_rejected_recovers_after_new_generation_is_active(
+    session_factory,
+) -> None:
+    inbox = InboxRepository(session_factory)
+    await _admit(inbox, _event("historical-rejection-g1-start", generation=1))
+    g1 = await inbox.claim_next_event(
+        worker_id="historical-rejection-g1-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert g1 is not None
+    assert await inbox.complete_event(
+        g1,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    await _seed_decision(
+        session_factory,
+        cycle_id=g1.cycle_id,
+        source_event_id=g1.row_id,
+        status="planned",
+    )
+
+    await _admit(inbox, _event("historical-rejection-g2-start", generation=2))
+    g2 = await inbox.claim_next_event(
+        worker_id="historical-rejection-g2-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert g2 is not None
+    assert await inbox.complete_event(
+        g2,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    await _admit(
+        inbox,
+        _event(
+            "historical-decision-rejected",
+            generation=1,
+            sequence=2,
+            event_type="decision_rejected",
+        ),
+    )
+    rejected = await inbox.claim_next_event(
+        worker_id="historical-rejection-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert rejected is not None and rejected.historical_recovery
+    outbox = OutboxRepository(session_factory)
+    assert (
+        await outbox.merge_decision_rejected(rejected)
+    ).disposition is MutationDisposition.APPLIED
+    assert await inbox.complete_event(
+        rejected,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    async with session_factory() as session:
+        decision = (
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT status, response_status, response_reason "
+                        "FROM llm_gateway_decisions "
+                        "WHERE gateway_id=:gateway_id AND decision_id='decision-1'"
+                    ),
+                    {"gateway_id": IDENTITY.gateway_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+        decision_count = await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM llm_gateway_decisions "
+                "WHERE gateway_id=:gateway_id"
+            ),
+            {"gateway_id": IDENTITY.gateway_id},
+        )
+
+    assert dict(decision) == {
+        "status": "rejected",
+        "response_status": "rejected",
+        "response_reason": "stale_state",
+    }
+    assert decision_count == 1
+    assert (await _runtime(session_factory))["current_generation"] == 2
+    assert (await _cycle(session_factory, 2))["status"] == "active"
+
+
 async def test_old_generation_stop_cannot_stop_current_generation(session_factory) -> None:
     repository = InboxRepository(session_factory)
     await _admit(repository, _event("g1-start", generation=1))
@@ -1858,9 +2413,13 @@ async def test_retry_backoff_does_not_increment_attempt_until_reclaim(session_fa
     assert second_row["next_attempt_at"] >= second_before + timedelta(seconds=1.4)
 
 
-async def test_retry_at_attempt_limit_dead_letters_and_blocks_partition(session_factory) -> None:
+async def test_agent_dead_letter_does_not_block_later_terminal_convergence(session_factory) -> None:
     repository = InboxRepository(session_factory)
-    await _admit(repository, _event("event-1"), _event("event-2", sequence=2))
+    await _admit(
+        repository,
+        _event("event-1"),
+        _skill_event("event-2", sequence=2, event_type="skill_finished"),
+    )
     claim = await repository.claim_next_event(worker_id="worker-1", claim_ttl_ms=30_000, max_attempts=1)
     assert claim is not None
     assert await repository.complete_event(
@@ -1873,8 +2432,216 @@ async def test_retry_at_attempt_limit_dead_letters_and_blocks_partition(session_
 
     assert (await _row(session_factory, "event-1"))["status"] == "dead_letter"
     assert await repository.count_dead_letters() == 1
-    assert await repository.claim_next_event(worker_id="worker-2", claim_ttl_ms=30_000, max_attempts=1) is None
-    assert (await _row(session_factory, "event-2"))["status"] == "pending"
+    terminal = await repository.claim_next_event(
+        worker_id="worker-2",
+        claim_ttl_ms=30_000,
+        max_attempts=1,
+    )
+    assert terminal is not None
+    assert terminal.event_id == "event-2"
+
+
+async def test_terminal_can_be_claimed_while_same_cycle_skill_event_is_processing(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await _admit(
+        repository,
+        _event("concurrent-start"),
+        _skill_event("concurrent-started", sequence=2, event_type="skill_started"),
+        _skill_event("concurrent-finished", sequence=3, event_type="skill_finished"),
+    )
+    start = await repository.claim_next_event(
+        worker_id="concurrent-start-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert start is not None
+    await _complete_successfully(repository, start)
+
+    started = await repository.claim_next_event(
+        worker_id="concurrent-skill-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert started is not None and started.event_id == "concurrent-started"
+    finished = await repository.claim_next_event(
+        worker_id="concurrent-terminal-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+
+    assert finished is not None
+    assert finished.event_id == "concurrent-finished"
+
+
+async def test_out_of_order_terminal_completion_advances_only_after_sequence_head_succeeds(
+    session_factory,
+) -> None:
+    repository = InboxRepository(session_factory)
+    await _admit(
+        repository,
+        _event("sequence-start"),
+        _event("sequence-observation", sequence=2),
+        _event("sequence-rejected", sequence=3, event_type="decision_rejected"),
+    )
+    started = await repository.claim_next_event(
+        worker_id="sequence-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert started is not None
+    assert await repository.complete_event(
+        started,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    observation = await repository.claim_next_event(
+        worker_id="sequence-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert observation is not None and observation.event_id == "sequence-observation"
+    assert await repository.complete_event(
+        observation,
+        EventProcessResult("retryable_failed", error_stage="agent", error_category="timeout"),
+        max_attempts=3,
+        retry_base_ms=30_000,
+        retry_max_ms=30_000,
+    )
+
+    rejected = await repository.claim_next_event(
+        worker_id="terminal-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert rejected is not None and rejected.event_id == "sequence-rejected"
+    assert await repository.complete_event(
+        rejected,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    assert (await _cycle(session_factory, 1))["next_event_sequence"] == 2
+
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            sa.text(
+                "UPDATE llm_gateway_events SET next_attempt_at=clock_timestamp() - interval '1 second' "
+                "WHERE gateway_id=:gateway_id AND event_id='sequence-observation'"
+            ),
+            {"gateway_id": IDENTITY.gateway_id},
+        )
+    observation_retry = await repository.claim_next_event(
+        worker_id="sequence-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert observation_retry is not None and observation_retry.event_id == "sequence-observation"
+    assert await repository.complete_event(
+        observation_retry,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    assert (await _cycle(session_factory, 1))["next_event_sequence"] == 4
+
+
+async def test_terminal_claim_survives_generation_activation(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await _admit(repository, _event("claimed-g1-start"))
+    generation_one = await repository.claim_next_event(
+        worker_id="generation-one-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert generation_one is not None
+    assert await repository.complete_event(
+        generation_one,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    await _admit(
+        repository,
+        _skill_event("claimed-g1-terminal", sequence=2, event_type="skill_finished"),
+    )
+    terminal = await repository.claim_next_event(
+        worker_id="terminal-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert terminal is not None
+
+    await _admit(repository, _event("claimed-g2-start", generation=2))
+    generation_two = await repository.claim_next_event(
+        worker_id="generation-two-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert generation_two is not None and generation_two.control_generation == 2
+    assert await repository.complete_event(
+        generation_two,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    assert await repository.renew_event_claim(terminal, claim_ttl_ms=30_000)
+    assert await repository.complete_event(
+        terminal,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    assert (await _row(session_factory, terminal.event_id))["status"] == "succeeded"
+    assert (await _runtime(session_factory))["current_generation"] == 2
+
+
+@pytest.mark.parametrize("cycle_status", ["manual", "stopped", "superseded"])
+async def test_terminal_convergence_is_claimable_from_closed_cycle(
+    session_factory,
+    cycle_status: str,
+) -> None:
+    repository = InboxRepository(session_factory)
+    await _admit(repository, _event(f"{cycle_status}-start"))
+    started = await repository.claim_next_event(
+        worker_id="cycle-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert started is not None
+    assert await repository.complete_event(
+        started,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            sa.text("UPDATE llm_gateway_control_cycles SET status=:status WHERE id=:cycle_id"),
+            {"status": cycle_status, "cycle_id": started.cycle_id},
+        )
+    await _admit(
+        repository,
+        _skill_event(f"{cycle_status}-terminal", sequence=2, event_type="skill_finished"),
+    )
+
+    terminal = await repository.claim_next_event(
+        worker_id="terminal-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert terminal is not None
+    assert terminal.event_id == f"{cycle_status}-terminal"
 
 
 async def test_manual_result_blocks_partition_without_retry(session_factory) -> None:

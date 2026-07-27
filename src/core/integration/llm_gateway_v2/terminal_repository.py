@@ -113,7 +113,7 @@ class _SessionFactory(Protocol):
 
 _LOCK_DECISION = sa.text(
     """
-    SELECT id, decision_id, action, request_body_json, action_tracking_id
+    SELECT id, decision_id, session_id, action, request_body_json, action_tracking_id
     FROM llm_gateway_decisions
     WHERE gateway_id = :gateway_id AND decision_id = :decision_id
     FOR UPDATE
@@ -123,7 +123,8 @@ _LOCK_DECISION = sa.text(
 _LOCK_SKILL_CALL = sa.text(
     """
     SELECT
-        id, decision_row_id, decision_id, status, failure_category,
+        id, decision_row_id, decision_id, session_id, skill_name,
+        status, failure_category,
         reason, retryable, terminal_event_id, effect_status
     FROM llm_gateway_skill_calls
     WHERE gateway_id = :gateway_id AND skill_call_id = :skill_call_id
@@ -201,19 +202,6 @@ _MARK_TERMINAL_CONFLICT = sa.text(
     """
 )
 
-_MARK_CALL_CONFLICT = sa.text(
-    """
-    UPDATE llm_gateway_skill_calls
-    SET status = 'manual',
-        failure_category = 'protocol_failed',
-        reason = 'skill_call_identity_conflict',
-        retryable = false,
-        completed_at = COALESCE(completed_at, clock_timestamp()),
-        updated_at = clock_timestamp()
-    WHERE id = :row_id
-    """
-)
-
 _MARK_EFFECT_APPLIED = sa.text(
     """
     UPDATE llm_gateway_skill_calls
@@ -247,6 +235,11 @@ class TerminalRepository:
             skill_name = self._skill_name(decision)
             if skill_name is None:
                 return MutationResult(MutationDisposition.CONFLICT, "decision_action_mismatch")
+            if (
+                str(decision["session_id"]) != event.session_id
+                or event.payload.skill_name != skill_name
+            ):
+                return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
             call = await self._lock_call(session, claimed.gateway_id, event.payload.skill_call_id)
             if call is None:
                 await session.execute(
@@ -262,8 +255,12 @@ class TerminalRepository:
                     },
                 )
                 return MutationResult(MutationDisposition.APPLIED)
-            if not self._call_matches_decision(call, decision):
-                await session.execute(_MARK_CALL_CONFLICT, {"row_id": call["id"]})
+            if not self._call_matches_identity(
+                call,
+                decision,
+                session_id=event.session_id,
+                skill_name=event.payload.skill_name,
+            ):
                 return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
             if str(call["status"]) == "pending":
                 await session.execute(_MARK_STARTED, {"row_id": call["id"]})
@@ -290,9 +287,18 @@ class TerminalRepository:
             skill_name = self._skill_name(decision)
             if skill_name is None:
                 return MutationResult(MutationDisposition.CONFLICT, "decision_action_mismatch")
+            if (
+                str(decision["session_id"]) != event.session_id
+                or event.payload.skill_name != skill_name
+            ):
+                return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
             call = await self._lock_call(session, claimed.gateway_id, event.payload.skill_call_id)
-            if call is not None and not self._call_matches_decision(call, decision):
-                await session.execute(_MARK_CALL_CONFLICT, {"row_id": call["id"]})
+            if call is not None and not self._call_matches_identity(
+                call,
+                decision,
+                session_id=event.session_id,
+                skill_name=event.payload.skill_name,
+            ):
                 return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
 
             action_tracking_id = self._optional_uuid(decision["action_tracking_id"])
@@ -402,9 +408,18 @@ class TerminalRepository:
         return skill_name if isinstance(skill_name, str) and skill_name else None
 
     @staticmethod
-    def _call_matches_decision(call: RowMapping, decision: RowMapping) -> bool:
-        return str(call["decision_row_id"]) == str(decision["id"]) and str(call["decision_id"]) == str(
-            decision["decision_id"]
+    def _call_matches_identity(
+        call: Mapping[str, object],
+        decision: Mapping[str, object],
+        *,
+        session_id: str,
+        skill_name: str,
+    ) -> bool:
+        return (
+            str(call["decision_row_id"]) == str(decision["id"])
+            and str(call["decision_id"]) == str(decision["decision_id"])
+            and str(call["session_id"]) == session_id
+            and str(call["skill_name"]) == skill_name
         )
 
     @staticmethod

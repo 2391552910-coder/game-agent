@@ -137,6 +137,8 @@ def _run_conftest_environment(tmp_path: Path) -> subprocess.CompletedProcess[str
 def _remove_inherited_v2_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _V2_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("EMBEDDING_ENABLED", raising=False)
+    monkeypatch.delenv("RERANK_ENABLED", raising=False)
 
 
 def test_global_test_environment_uses_fixed_safe_placeholders() -> None:
@@ -204,6 +206,7 @@ def test_v2_defaults_and_v1_defaults_are_independent() -> None:
     assert config.llm_gateway_v2_retry_base_ms == 1_000
     assert config.llm_gateway_v2_retry_max_ms == 300_000
     assert config.llm_gateway_v2_claim_ttl_ms == 30_000
+    assert config.llm_gateway_v2_agent_timeout_seconds == 30.0
     assert config.llm_gateway_v2_poll_ms == 250
     assert config.llm_gateway_v2_shutdown_grace_seconds == 10
     assert config.llm_gateway_v2_readiness_timeout_seconds == 3
@@ -278,6 +281,7 @@ def test_v2_enabled_rejects_invalid_identity_configuration(
         "llm_gateway_v2_retry_base_ms",
         "llm_gateway_v2_retry_max_ms",
         "llm_gateway_v2_claim_ttl_ms",
+        "llm_gateway_v2_agent_timeout_seconds",
         "llm_gateway_v2_poll_ms",
         "llm_gateway_v2_shutdown_grace_seconds",
         "llm_gateway_v2_readiness_timeout_seconds",
@@ -309,6 +313,7 @@ def test_v2_retry_base_must_not_exceed_retry_max() -> None:
         ("llm_gateway_v2_retry_base_ms", 3_600_001),
         ("llm_gateway_v2_retry_max_ms", 3_600_001),
         ("llm_gateway_v2_claim_ttl_ms", 3_600_001),
+        ("llm_gateway_v2_agent_timeout_seconds", 301),
         ("llm_gateway_v2_poll_ms", 60_001),
         ("llm_gateway_v2_shutdown_grace_seconds", 301),
         ("llm_gateway_v2_readiness_timeout_seconds", 61),

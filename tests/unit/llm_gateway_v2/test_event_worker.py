@@ -32,19 +32,32 @@ def _claimed(
     event_type = "session_started" if sequence == 1 else "session_stopped"
     payload: dict[str, Any]
     if sequence == 1:
+        decision_lease_id = f"lease-{event_id}"
         payload = {
+            "reason": "decision_requested",
             "lease": {
-                "decisionLeaseId": f"lease-{event_id}",
+                "sessionId": session_id,
+                "controlGeneration": generation,
+                "decisionLeaseId": decision_lease_id,
                 "stateVersion": 1,
                 "leaseKind": "hosting_control",
-                "allowedDecisionActions": ["wait"],
+                "allowedActions": ["wait"],
+                "allowedSkillName": None,
+                "allowedSkillNames": [],
+                "parentSkillName": None,
+            },
+            "decisionContext": {
                 "session": {"status": "active"},
                 "availableSkills": [],
                 "skillArgumentHints": [],
-            }
+            },
         }
     else:
-        payload = {"reason": "stopped"}
+        decision_lease_id = None
+        payload = {
+            "reason": "stopped",
+            "stoppedAtMs": 1_700_000_000_000 + sequence,
+        }
     event = parse_gateway_v2_event(
         {
             "eventId": event_id,
@@ -52,6 +65,8 @@ def _claimed(
             "sessionId": session_id,
             "controlGeneration": generation,
             "eventSequence": sequence,
+            "stateVersion": 1,
+            "decisionLeaseId": decision_lease_id,
             "occurredAtMs": 1_700_000_000_000 + sequence,
             "payload": payload,
         }
@@ -223,6 +238,16 @@ def test_generation_transition_matrix(
     expected: GenerationDisposition,
 ) -> None:
     assert classify_generation(current, incoming, event_type, sequence) is expected
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["skill_started", "skill_finished", "decision_rejected"],
+)
+def test_old_generation_terminal_fact_events_enter_historical_recovery(
+    event_type: str,
+) -> None:
+    assert classify_generation(2, 1, event_type, 3).value == "historical_recovery"
 
 
 async def test_processor_crash_leaves_claim_for_expiry_recovery() -> None:

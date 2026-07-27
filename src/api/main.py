@@ -106,7 +106,9 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
     outbox_repository = OutboxRepository()
     terminal_repository = TerminalRepository()
     decision_planner = GatewayV2DecisionPlanner(
-        decision_service=GatewayV2DecisionService(),
+        decision_service=GatewayV2DecisionService(
+            timeout_seconds=settings.llm_gateway_v2_agent_timeout_seconds,
+        ),
         repository=outbox_repository,
     )
     event_dispatcher = GatewayV2EventDispatcher(

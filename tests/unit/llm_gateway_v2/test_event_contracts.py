@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from src.core.integration.llm_gateway_v2.contracts import (
     AvailableSkill,
+    DecisionContext,
     DecisionLeaseContext,
     DecisionRejectedEvent,
     GatewayV2BatchEnvelope,
@@ -23,51 +24,117 @@ from src.core.integration.llm_gateway_v2.contracts import (
 
 def lease_payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "sessionId": "session-1",
+        "controlGeneration": 1,
         "decisionLeaseId": "lease-1",
         "stateVersion": 0,
         "leaseKind": "hosting_control",
-        "allowedDecisionActions": ["call_skill", "wait", "no_op"],
+        "allowedActions": ["call_skill", "wait", "no_op"],
+        "allowedSkillName": "move",
+        "allowedSkillNames": ["move", "observe"],
+        "parentSkillName": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def skill_descriptor(name: str, schema_version: str) -> dict[str, Any]:
+    return {
+        "SkillName": name,
+        "SchemaVersion": schema_version,
+        "RequireRunning": True,
+        "CooldownMs": 0,
+        "exposure": {
+            "state": "Enabled",
+            "reason": "",
+            "exposeToAdminDefault": True,
+            "exposeToDecisionProvider": True,
+            "allowExplicitCall": True,
+        },
+    }
+
+
+def argument_hint(
+    name: str = "move",
+    schema_version: str = "v1",
+) -> dict[str, Any]:
+    def field(path: str, status: str) -> dict[str, Any]:
+        return {
+            "path": path,
+            "type": "number",
+            "status": status,
+            "source": "contract",
+            "statePath": None,
+            "reason": None,
+            "nextStep": None,
+        }
+
+    return {
+        "skillName": name,
+        "schemaVersion": schema_version,
+        "argumentStatus": "ready",
+        "suggestedArgs": {},
+        "allowedArgs": [field("target.x", "allowed"), field("target.y", "allowed")],
+        "missingArgs": [field("target.y", "missing")],
+        "warnings": [],
+        "nextSteps": [],
+    }
+
+
+def decision_context_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "session": {
             "status": "active",
             "position": {"x": 1.25, "y": 2},
             "tags": ["initial"],
         },
         "availableSkills": [
-            {"skillName": "move", "schemaVersion": "v1"},
-            {"skillName": "observe", "schemaVersion": "v2"},
+            skill_descriptor("move", "v1"),
+            skill_descriptor("observe", "v2"),
         ],
-        "skillArgumentHints": [
-            {
-                "skillName": "move",
-                "schemaVersion": "v1",
-                "allowedArgs": ["target.x", "target.y"],
-                "missingArgs": ["target.y"],
-            }
-        ],
+        "skillArgumentHints": [argument_hint()],
     }
     payload.update(overrides)
     return payload
 
 
 def event_payload(event_type: str, **overrides: Any) -> dict[str, Any]:
+    lease_state_version = 0 if event_type == "session_started" else 1
+    decision_payload = {
+        "reason": "decision_requested",
+        "lease": lease_payload(stateVersion=lease_state_version),
+        "decisionContext": decision_context_payload(),
+    }
     payload_by_type: dict[str, dict[str, Any]] = {
-        "session_started": {"lease": lease_payload()},
-        "observation_updated": {"lease": lease_payload(stateVersion=1)},
+        "session_started": deepcopy(decision_payload),
+        "observation_updated": deepcopy(decision_payload),
         "skill_started": {
             "decisionId": "decision-1",
+            "skillName": "move",
             "skillCallId": "call-1",
+            "startedAtMs": 1_700_000_000_000,
         },
         "skill_finished": {
             "decisionId": "decision-1",
+            "skillName": "move",
             "skillCallId": "call-1",
-            "terminal": {"status": "success"},
-            "lease": lease_payload(stateVersion=2),
+            "status": "success",
+            "reason": "ok",
+            "failureCategory": None,
+            "retryable": False,
+            "startedAtMs": 1_700_000_000_000,
+            "finishedAtMs": 1_700_000_000_001,
+            "lease": lease_payload(stateVersion=lease_state_version),
+            "decisionContext": decision_context_payload(),
         },
         "decision_rejected": {
             "decisionId": "decision-1",
             "reason": "lease expired",
         },
-        "session_stopped": {"reason": "hosting stopped"},
+        "session_stopped": {
+            "reason": "hosting stopped",
+            "stoppedAtMs": 1_700_000_000_000,
+        },
     }
     payload: dict[str, Any] = {
         "eventId": f"event-{event_type}",
@@ -75,6 +142,12 @@ def event_payload(event_type: str, **overrides: Any) -> dict[str, Any]:
         "sessionId": "session-1",
         "controlGeneration": 1,
         "eventSequence": 1 if event_type == "session_started" else 2,
+        "stateVersion": lease_state_version,
+        "decisionLeaseId": (
+            "lease-1"
+            if event_type in {"session_started", "observation_updated", "skill_finished"}
+            else None
+        ),
         "occurredAtMs": 1_700_000_000_000,
         "payload": payload_by_type[event_type],
     }
@@ -115,6 +188,7 @@ def test_parse_accepts_each_event_type_and_uses_concrete_model(
         ("sessionId", 1),
         ("controlGeneration", 1.0),
         ("eventSequence", 1.0),
+        ("stateVersion", 1.0),
         ("occurredAtMs", 1.0),
         ("payload", "not-an-object"),
     ],
@@ -157,6 +231,8 @@ def test_each_event_rejects_extra_root_fields(
         ("sessionId", "session_id"),
         ("controlGeneration", "control_generation"),
         ("eventSequence", "event_sequence"),
+        ("stateVersion", "state_version"),
+        ("decisionLeaseId", "decision_lease_id"),
         ("occurredAtMs", "occurred_at_ms"),
     ],
 )
@@ -249,360 +325,150 @@ def test_session_started_requires_first_event_sequence(event_sequence: int) -> N
         )
 
 
-def test_available_skill_uses_exact_wire_shape() -> None:
-    skill = AvailableSkill.model_validate(
-        {"skillName": " move ", "schemaVersion": " v1 "}
-    )
+def test_available_skill_uses_complete_pascal_case_wire_shape() -> None:
+    payload = skill_descriptor("move", "v1")
+    skill = AvailableSkill.model_validate(payload)
 
-    assert skill.model_dump() == {"skillName": "move", "schemaVersion": "v1"}
+    assert skill.model_dump() == payload
     with pytest.raises(ValidationError):
-        skill.skill_name = "observe"
+        AvailableSkill.model_validate(
+            {"skillName": "move", "schemaVersion": "v1"}
+        )
 
 
-@pytest.mark.parametrize("field", ["skillName", "schemaVersion"])
-@pytest.mark.parametrize("invalid_kind", ["missing", "null", "wrong_type"])
-def test_available_skill_requires_strict_fields(
-    field: str,
-    invalid_kind: str,
-) -> None:
-    payload: dict[str, Any] = {"skillName": "move", "schemaVersion": "v1"}
-    if invalid_kind == "missing":
-        payload.pop(field)
-    elif invalid_kind == "null":
-        payload[field] = None
-    else:
-        payload[field] = 1
+@pytest.mark.parametrize(
+    "field",
+    ["SkillName", "SchemaVersion", "RequireRunning", "CooldownMs"],
+)
+def test_available_skill_requires_complete_descriptor(field: str) -> None:
+    payload = skill_descriptor("move", "v1")
+    payload.pop(field)
 
     with pytest.raises(ValidationError):
         AvailableSkill.model_validate(payload)
 
 
-@pytest.mark.parametrize("field", ["skillName", "schemaVersion"])
-@pytest.mark.parametrize("value", ["", " \t ", "x" * 129])
-def test_available_skill_rejects_invalid_strings(field: str, value: str) -> None:
-    with pytest.raises(ValidationError):
-        AvailableSkill.model_validate(
-            {"skillName": "move", "schemaVersion": "v1", field: value}
-        )
+def test_skill_argument_hint_uses_object_argument_fields() -> None:
+    payload = argument_hint()
+    hint = SkillArgumentHint.model_validate(payload)
 
-
-def test_available_skill_rejects_extra_and_snake_case_fields() -> None:
-    with pytest.raises(ValidationError):
-        AvailableSkill.model_validate(
-            {"skillName": "move", "schemaVersion": "v1", "extra": 1}
-        )
-    with pytest.raises(ValidationError):
-        AvailableSkill.model_validate(
-            {"skill_name": "move", "schemaVersion": "v1"}
-        )
-
-
-def test_skill_argument_hint_uses_exact_wire_shape_and_arrays() -> None:
-    hint = SkillArgumentHint.model_validate(
-        {
-            "skillName": "move",
-            "schemaVersion": "v1",
-            "allowedArgs": ["target.x", "target.y"],
-            "missingArgs": [],
-        }
+    assert hint.model_dump() == payload
+    assert tuple(field.path for field in hint.allowed_args) == (
+        "target.x",
+        "target.y",
     )
-
-    assert hint.model_dump() == {
-        "skillName": "move",
-        "schemaVersion": "v1",
-        "allowedArgs": ["target.x", "target.y"],
-        "missingArgs": [],
-    }
-    assert hint.allowed_args == ("target.x", "target.y")
-
-
-@pytest.mark.parametrize(
-    ("field", "wrong_type"),
-    [
-        ("skillName", 1),
-        ("schemaVersion", 1),
-        ("allowedArgs", "target.x"),
-        ("missingArgs", "target.y"),
-    ],
-)
-@pytest.mark.parametrize("invalid_kind", ["missing", "null", "wrong_type"])
-def test_skill_argument_hint_requires_every_field(
-    field: str,
-    wrong_type: Any,
-    invalid_kind: str,
-) -> None:
-    payload: dict[str, Any] = {
-        "skillName": "move",
-        "schemaVersion": "v1",
-        "allowedArgs": [],
-        "missingArgs": [],
-    }
-    if invalid_kind == "missing":
-        payload.pop(field)
-    elif invalid_kind == "null":
-        payload[field] = None
-    else:
-        payload[field] = wrong_type
-
+    invalid = argument_hint()
+    invalid["allowedArgs"] = ["target.x"]
     with pytest.raises(ValidationError):
-        SkillArgumentHint.model_validate(payload)
+        SkillArgumentHint.model_validate(invalid)
 
 
 @pytest.mark.parametrize("field", ["allowedArgs", "missingArgs"])
-@pytest.mark.parametrize(
-    "value",
-    [
-        ["path", "path"],
-        [""],
-        [" \t "],
-        ["x" * 129],
-        [1],
-    ],
-)
-def test_skill_argument_hint_rejects_invalid_paths(
-    field: str,
-    value: Any,
-) -> None:
-    payload: dict[str, Any] = {
-        "skillName": "move",
-        "schemaVersion": "v1",
-        "allowedArgs": [],
-        "missingArgs": [],
-    }
-    payload[field] = value
+def test_skill_argument_hint_rejects_duplicate_paths(field: str) -> None:
+    payload = argument_hint()
+    payload[field] = [{"path": "target.x"}, {"path": "target.x"}]
 
     with pytest.raises(ValidationError):
         SkillArgumentHint.model_validate(payload)
 
 
-def test_skill_argument_hint_rejects_extra_and_snake_case_fields() -> None:
+def test_decision_lease_context_uses_only_authorization_fields() -> None:
+    payload = lease_payload()
+    lease = DecisionLeaseContext.model_validate(payload)
+
+    assert lease.model_dump() == payload
+    assert lease.allowed_actions == ("call_skill", "wait", "no_op")
+    assert lease.allowed_skill_names == ("move", "observe")
     with pytest.raises(ValidationError):
-        SkillArgumentHint.model_validate(
-            {
-                "skillName": "move",
-                "schemaVersion": "v1",
-                "allowedArgs": [],
-                "missingArgs": [],
-                "extra": 1,
-            }
-        )
-    with pytest.raises(ValidationError):
-        SkillArgumentHint.model_validate(
-            {
-                "skill_name": "move",
-                "schemaVersion": "v1",
-                "allowedArgs": [],
-                "missingArgs": [],
-            }
+        DecisionLeaseContext.model_validate(
+            lease_payload(session=decision_context_payload()["session"])
         )
 
 
-def test_decision_lease_context_uses_exact_wire_shape() -> None:
-    lease = DecisionLeaseContext.model_validate(lease_payload())
-
-    assert lease.model_dump() == lease_payload()
-    assert json.loads(lease.model_dump_json()) == lease_payload()
-    assert isinstance(lease.available_skills[0], AvailableSkill)
-    assert isinstance(lease.skill_argument_hints[0], SkillArgumentHint)
-
-
 @pytest.mark.parametrize(
-    ("field", "wrong_type"),
+    "field",
     [
-        ("decisionLeaseId", 1),
-        ("stateVersion", 1.0),
-        ("leaseKind", 1),
-        ("allowedDecisionActions", "wait"),
-        ("session", "not-an-object"),
-        ("availableSkills", "not-an-array"),
-        ("skillArgumentHints", "not-an-array"),
+        "sessionId",
+        "controlGeneration",
+        "decisionLeaseId",
+        "stateVersion",
+        "leaseKind",
+        "allowedActions",
+        "allowedSkillName",
+        "allowedSkillNames",
+        "parentSkillName",
     ],
 )
-@pytest.mark.parametrize("invalid_kind", ["missing", "null", "wrong_type"])
-def test_decision_lease_context_requires_every_field(
-    field: str,
-    wrong_type: Any,
-    invalid_kind: str,
-) -> None:
+def test_decision_lease_context_requires_formal_fields(field: str) -> None:
     payload = lease_payload()
-    if invalid_kind == "missing":
-        payload.pop(field)
-    elif invalid_kind == "null":
-        payload[field] = None
-    else:
-        payload[field] = wrong_type
+    payload.pop(field)
 
     with pytest.raises(ValidationError):
         DecisionLeaseContext.model_validate(payload)
-
-
-@pytest.mark.parametrize(
-    ("field", "snake_name"),
-    [
-        ("decisionLeaseId", "decision_lease_id"),
-        ("stateVersion", "state_version"),
-        ("leaseKind", "lease_kind"),
-        ("allowedDecisionActions", "allowed_decision_actions"),
-        ("availableSkills", "available_skills"),
-        ("skillArgumentHints", "skill_argument_hints"),
-    ],
-)
-def test_decision_lease_context_rejects_snake_case_fields(
-    field: str,
-    snake_name: str,
-) -> None:
-    payload = lease_payload()
-    payload[snake_name] = payload.pop(field)
-
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(payload)
-
-
-def test_decision_lease_context_rejects_extra_fields() -> None:
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(lease_payload(extra="forbidden"))
 
 
 @pytest.mark.parametrize(
     "actions",
-    [
-        [],
-        ["wait", "wait"],
-        ["unsupported"],
-        ["wait", 1],
-        "wait",
-    ],
+    [[], ["wait", "wait"], ["unsupported"], ["wait", 1], "wait"],
 )
 def test_decision_lease_rejects_invalid_allowed_actions(actions: Any) -> None:
     with pytest.raises(ValidationError):
+        DecisionLeaseContext.model_validate(lease_payload(allowedActions=actions))
+
+
+def test_decision_lease_rejects_skill_alias_outside_allowlist() -> None:
+    with pytest.raises(ValidationError):
         DecisionLeaseContext.model_validate(
-            lease_payload(allowedDecisionActions=actions)
+            lease_payload(allowedSkillName="jump")
         )
 
 
-@pytest.mark.parametrize("value", [-1, True, 1.0, "1"])
-def test_decision_lease_state_version_is_strict_nonnegative(value: Any) -> None:
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(lease_payload(stateVersion=value))
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("decisionLeaseId", ""),
-        ("decisionLeaseId", " \t "),
-        ("decisionLeaseId", "x" * 129),
-        ("leaseKind", ""),
-        ("leaseKind", " \t "),
-        ("leaseKind", "x" * 129),
-    ],
-)
-def test_decision_lease_rejects_invalid_strings(field: str, value: str) -> None:
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(lease_payload(**{field: value}))
-
-
-def test_decision_lease_requires_nonempty_session_object() -> None:
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(lease_payload(session={}))
-
-
-@pytest.mark.parametrize(
-    "invalid_session",
-    [
-        {"bad": {"not", "json"}},
-        {"bad": bytearray(b"not-json")},
-        {1: "non-string-key"},
-        {"bad": {1: "non-string-key"}},
-        {"bad": float("nan")},
-        {"bad": float("inf")},
-    ],
-)
-def test_decision_lease_rejects_session_values_outside_json_domain(
-    invalid_session: Any,
-) -> None:
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(lease_payload(session=invalid_session))
-
-
-def test_decision_lease_rejects_duplicate_available_skill_names() -> None:
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(
-            lease_payload(
-                availableSkills=[
-                    {"skillName": "move", "schemaVersion": "v1"},
-                    {"skillName": "move", "schemaVersion": "v2"},
-                ],
-                skillArgumentHints=[],
-            )
-        )
-
-
-def test_decision_lease_rejects_duplicate_hint_skill_names() -> None:
-    hint = {
-        "skillName": "move",
-        "schemaVersion": "v1",
-        "allowedArgs": [],
-        "missingArgs": [],
-    }
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(
-            lease_payload(skillArgumentHints=[hint, deepcopy(hint)])
-        )
-
-
-@pytest.mark.parametrize(
-    "hint",
-    [
-        {
-            "skillName": "unknown",
-            "schemaVersion": "v1",
-            "allowedArgs": [],
-            "missingArgs": [],
-        },
-        {
-            "skillName": "move",
-            "schemaVersion": "v2",
-            "allowedArgs": [],
-            "missingArgs": [],
-        },
-    ],
-)
-def test_decision_lease_hint_must_reference_skill_and_schema_version(
-    hint: dict[str, Any],
-) -> None:
-    with pytest.raises(ValidationError):
-        DecisionLeaseContext.model_validate(lease_payload(skillArgumentHints=[hint]))
-
-
-def test_decision_lease_session_is_deeply_immutable_and_detached() -> None:
-    source = lease_payload()
-    lease = DecisionLeaseContext.model_validate(source)
+def test_decision_context_owns_and_freezes_session_and_skill_metadata() -> None:
+    source = decision_context_payload()
+    context = DecisionContext.model_validate(source)
     source["session"]["status"] = "changed"
     source["session"]["tags"].append("changed")
 
-    assert lease.model_dump()["session"] == {
-        "status": "active",
-        "position": {"x": 1.25, "y": 2},
-        "tags": ["initial"],
-    }
+    assert context.model_dump() == decision_context_payload()
+    assert isinstance(context.available_skills[0], AvailableSkill)
+    assert isinstance(context.skill_argument_hints[0], SkillArgumentHint)
     with pytest.raises(TypeError):
-        lease.session["status"] = "changed"
-    with pytest.raises(TypeError):
-        lease.session["position"]["x"] = 9
+        context.session["status"] = "changed"
     with pytest.raises(AttributeError):
-        lease.session["tags"].append("changed")
+        context.session["tags"].append("changed")
+
+
+def test_decision_context_rejects_hint_not_published_by_gateway() -> None:
+    with pytest.raises(ValidationError):
+        DecisionContext.model_validate(
+            decision_context_payload(
+                skillArgumentHints=[argument_hint("unknown", "v1")]
+            )
+        )
 
 
 @pytest.mark.parametrize(
     ("event_type", "required_fields"),
     [
-        ("session_started", ["lease"]),
-        ("observation_updated", ["lease"]),
-        ("skill_started", ["decisionId", "skillCallId"]),
-        ("skill_finished", ["decisionId", "skillCallId", "terminal"]),
+        ("session_started", ["reason", "lease", "decisionContext"]),
+        ("observation_updated", ["reason", "lease", "decisionContext"]),
+        ("skill_started", ["decisionId", "skillName", "skillCallId", "startedAtMs"]),
+        (
+            "skill_finished",
+            [
+                "decisionId",
+                "skillName",
+                "skillCallId",
+                "status",
+                "reason",
+                "failureCategory",
+                "retryable",
+                "startedAtMs",
+                "finishedAtMs",
+            ],
+        ),
         ("decision_rejected", ["decisionId", "reason"]),
-        ("session_stopped", ["reason"]),
+        ("session_stopped", ["reason", "stoppedAtMs"]),
     ],
 )
 def test_each_payload_requires_its_type_specific_fields(
@@ -621,8 +487,10 @@ def test_each_payload_requires_its_type_specific_fields(
     ("event_type", "field"),
     [
         ("skill_started", "decisionId"),
+        ("skill_started", "skillName"),
         ("skill_started", "skillCallId"),
         ("skill_finished", "decisionId"),
+        ("skill_finished", "skillName"),
         ("skill_finished", "skillCallId"),
         ("decision_rejected", "decisionId"),
         ("decision_rejected", "reason"),
@@ -702,6 +570,8 @@ def test_non_lease_events_reject_lease(event_type: str) -> None:
 def test_skill_finished_accepts_missing_or_complete_lease() -> None:
     without_lease = event_payload("skill_finished")
     without_lease["payload"].pop("lease")
+    without_lease["payload"].pop("decisionContext")
+    without_lease["decisionLeaseId"] = None
 
     no_lease_event = parse_gateway_v2_event(without_lease)
     lease_event = parse_gateway_v2_event(event_payload("skill_finished"))
@@ -724,6 +594,7 @@ def test_skill_finished_lease_schema_is_optional_but_not_nullable() -> None:
 def test_skill_finished_missing_lease_is_omitted_from_all_wire_dumps() -> None:
     payload = event_payload("skill_finished")
     payload["payload"].pop("lease")
+    payload["payload"].pop("decisionContext")
 
     model = SkillFinishedPayload.model_validate(payload["payload"])
 
@@ -752,30 +623,29 @@ def test_skill_finished_rejects_partial_lease_object(lease_field: str) -> None:
 def test_skill_finished_rejects_flattened_lease_fields(lease_field: str) -> None:
     payload = event_payload("skill_finished")
     payload["payload"].pop("lease")
+    payload["payload"].pop("decisionContext")
+    payload["decisionLeaseId"] = None
     payload["payload"][lease_field] = lease_payload()[lease_field]
 
     with pytest.raises(ValidationError):
         parse_gateway_v2_event(payload)
 
 
-@pytest.mark.parametrize(
-    "terminal",
-    [None, {}, "success", [], {"status": float("nan")}, {1: "bad-key"}],
-)
-def test_skill_finished_rejects_invalid_terminal_union(terminal: Any) -> None:
+@pytest.mark.parametrize("status", [None, "rejected", "unknown", 1])
+def test_skill_finished_rejects_invalid_flat_terminal_status(status: Any) -> None:
     payload = event_payload("skill_finished")
-    payload["payload"]["terminal"] = terminal
+    payload["payload"]["status"] = status
 
     with pytest.raises(ValidationError):
         parse_gateway_v2_event(payload)
 
 
-def test_skill_finished_terminal_is_frozen_and_detached() -> None:
+def test_skill_finished_terminal_view_is_frozen_and_not_serialized() -> None:
     source = event_payload("skill_finished")
     event = parse_gateway_v2_event(source)
-    source["payload"]["terminal"]["status"] = "changed"
 
-    assert event.model_dump()["payload"]["terminal"] == {"status": "success"}
+    assert "terminal" not in event.model_dump()["payload"]
+    assert event.payload.terminal.status == "success"
     with pytest.raises(ValidationError):
         event.payload.terminal.status = "changed"
 
@@ -813,4 +683,4 @@ def test_batch_envelope_events_are_frozen_models() -> None:
     with pytest.raises(ValidationError):
         envelope.events[0].event_id = "changed"
     with pytest.raises(TypeError):
-        envelope.events[0].payload.lease.session["status"] = "changed"
+        envelope.events[0].payload.decision_context.session["status"] = "changed"

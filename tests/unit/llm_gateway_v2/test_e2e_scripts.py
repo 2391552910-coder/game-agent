@@ -23,6 +23,7 @@ _SIMULATION_DRIVER_PATH = (
     / "scripts"
     / "simulation_driver.py"
 )
+_SKILL_RUNNER_PATH = _SIMULATION_DRIVER_PATH.with_name("Invoke-MyAgent2SgaiHttpE2E.ps1")
 _REAL_DRIVER_PATH = _PROJECT_ROOT / "scripts" / "invoke_gateway_v2_e2e.py"
 
 
@@ -136,6 +137,54 @@ def test_v2_simulation_uses_separate_event_decision_and_control_identities(
         "control-app",
         "control-secret",
     )
+
+
+def test_e2e_skill_has_no_tracked_default_secret_and_generates_simulation_credentials() -> None:
+    source = _SKILL_RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert "robot-gateway-smoke-secret" not in source
+    assert "[string]$AppSecret = ''" in source
+    assert "function New-RunScopedSecret" in source
+    assert "E2E_EVENT_APP_SECRET" in source
+    assert "E2E_DECISION_APP_SECRET" in source
+
+
+def test_simulated_gateway_rejects_event_identity_on_decision_endpoint(
+    simulation_driver: ModuleType,
+) -> None:
+    state = simulation_driver.SimulationState(
+        contract_version=simulation_driver.V2_CONTRACT_VERSION,
+        event_app_id="event-app",
+        event_app_secret="event-secret",
+        decision_app_id="decision-app",
+        decision_app_secret="decision-secret",
+        control_app_id="control-app",
+        control_app_secret="control-secret",
+        gateway_id="sgai-v2-e2e",
+        myagent_url="http://127.0.0.1:8000",
+        run_id="swapped-identity-test",
+    )
+    server = simulation_driver.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        simulation_driver._make_handler(state),
+    )
+    thread = simulation_driver.threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, response = simulation_driver._post_json(
+            f"http://127.0.0.1:{server.server_port}",
+            simulation_driver.DECISION_PATH,
+            {},
+            state.event_app_id,
+            state.event_app_secret,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert status == 401
+    assert response["error"]["code"] == "signature_invalid"
 
 
 def test_v2_simulation_builds_the_four_event_control_cycle(

@@ -46,17 +46,26 @@ VALID_TERMINALS: list[tuple[dict[str, Any], type]] = [
 
 
 def skill_finished_event_payload(terminal: dict[str, Any]) -> dict[str, Any]:
+    status = terminal["status"]
     return {
         "eventId": "event-skill-finished",
         "eventType": "skill_finished",
         "sessionId": "session-1",
         "controlGeneration": 1,
         "eventSequence": 2,
+        "stateVersion": 2,
+        "decisionLeaseId": None,
         "occurredAtMs": 1_700_000_000_000,
         "payload": {
             "decisionId": "decision-1",
+            "skillName": "move_to",
             "skillCallId": "call-1",
-            "terminal": terminal,
+            "status": status,
+            "reason": terminal.get("reason", "ok"),
+            "failureCategory": terminal.get("failureCategory"),
+            "retryable": terminal.get("retryable", False),
+            "startedAtMs": 1_699_999_999_999,
+            "finishedAtMs": 1_700_000_000_000,
         },
     }
 
@@ -330,14 +339,11 @@ def test_skill_finished_event_parses_and_serializes_terminal_union(
 
 
 def test_skill_finished_payload_rejects_generic_terminal_object() -> None:
+    payload = skill_finished_event_payload({"status": "success"})["payload"]
+    payload["terminal"] = {"status": "success", "result": {"moved": True}}
+
     with pytest.raises(ValidationError):
-        SkillFinishedPayload.model_validate(
-            {
-                "decisionId": "decision-1",
-                "skillCallId": "call-1",
-                "terminal": {"status": "success", "result": {"moved": True}},
-            }
-        )
+        SkillFinishedPayload.model_validate(payload)
 
 
 def test_skill_terminal_json_schema_has_exact_discriminator_and_one_of() -> None:
@@ -360,15 +366,21 @@ def test_skill_terminal_json_schema_has_exact_discriminator_and_one_of() -> None
     ]
 
 
-def test_skill_finished_payload_schema_embeds_terminal_discriminator() -> None:
-    terminal_schema = SkillFinishedPayload.model_json_schema()["properties"][
-        "terminal"
-    ]
+def test_skill_finished_payload_schema_exposes_flat_terminal_fields() -> None:
+    properties = SkillFinishedPayload.model_json_schema()["properties"]
 
-    assert terminal_schema["discriminator"]["propertyName"] == "status"
-    assert terminal_schema["oneOf"] == [
-        {"$ref": "#/$defs/SkillTerminalSuccess"},
-        {"$ref": "#/$defs/SkillTerminalFailed"},
-        {"$ref": "#/$defs/SkillTerminalCancelled"},
-        {"$ref": "#/$defs/SkillTerminalTimeout"},
+    assert "terminal" not in properties
+    assert properties["status"]["enum"] == [
+        "success",
+        "failed",
+        "cancelled",
+        "timeout",
     ]
+    assert {
+        "skillName",
+        "reason",
+        "failureCategory",
+        "retryable",
+        "startedAtMs",
+        "finishedAtMs",
+    } <= properties.keys()

@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
@@ -23,25 +24,40 @@ def _event(event_id: str = "event-1", *, sequence: int = 1) -> dict:
     if sequence == 1:
         event_type = "session_started"
         payload = {
+            "reason": "decision_requested",
             "lease": {
+                "sessionId": "session-1",
+                "controlGeneration": 1,
                 "decisionLeaseId": "lease-1",
                 "stateVersion": 1,
                 "leaseKind": "hosting_control",
-                "allowedDecisionActions": ["wait"],
+                "allowedActions": ["wait"],
+                "allowedSkillName": None,
+                "allowedSkillNames": [],
+                "parentSkillName": None,
+            },
+            "decisionContext": {
                 "session": {"status": "active"},
                 "availableSkills": [],
                 "skillArgumentHints": [],
-            }
+            },
         }
+        decision_lease_id = "lease-1"
     else:
         event_type = "session_stopped"
-        payload = {"reason": "stopped"}
+        payload = {
+            "reason": "stopped",
+            "stoppedAtMs": 1_700_000_000_000 + sequence,
+        }
+        decision_lease_id = None
     return {
         "eventId": event_id,
         "eventType": event_type,
         "sessionId": "session-1",
         "controlGeneration": 1,
         "eventSequence": sequence,
+        "stateVersion": 1,
+        "decisionLeaseId": decision_lease_id,
         "occurredAtMs": 1_700_000_000_000 + sequence,
         "payload": payload,
     }
@@ -61,14 +77,20 @@ def _body(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def _headers(body: bytes, request_id: str = "request-1") -> dict[str, str]:
+def _headers(
+    body: bytes,
+    request_id: str = "request-1",
+    *,
+    app_id: str = APP_ID,
+    app_secret: str = APP_SECRET,
+) -> dict[str, str]:
     timestamp = "1700000000100"
     body_hash = hashlib.sha256(body).hexdigest()
     signing_text = "\n".join(("POST", PATH, timestamp, request_id, body_hash))
-    signature = hmac.new(APP_SECRET.encode(), signing_text.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(app_secret.encode(), signing_text.encode(), hashlib.sha256).hexdigest()
     return {
         "Content-Type": "application/json",
-        "X-AppId": APP_ID,
+        "X-AppId": app_id,
         "X-TimestampMs": timestamp,
         "X-RequestId": request_id,
         "X-Signature": signature,
@@ -115,6 +137,63 @@ async def test_valid_signed_batch_returns_exact_ack_without_tenant_api_key(clien
     assert envelope.trace_id == "trace-1"
 
 
+@pytest.mark.parametrize(
+    "agent_behavior",
+    ["timeout", "empty_output", "exception"],
+)
+@pytest.mark.asyncio
+async def test_event_ack_and_capabilities_do_not_synchronously_depend_on_agent(
+    client,
+    _mock_settings,
+    agent_behavior: str,
+) -> None:
+    from src.api.main import app
+
+    _configure(_mock_settings)
+    ack = GatewayV2BatchAck.model_validate(
+        {
+            "accepted": True,
+            "traceId": "trace-1",
+            "receivedEventIds": ["event-1"],
+            "duplicateEventIds": [],
+        }
+    )
+    readiness = SimpleNamespace(
+        snapshot=AsyncMock(return_value=SimpleNamespace(status="ready"))
+    )
+    original_readiness = app.state.readiness_service
+    if agent_behavior == "timeout":
+        decide = AsyncMock(side_effect=TimeoutError())
+    elif agent_behavior == "empty_output":
+        decide = AsyncMock(return_value={})
+    else:
+        decide = AsyncMock(side_effect=RuntimeError("provider unavailable"))
+
+    app.state.readiness_service = readiness
+    try:
+        with (
+            patch(
+                "src.api.routes.gateway_v2.accept_gateway_event_batch",
+                AsyncMock(return_value=ack),
+            ),
+            patch(
+                "src.core.integration.llm_gateway_v2.decision_service."
+                "GatewayV2DecisionService.decide",
+                decide,
+            ),
+        ):
+            event_response = await _post(client, _payload())
+            capabilities_response = await client.get("/api/gateway/v2/capabilities")
+    finally:
+        app.state.readiness_service = original_readiness
+
+    assert event_response.status_code == 200
+    assert event_response.json() == ack.model_dump()
+    assert capabilities_response.status_code == 200
+    assert capabilities_response.json()["contractVersion"] == "llm-gateway-http-v2"
+    decide.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_hmac_is_checked_before_parsing_malformed_body(client, _mock_settings) -> None:
     _configure(_mock_settings)
@@ -131,6 +210,27 @@ async def test_hmac_is_checked_before_parsing_malformed_body(client, _mock_setti
     assert response.json()["error"]["code"] == "signature_invalid"
     resolve.assert_not_called()
     accept.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_outbound_decision_identity_is_rejected_by_inbound_event_endpoint(
+    client,
+    _mock_settings,
+) -> None:
+    _configure(_mock_settings)
+    body = _body(_payload())
+    response = await client.post(
+        PATH,
+        content=body,
+        headers=_headers(
+            body,
+            app_id="myagent-decisions",
+            app_secret="myagent-decisions-secret",
+        ),
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "app_id_unknown"
 
 
 @pytest.mark.asyncio

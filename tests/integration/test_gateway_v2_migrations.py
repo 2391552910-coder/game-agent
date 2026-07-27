@@ -288,7 +288,12 @@ def _assert_cycles(database_url: URL, details: dict[str, Any]) -> None:
     )
 
 
-def _assert_events(database_url: URL, details: dict[str, Any]) -> None:
+def _assert_events(
+    database_url: URL,
+    details: dict[str, Any],
+    *,
+    processing_index: bool = True,
+) -> None:
     columns = details["columns"]
     assert set(columns) == {
         "id",
@@ -357,7 +362,16 @@ def _assert_events(database_url: URL, details: dict[str, Any]) -> None:
         ["gateway_id", "session_id", "control_generation", "event_sequence"],
     )
     _assert_index(details, "ix_llm_gateway_events_due", ["status", "next_attempt_at", "received_at"])
-    _assert_index(details, "uq_llm_gateway_events_cycle_processing", ["cycle_id"], unique=True)
+    indexes = _catalog_indexes(database_url, "llm_gateway_events")
+    if processing_index:
+        _assert_index(details, "uq_llm_gateway_events_cycle_processing", ["cycle_id"], unique=True)
+        partial_index = indexes["uq_llm_gateway_events_cycle_processing"].lower()
+        assert "create unique index" in partial_index
+        assert "where" in partial_index
+        assert "status" in partial_index
+        assert "processing" in partial_index
+    else:
+        assert "uq_llm_gateway_events_cycle_processing" not in indexes
     _assert_check_tokens(
         database_url,
         "llm_gateway_events",
@@ -389,14 +403,6 @@ def _assert_events(database_url: URL, details: dict[str, Any]) -> None:
             ),
         },
     )
-    indexes = _catalog_indexes(database_url, "llm_gateway_events")
-    partial_index = indexes["uq_llm_gateway_events_cycle_processing"].lower()
-    assert "create unique index" in partial_index
-    assert "where" in partial_index
-    assert "status" in partial_index
-    assert "processing" in partial_index
-
-
 def _assert_decisions(database_url: URL, details: dict[str, Any]) -> None:
     columns = details["columns"]
     assert set(columns) == {
@@ -579,20 +585,43 @@ def _assert_skill_calls(database_url: URL, details: dict[str, Any]) -> None:
     )
 
 
-def _assert_inbox_schema(database_url: URL) -> None:
+def _assert_inbox_schema(database_url: URL, *, processing_index: bool = True) -> None:
     snapshot = _inspect_schema(database_url)
     assert snapshot["tables"] >= INBOX_TABLES
     _assert_sessions(database_url, snapshot["details"]["llm_gateway_sessions"])
     _assert_cycles(database_url, snapshot["details"]["llm_gateway_control_cycles"])
-    _assert_events(database_url, snapshot["details"]["llm_gateway_events"])
+    _assert_events(
+        database_url,
+        snapshot["details"]["llm_gateway_events"],
+        processing_index=processing_index,
+    )
 
 
-def _assert_v2_schema(database_url: URL) -> None:
+def _assert_v2_schema(database_url: URL, *, processing_index: bool = True) -> None:
     snapshot = _inspect_schema(database_url)
     assert snapshot["tables"] >= V2_TABLES
-    _assert_inbox_schema(database_url)
+    _assert_inbox_schema(database_url, processing_index=processing_index)
     _assert_decisions(database_url, snapshot["details"]["llm_gateway_decisions"])
     _assert_skill_calls(database_url, snapshot["details"]["llm_gateway_skill_calls"])
+
+
+def _v2_schema_fingerprint(database_url: URL) -> dict[str, Any]:
+    snapshot = _inspect_schema(database_url)
+    return {
+        table_name: {
+            "columns": {
+                column_name: (
+                    str(column["type"]),
+                    bool(column["nullable"]),
+                    None if column["default"] is None else str(column["default"]),
+                )
+                for column_name, column in snapshot["details"][table_name]["columns"].items()
+            },
+            "constraints": _catalog_constraints(database_url, table_name),
+            "indexes": _catalog_indexes(database_url, table_name),
+        }
+        for table_name in sorted(V2_TABLES)
+    }
 
 
 def _assert_outbox_schema_removed(database_url: URL) -> None:
@@ -634,7 +663,7 @@ def _prepare_revision_007(migration_config: Config, database_url: URL) -> None:
         return
 
     current_revision = _current_revision(database_url)
-    if current_revision in {"008", "009"}:
+    if current_revision in {"008", "009", "010", "011"}:
         command.downgrade(migration_config, "007")
         return
     if current_revision in {"001", "002", "003", "004", "005", "006", "007"}:
@@ -672,7 +701,24 @@ def test_gateway_v2_migration_round_trip(
 
     command.upgrade(migration_config, "head")
     assert _current_database(test_postgres_url) == test_postgres_url.database
+    assert _current_revision(test_postgres_url) == "011"
+    _assert_v2_schema(test_postgres_url, processing_index=False)
+    schema_at_011 = _v2_schema_fingerprint(test_postgres_url)
+
+    command.downgrade(migration_config, "010")
+    assert _current_revision(test_postgres_url) == "010"
+    _assert_v2_schema(test_postgres_url, processing_index=True)
+    schema_at_010 = _v2_schema_fingerprint(test_postgres_url)
+    assert schema_at_010 != schema_at_011
+
+    command.upgrade(migration_config, "head")
+    assert _current_revision(test_postgres_url) == "011"
+    _assert_v2_schema(test_postgres_url, processing_index=False)
+    assert _v2_schema_fingerprint(test_postgres_url) == schema_at_011
+
+    command.downgrade(migration_config, "009")
     assert _current_revision(test_postgres_url) == "009"
+    assert _v2_schema_fingerprint(test_postgres_url) == schema_at_010
     _assert_v2_schema(test_postgres_url)
 
     command.downgrade(migration_config, "008")

@@ -7,6 +7,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializationInfo,
     Strict,
     StrictBool,
     StringConstraints,
@@ -214,15 +215,74 @@ class _WireModel(BaseModel):
     )
 
 
+class SkillExposureDescriptor(_WireModel):
+    state: NonEmptyString128
+    reason: Annotated[str, Strict()]
+    expose_to_admin_default: StrictBool = Field(
+        validation_alias="exposeToAdminDefault",
+        serialization_alias="exposeToAdminDefault",
+    )
+    expose_to_decision_provider: StrictBool = Field(
+        validation_alias="exposeToDecisionProvider",
+        serialization_alias="exposeToDecisionProvider",
+    )
+    allow_explicit_call: StrictBool = Field(
+        validation_alias="allowExplicitCall",
+        serialization_alias="allowExplicitCall",
+    )
+
+
 class AvailableSkill(_WireModel):
     skill_name: NonEmptyString128 = Field(
+        validation_alias="SkillName",
+        serialization_alias="SkillName",
+    )
+    schema_version: NonEmptyString128 = Field(
+        validation_alias="SchemaVersion",
+        serialization_alias="SchemaVersion",
+    )
+    require_running: StrictBool = Field(
+        validation_alias="RequireRunning",
+        serialization_alias="RequireRunning",
+    )
+    cooldown_ms: StrictNonNegativeInt = Field(
+        validation_alias="CooldownMs",
+        serialization_alias="CooldownMs",
+    )
+    exposure: SkillExposureDescriptor | None = None
+
+
+class SkillArgumentField(_WireModel):
+    path: NonEmptyString128
+    argument_type: NonEmptyString128 | None = Field(
+        default=None,
+        validation_alias="type",
+        serialization_alias="type",
+    )
+    status: NonEmptyString128 | None = None
+    source: NonEmptyString128 | None = None
+    state_path: NonEmptyString256 | None = Field(
+        default=None,
+        validation_alias="statePath",
+        serialization_alias="statePath",
+    )
+    reason: NonEmptyString256 | None = None
+    next_step: NonEmptyString256 | None = Field(
+        default=None,
+        validation_alias="nextStep",
+        serialization_alias="nextStep",
+    )
+
+
+class SkillArgumentNextStep(_WireModel):
+    kind: NonEmptyString128
+    label: NonEmptyString256 | None = None
+    skill_name: NonEmptyString128 | None = Field(
+        default=None,
         validation_alias="skillName",
         serialization_alias="skillName",
     )
-    schema_version: NonEmptyString128 = Field(
-        validation_alias="schemaVersion",
-        serialization_alias="schemaVersion",
-    )
+    reason: NonEmptyString256 | None = None
 
 
 class SkillArgumentHint(_WireModel):
@@ -234,24 +294,58 @@ class SkillArgumentHint(_WireModel):
         validation_alias="schemaVersion",
         serialization_alias="schemaVersion",
     )
-    allowed_args: tuple[NonEmptyString128, ...] = Field(
+    argument_status: NonEmptyString128 = Field(
+        validation_alias="argumentStatus",
+        serialization_alias="argumentStatus",
+    )
+    suggested_args: Mapping[str, Any] = Field(
+        validation_alias="suggestedArgs",
+        serialization_alias="suggestedArgs",
+    )
+    allowed_args: tuple[SkillArgumentField, ...] = Field(
         validation_alias="allowedArgs",
         serialization_alias="allowedArgs",
     )
-    missing_args: tuple[NonEmptyString128, ...] = Field(
+    missing_args: tuple[SkillArgumentField, ...] = Field(
         validation_alias="missingArgs",
         serialization_alias="missingArgs",
+    )
+    warnings: tuple[NonEmptyString256, ...]
+    next_steps: tuple[SkillArgumentNextStep, ...] = Field(
+        validation_alias="nextSteps",
+        serialization_alias="nextSteps",
     )
 
     @field_validator("allowed_args", "missing_args")
     @classmethod
-    def validate_unique_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if len(set(value)) != len(value):
+    def validate_unique_paths(
+        cls,
+        value: tuple[SkillArgumentField, ...],
+    ) -> tuple[SkillArgumentField, ...]:
+        paths = [item.path for item in value]
+        if len(set(paths)) != len(paths):
             raise ValueError("argument paths must not contain duplicates")
         return value
 
-    @field_serializer("allowed_args", "missing_args")
-    def serialize_paths(self, value: tuple[str, ...]) -> list[str]:
+    @field_validator("suggested_args")
+    @classmethod
+    def freeze_suggested_args(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        return cast(Mapping[str, Any], _deep_freeze(value))
+
+    @field_serializer("suggested_args")
+    def serialize_suggested_args(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], _deep_thaw(value))
+
+    @field_serializer("allowed_args", "missing_args", "next_steps", mode="wrap")
+    def serialize_argument_objects(
+        self,
+        value: tuple[SkillArgumentField, ...] | tuple[SkillArgumentNextStep, ...],
+        handler: Any,
+    ) -> list[dict[str, Any]]:
+        return list(handler(value))
+
+    @field_serializer("warnings")
+    def serialize_warnings(self, value: tuple[str, ...]) -> list[str]:
         return list(value)
 
 
@@ -259,6 +353,14 @@ DecisionAction = Literal["call_skill", "wait", "no_op", "stop_hosting"]
 
 
 class DecisionLeaseContext(_WireModel):
+    session_id: NonEmptyString128 = Field(
+        validation_alias="sessionId",
+        serialization_alias="sessionId",
+    )
+    control_generation: StrictPositiveInt = Field(
+        validation_alias="controlGeneration",
+        serialization_alias="controlGeneration",
+    )
     decision_lease_id: NonEmptyString128 = Field(
         validation_alias="decisionLeaseId",
         serialization_alias="decisionLeaseId",
@@ -271,11 +373,59 @@ class DecisionLeaseContext(_WireModel):
         validation_alias="leaseKind",
         serialization_alias="leaseKind",
     )
-    allowed_decision_actions: tuple[DecisionAction, ...] = Field(
+    allowed_actions: tuple[DecisionAction, ...] = Field(
         min_length=1,
-        validation_alias="allowedDecisionActions",
-        serialization_alias="allowedDecisionActions",
+        validation_alias="allowedActions",
+        serialization_alias="allowedActions",
     )
+    allowed_skill_name: NonEmptyString128 | None = Field(
+        validation_alias="allowedSkillName",
+        serialization_alias="allowedSkillName",
+    )
+    allowed_skill_names: tuple[NonEmptyString128, ...] = Field(
+        validation_alias="allowedSkillNames",
+        serialization_alias="allowedSkillNames",
+    )
+    parent_skill_name: NonEmptyString128 | None = Field(
+        validation_alias="parentSkillName",
+        serialization_alias="parentSkillName",
+    )
+
+    @field_validator("allowed_actions")
+    @classmethod
+    def validate_unique_actions(
+        cls,
+        value: tuple[DecisionAction, ...],
+    ) -> tuple[DecisionAction, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("allowedActions must not contain duplicates")
+        return value
+
+    @field_validator("allowed_skill_names")
+    @classmethod
+    def validate_unique_skill_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("allowedSkillNames must not contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def validate_allowed_skill_alias(self) -> "DecisionLeaseContext":
+        if (
+            self.allowed_skill_name is not None
+            and self.allowed_skill_name not in self.allowed_skill_names
+        ):
+            raise ValueError("allowedSkillName must be included in allowedSkillNames")
+        return self
+
+    @field_serializer("allowed_actions", "allowed_skill_names")
+    def serialize_allowed_actions(
+        self,
+        value: tuple[str, ...],
+    ) -> list[str]:
+        return list(value)
+
+
+class DecisionContext(_WireModel):
     session: Mapping[str, Any]
     available_skills: tuple[AvailableSkill, ...] = Field(
         validation_alias="availableSkills",
@@ -286,16 +436,6 @@ class DecisionLeaseContext(_WireModel):
         serialization_alias="skillArgumentHints",
     )
 
-    @field_validator("allowed_decision_actions")
-    @classmethod
-    def validate_unique_actions(
-        cls,
-        value: tuple[DecisionAction, ...],
-    ) -> tuple[DecisionAction, ...]:
-        if len(set(value)) != len(value):
-            raise ValueError("allowedDecisionActions must not contain duplicates")
-        return value
-
     @field_validator("session")
     @classmethod
     def freeze_session(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -304,10 +444,10 @@ class DecisionLeaseContext(_WireModel):
         return cast(Mapping[str, Any], _deep_freeze(value))
 
     @model_validator(mode="after")
-    def validate_skill_references(self) -> "DecisionLeaseContext":
+    def validate_skill_references(self) -> "DecisionContext":
         skills = {skill.skill_name: skill.schema_version for skill in self.available_skills}
         if len(skills) != len(self.available_skills):
-            raise ValueError("availableSkills skillName values must be unique")
+            raise ValueError("availableSkills SkillName values must be unique")
 
         hinted_names = {hint.skill_name for hint in self.skill_argument_hints}
         if len(hinted_names) != len(self.skill_argument_hints):
@@ -317,31 +457,35 @@ class DecisionLeaseContext(_WireModel):
                 raise ValueError("skillArgumentHints must reference an available skill and schema")
         return self
 
-    @field_serializer("allowed_decision_actions")
-    def serialize_allowed_actions(
-        self,
-        value: tuple[DecisionAction, ...],
-    ) -> list[str]:
-        return list(value)
-
     @field_serializer("session")
     def serialize_session(self, value: Mapping[str, Any]) -> dict[str, Any]:
         return cast(dict[str, Any], _deep_thaw(value))
 
-    @field_serializer("available_skills", "skill_argument_hints")
+    @field_serializer("available_skills", "skill_argument_hints", mode="wrap")
     def serialize_skill_collections(
         self,
         value: tuple[AvailableSkill, ...] | tuple[SkillArgumentHint, ...],
+        handler: Any,
     ) -> list[dict[str, Any]]:
-        return [item.model_dump() for item in value]
+        return list(handler(value))
 
 
 class SessionStartedPayload(_WireModel):
+    reason: NonEmptyString256
     lease: DecisionLeaseContext
+    decision_context: DecisionContext = Field(
+        validation_alias="decisionContext",
+        serialization_alias="decisionContext",
+    )
 
 
 class ObservationUpdatedPayload(_WireModel):
+    reason: NonEmptyString256
     lease: DecisionLeaseContext
+    decision_context: DecisionContext = Field(
+        validation_alias="decisionContext",
+        serialization_alias="decisionContext",
+    )
 
 
 class SkillStartedPayload(_WireModel):
@@ -352,6 +496,14 @@ class SkillStartedPayload(_WireModel):
     skill_call_id: NonEmptyString128 = Field(
         validation_alias="skillCallId",
         serialization_alias="skillCallId",
+    )
+    skill_name: NonEmptyString128 = Field(
+        validation_alias="skillName",
+        serialization_alias="skillName",
+    )
+    started_at_ms: StrictNonNegativeInt = Field(
+        validation_alias="startedAtMs",
+        serialization_alias="startedAtMs",
     )
 
 
@@ -413,18 +565,63 @@ class SkillFinishedPayload(_WireModel):
         validation_alias="skillCallId",
         serialization_alias="skillCallId",
     )
-    terminal: SkillTerminal
+    skill_name: NonEmptyString128 = Field(
+        validation_alias="skillName",
+        serialization_alias="skillName",
+    )
+    status: Literal["success", "failed", "cancelled", "timeout"]
+    reason: NonEmptyString256
+    failure_category: FailureCategory | None = Field(
+        validation_alias="failureCategory",
+        serialization_alias="failureCategory",
+    )
+    retryable: StrictBool
+    started_at_ms: StrictNonNegativeInt = Field(
+        validation_alias="startedAtMs",
+        serialization_alias="startedAtMs",
+    )
+    finished_at_ms: StrictNonNegativeInt = Field(
+        validation_alias="finishedAtMs",
+        serialization_alias="finishedAtMs",
+    )
     lease: DecisionLeaseContext | SkipJsonSchema[None] = Field(
         default=None,
         json_schema_extra=_omit_internal_default_from_schema,
     )
+    decision_context: DecisionContext | SkipJsonSchema[None] = Field(
+        default=None,
+        validation_alias="decisionContext",
+        serialization_alias="decisionContext",
+        json_schema_extra=_omit_internal_default_from_schema,
+    )
 
-    @field_validator("lease", mode="before")
+    @field_validator("lease", "decision_context", mode="before")
     @classmethod
-    def reject_explicit_null_lease(cls, value: object) -> object:
+    def reject_explicit_null_decision_data(cls, value: object) -> object:
         if value is None:
-            raise ValueError("lease must be omitted instead of null")
+            raise ValueError("optional decision data must be omitted instead of null")
         return value
+
+    @model_validator(mode="after")
+    def validate_terminal_fields(self) -> "SkillFinishedPayload":
+        if self.finished_at_ms < self.started_at_ms:
+            raise ValueError("finishedAtMs must not be earlier than startedAtMs")
+        if self.status == "failed" and self.failure_category is None:
+            raise ValueError("failed terminal requires failureCategory")
+        if self.status != "failed" and self.failure_category is not None:
+            raise ValueError("failureCategory is only valid for failed terminal")
+        if (self.lease is None) != (self.decision_context is None):
+            raise ValueError("lease and decisionContext must be supplied together")
+        return self
+
+    @property
+    def terminal(self) -> SkillTerminal:
+        payload: dict[str, Any] = {"status": self.status}
+        if self.status != "success":
+            payload.update({"reason": self.reason, "retryable": self.retryable})
+        if self.failure_category is not None:
+            payload["failureCategory"] = self.failure_category
+        return parse_skill_terminal(payload)
 
     @model_serializer(mode="wrap")
     def serialize_without_internal_lease_default(
@@ -434,6 +631,7 @@ class SkillFinishedPayload(_WireModel):
         serialized: dict[str, Any] = handler(self)
         if self.lease is None:
             serialized.pop("lease", None)
+            serialized.pop("decisionContext", None)
         return serialized
 
 
@@ -447,6 +645,10 @@ class DecisionRejectedPayload(_WireModel):
 
 class SessionStoppedPayload(_WireModel):
     reason: NonEmptyString256
+    stopped_at_ms: StrictNonNegativeInt = Field(
+        validation_alias="stoppedAtMs",
+        serialization_alias="stoppedAtMs",
+    )
 
 
 class _GatewayV2EventBase(_WireModel):
@@ -466,10 +668,28 @@ class _GatewayV2EventBase(_WireModel):
         validation_alias="eventSequence",
         serialization_alias="eventSequence",
     )
+    state_version: StrictNonNegativeInt = Field(
+        validation_alias="stateVersion",
+        serialization_alias="stateVersion",
+    )
+    decision_lease_id: NonEmptyString128 | None = Field(
+        validation_alias="decisionLeaseId",
+        serialization_alias="decisionLeaseId",
+    )
     occurred_at_ms: StrictNonNegativeInt = Field(
         validation_alias="occurredAtMs",
         serialization_alias="occurredAtMs",
     )
+
+    def validate_lease_identity(self, lease: DecisionLeaseContext) -> None:
+        if self.session_id != lease.session_id:
+            raise ValueError("event sessionId does not match lease")
+        if self.control_generation != lease.control_generation:
+            raise ValueError("event controlGeneration does not match lease")
+        if self.state_version != lease.state_version:
+            raise ValueError("event stateVersion does not match lease")
+        if self.decision_lease_id != lease.decision_lease_id:
+            raise ValueError("event decisionLeaseId does not match lease")
 
 
 class SessionStartedEvent(_GatewayV2EventBase):
@@ -478,6 +698,11 @@ class SessionStartedEvent(_GatewayV2EventBase):
         serialization_alias="eventType",
     )
     payload: SessionStartedPayload
+
+    @model_validator(mode="after")
+    def validate_lease(self) -> "SessionStartedEvent":
+        self.validate_lease_identity(self.payload.lease)
+        return self
 
     @field_validator("event_sequence")
     @classmethod
@@ -494,6 +719,11 @@ class ObservationUpdatedEvent(_GatewayV2EventBase):
     )
     payload: ObservationUpdatedPayload
 
+    @model_validator(mode="after")
+    def validate_lease(self) -> "ObservationUpdatedEvent":
+        self.validate_lease_identity(self.payload.lease)
+        return self
+
 
 class SkillStartedEvent(_GatewayV2EventBase):
     event_type: Literal["skill_started"] = Field(
@@ -509,6 +739,15 @@ class SkillFinishedEvent(_GatewayV2EventBase):
         serialization_alias="eventType",
     )
     payload: SkillFinishedPayload
+
+    @model_validator(mode="after")
+    def validate_optional_lease(self) -> "SkillFinishedEvent":
+        if self.payload.lease is None:
+            if self.decision_lease_id is not None:
+                raise ValueError("decisionLeaseId requires a skill_finished lease")
+        else:
+            self.validate_lease_identity(self.payload.lease)
+        return self
 
 
 class DecisionRejectedEvent(_GatewayV2EventBase):
@@ -566,8 +805,21 @@ class GatewayV2BatchEnvelope(_WireModel):
     def serialize_events(
         self,
         value: tuple[GatewayV2Event, ...],
+        info: SerializationInfo,
     ) -> list[dict[str, Any]]:
-        return [event.model_dump() for event in value]
+        return [
+            event.model_dump(
+                mode=info.mode,
+                by_alias=info.by_alias,
+                exclude_unset=info.exclude_unset,
+                exclude_defaults=info.exclude_defaults,
+                exclude_none=info.exclude_none,
+                round_trip=info.round_trip,
+                context=info.context,
+                serialize_as_any=info.serialize_as_any,
+            )
+            for event in value
+        ]
 
 
 class GatewayV2BatchAck(_WireModel):

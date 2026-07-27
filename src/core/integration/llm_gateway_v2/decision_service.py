@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Protocol, cast
 
 from src.core.agents.gateway_v2_models import (
@@ -68,10 +70,13 @@ def build_gateway_v2_agent_context(event: GatewayV2Event) -> GatewayV2AgentConte
         decision_lease_id=lease.decision_lease_id,
         state_version=lease.state_version,
         lease_kind=lease.lease_kind,
-        allowed_decision_actions=lease.allowed_decision_actions,
-        session_snapshot=lease.session,
-        available_skills=lease.available_skills,
-        skill_argument_hints=lease.skill_argument_hints,
+        allowed_decision_actions=lease.allowed_actions,
+        parent_skill_name=lease.parent_skill_name,
+        allowed_skill_name=lease.allowed_skill_name,
+        allowed_skill_names=lease.allowed_skill_names,
+        session_snapshot=event.payload.decision_context.session,
+        available_skills=event.payload.decision_context.available_skills,
+        skill_argument_hints=event.payload.decision_context.skill_argument_hints,
         terminal_result=terminal_result,
     )
 
@@ -97,6 +102,25 @@ def _contains_path(paths: set[str], required: str) -> bool:
     return required in paths or any(path.startswith(f"{required}.") for path in paths)
 
 
+def _lease_pairing_is_permitted(
+    context: GatewayV2AgentContext,
+    candidate: GatewayV2CallSkillAction,
+) -> bool:
+    if context.lease_kind == "movement_control":
+        if candidate.skill_name not in {"jump", "stop_move"}:
+            return False
+        return candidate.skill_name != "stop_move" or context.parent_skill_name == "move_to"
+
+    if context.lease_kind in {"vehicle_cancel_window", "vehicle_recovery"}:
+        paired_exits = {
+            "hot_air_balloon_auto_schedule": "hot_air_balloon_exit",
+            "helicopter_auto_schedule": "helicopter_exit",
+        }
+        return paired_exits.get(context.parent_skill_name) == candidate.skill_name
+
+    return True
+
+
 def _skill_is_permitted(
     context: GatewayV2AgentContext,
     candidate: GatewayV2CallSkillAction,
@@ -105,7 +129,12 @@ def _skill_is_permitted(
         return False
     if candidate.skill_name == "ground":
         return False
-    if context.lease_kind == "movement_control" and candidate.skill_name not in {"jump", "stop_move"}:
+    allowed_skill_names = set(context.allowed_skill_names)
+    if context.allowed_skill_name is not None:
+        allowed_skill_names.add(context.allowed_skill_name)
+    if candidate.skill_name not in allowed_skill_names:
+        return False
+    if not _lease_pairing_is_permitted(context, candidate):
         return False
     tracking_metadata = candidate.tracking_metadata()
     if tracking_metadata is not None:
@@ -127,9 +156,11 @@ def _skill_is_permitted(
     if hint is None:
         return not argument_paths
 
-    if not argument_paths.issubset(set(hint.allowed_args)):
+    allowed_argument_paths = {field.path for field in hint.allowed_args}
+    required_argument_paths = {field.path for field in hint.missing_args}
+    if not argument_paths.issubset(allowed_argument_paths):
         return False
-    return all(_contains_path(argument_paths, required) for required in hint.missing_args)
+    return all(_contains_path(argument_paths, required) for required in required_argument_paths)
 
 
 def select_gateway_v2_action(
@@ -155,12 +186,20 @@ def select_gateway_v2_action(
 
 
 class GatewayV2DecisionService:
-    def __init__(self, *, runner: GatewayV2AgentRunner | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runner: GatewayV2AgentRunner | None = None,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        if not isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
         if runner is None:
             from src.core.agents.gateway_v2 import build_gateway_v2_decision_graph
 
             runner = cast(GatewayV2AgentRunner, build_gateway_v2_decision_graph().compile())
         self._runner: GatewayV2AgentRunner = runner
+        self._timeout_seconds = timeout_seconds
 
     async def decide(
         self,
@@ -187,7 +226,12 @@ class GatewayV2DecisionService:
             "player_memory": {},
         }
         try:
-            result = await self._runner.ainvoke(initial_state)
+            result = await asyncio.wait_for(
+                self._runner.ainvoke(initial_state),
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError:
+            raise GatewayV2AgentExecutionError("timeout") from None
         except Exception:
             raise GatewayV2AgentExecutionError("execution_failed") from None
 
@@ -295,4 +339,10 @@ class GatewayV2DecisionPlanner:
                 "retryable_failed",
                 error_stage="database",
                 error_category="plan_unavailable",
+            )
+        except GatewayV2AgentExecutionError as error:
+            return EventProcessResult(
+                "retryable_failed",
+                error_stage=error.stage,
+                error_category=error.category,
             )

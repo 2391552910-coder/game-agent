@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     llm_gateway_v2_retry_base_ms: int = Field(default=1_000, ge=1, le=3_600_000)
     llm_gateway_v2_retry_max_ms: int = Field(default=300_000, ge=1, le=3_600_000)
     llm_gateway_v2_claim_ttl_ms: int = Field(default=30_000, ge=1, le=3_600_000)
+    llm_gateway_v2_agent_timeout_seconds: float = Field(default=30.0, gt=0, le=300.0)
     llm_gateway_v2_poll_ms: int = Field(default=250, ge=1, le=60_000)
     llm_gateway_v2_event_max_parallelism: int = Field(default=4, ge=1, le=64)
     llm_gateway_v2_decision_max_parallelism: int = Field(default=4, ge=1, le=64)

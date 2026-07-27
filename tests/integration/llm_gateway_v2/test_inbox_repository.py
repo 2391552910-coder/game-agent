@@ -45,19 +45,32 @@ def _event(
     if sequence == 1:
         event_type = "session_started"
         payload = {
+            "reason": "decision_requested",
             "lease": {
+                "sessionId": session_id,
+                "controlGeneration": 1,
                 "decisionLeaseId": "lease-1",
                 "stateVersion": 1,
                 "leaseKind": "hosting_control",
-                "allowedDecisionActions": ["wait"],
+                "allowedActions": ["wait"],
+                "allowedSkillName": None,
+                "allowedSkillNames": [],
+                "parentSkillName": None,
+            },
+            "decisionContext": {
                 "session": {"status": "active"},
                 "availableSkills": [],
                 "skillArgumentHints": [],
-            }
+            },
         }
+        decision_lease_id = "lease-1"
     else:
         event_type = "session_stopped"
-        payload = {"reason": reason}
+        payload = {
+            "reason": reason,
+            "stoppedAtMs": 1_700_000_000_000 + sequence,
+        }
+        decision_lease_id = None
     return parse_gateway_v2_event(
         {
             "eventId": event_id,
@@ -65,6 +78,8 @@ def _event(
             "sessionId": session_id,
             "controlGeneration": 1,
             "eventSequence": sequence,
+            "stateVersion": 1,
+            "decisionLeaseId": decision_lease_id,
             "occurredAtMs": 1_700_000_000_000 + sequence,
             "payload": payload,
         }
@@ -73,7 +88,7 @@ def _event(
 
 @pytest.fixture(scope="module", autouse=True)
 def _upgrade_schema(migration_config) -> None:
-    command.upgrade(migration_config, "008")
+    command.upgrade(migration_config, "head")
 
 
 @pytest.fixture

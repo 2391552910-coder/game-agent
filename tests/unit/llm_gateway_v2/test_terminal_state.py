@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -19,6 +19,7 @@ from src.core.integration.llm_gateway_v2.terminal_repository import (
     MutationDisposition,
     MutationResult,
     TerminalRecord,
+    TerminalRepository,
     normalize_skill_terminal,
     resolve_terminal_transition,
 )
@@ -26,10 +27,20 @@ from src.core.integration.llm_gateway_v2.terminal_repository import (
 
 def _lease() -> dict[str, Any]:
     return {
+        "sessionId": "session-1",
+        "controlGeneration": 1,
         "decisionLeaseId": "lease-next",
         "stateVersion": 2,
         "leaseKind": "hosting_control",
-        "allowedDecisionActions": ["wait"],
+        "allowedActions": ["wait"],
+        "allowedSkillName": None,
+        "allowedSkillNames": [],
+        "parentSkillName": None,
+    }
+
+
+def _decision_context() -> dict[str, Any]:
+    return {
         "session": {"status": "active"},
         "availableSkills": [],
         "skillArgumentHints": [],
@@ -52,20 +63,42 @@ def _claimed(
         "session_stopped": 6,
     }
     sequence = sequence_by_type[event_type]
+    occurred_at_ms = 1_700_000_000_000 + sequence
+    terminal_payload = terminal or {"status": "success"}
+    decision_payload = {
+        "reason": "decision_requested",
+        "lease": _lease(),
+        "decisionContext": _decision_context(),
+    }
     payload_by_type: dict[str, dict[str, Any]] = {
-        "session_started": {"lease": _lease()},
-        "observation_updated": {"lease": _lease()},
-        "skill_started": {"decisionId": "decision-1", "skillCallId": "call-1"},
+        "session_started": decision_payload,
+        "observation_updated": decision_payload,
+        "skill_started": {
+            "decisionId": "decision-1",
+            "skillName": "jump",
+            "skillCallId": "call-1",
+            "startedAtMs": occurred_at_ms,
+        },
         "skill_finished": {
             "decisionId": "decision-1",
+            "skillName": "jump",
             "skillCallId": "call-1",
-            "terminal": terminal or {"status": "success"},
+            "status": terminal_payload["status"],
+            "reason": terminal_payload.get("reason", "ok"),
+            "failureCategory": terminal_payload.get("failureCategory"),
+            "retryable": terminal_payload.get("retryable", False),
+            "startedAtMs": occurred_at_ms - 1,
+            "finishedAtMs": occurred_at_ms,
         },
         "decision_rejected": {"decisionId": "decision-1", "reason": "lease expired"},
-        "session_stopped": {"reason": reason},
+        "session_stopped": {"reason": reason, "stoppedAtMs": occurred_at_ms},
     }
     if event_type == "skill_finished" and with_lease:
         payload_by_type[event_type]["lease"] = _lease()
+        payload_by_type[event_type]["decisionContext"] = _decision_context()
+    has_lease = event_type in {"session_started", "observation_updated"} or (
+        event_type == "skill_finished" and with_lease
+    )
     event = parse_gateway_v2_event(
         {
             "eventId": f"event-{event_type}",
@@ -73,7 +106,9 @@ def _claimed(
             "sessionId": "session-1",
             "controlGeneration": 1,
             "eventSequence": sequence,
-            "occurredAtMs": 1_700_000_000_000 + sequence,
+            "stateVersion": 2,
+            "decisionLeaseId": "lease-next" if has_lease else None,
+            "occurredAtMs": occurred_at_ms,
             "payload": payload_by_type[event_type],
         }
     )
@@ -210,6 +245,18 @@ async def test_skill_finished_with_lease_converges_terminal_before_agent() -> No
 
     assert await dispatcher(_claimed("skill_finished", with_lease=True)) == EventProcessResult("succeeded")
     assert operations == ["terminal", "context", "agent"]
+
+
+async def test_historical_skill_finished_never_reactivates_agent_cycle() -> None:
+    operations: list[str] = []
+    dispatcher, _ = _dispatcher(operations)
+    historical = replace(
+        _claimed("skill_finished", with_lease=True),
+        historical_recovery=True,
+    )
+
+    assert await dispatcher(historical) == EventProcessResult("succeeded")
+    assert operations == ["terminal"]
 
 
 async def test_decision_rejected_only_merges_rejection() -> None:
@@ -358,6 +405,36 @@ def test_unconfirmed_completion_never_retries_original_action(reason: str) -> No
     normalized = normalize_skill_terminal(terminal)
 
     assert normalized.retryable is False
+
+
+def test_terminal_call_identity_includes_session_skill_and_decision() -> None:
+    decision = {"id": "decision-row-1", "decision_id": "decision-1"}
+    call = {
+        "decision_row_id": "decision-row-1",
+        "decision_id": "decision-1",
+        "session_id": "session-1",
+        "skill_name": "move_to",
+    }
+
+    assert TerminalRepository._call_matches_identity(
+        call,
+        decision,
+        session_id="session-1",
+        skill_name="move_to",
+    )
+    for field_name, wrong_value in (
+        ("decision_row_id", "decision-row-2"),
+        ("decision_id", "decision-2"),
+        ("session_id", "session-2"),
+        ("skill_name", "jump"),
+    ):
+        changed = {**call, field_name: wrong_value}
+        assert not TerminalRepository._call_matches_identity(
+            changed,
+            decision,
+            session_id="session-1",
+            skill_name="move_to",
+        )
 
 
 @pytest.mark.parametrize(

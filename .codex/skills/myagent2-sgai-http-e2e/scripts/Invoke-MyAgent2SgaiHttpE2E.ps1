@@ -12,8 +12,8 @@ param(
     [int]$GatewayInnerPort = 20020,
     [string]$GatewayId = 'local-smoke-gateway',
     [Guid]$TestTenantId = '00000000-0000-0000-0000-000000000001',
-    [string]$AppId = 'robot-gateway-smoke',
-    [string]$AppSecret = 'robot-gateway-smoke-secret',
+    [string]$AppId = '',
+    [string]$AppSecret = '',
     [string]$SmokeAccount = 'AI1001',
     [string]$SmokePassword = '123456',
     [string]$LoginMode = 'account',
@@ -78,6 +78,18 @@ function Get-HmacSha256Hex {
     finally {
         $hmac.Dispose()
     }
+}
+
+function New-RunScopedSecret {
+    $bytes = [byte[]]::new(32)
+    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    }
+    finally {
+        $generator.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
 function ConvertTo-CanonicalJson {
@@ -280,6 +292,24 @@ function Get-RequiredProcessEnvironment {
         throw "$Name is required."
     }
     return $value
+}
+
+function Assert-DirectionalIdentitiesDistinct {
+    param(
+        [string]$EventAppId,
+        [string]$EventAppSecret,
+        [string]$DecisionAppId,
+        [string]$DecisionAppSecret,
+        [string]$ControlAppId,
+        [string]$ControlAppSecret,
+        [string]$ModeName
+    )
+
+    $appIds = @($EventAppId, $DecisionAppId, $ControlAppId) | Select-Object -Unique
+    $appSecrets = @($EventAppSecret, $DecisionAppSecret, $ControlAppSecret) | Select-Object -Unique
+    if ($appIds.Count -ne 3 -or $appSecrets.Count -ne 3) {
+        throw "$ModeName event、decision 和 control 身份必须彼此不同。"
+    }
 }
 
 function Start-LoggedProcess {
@@ -552,12 +582,20 @@ function Invoke-SimulationMode {
     }
     $myAgentBaseUrl = "http://127.0.0.1:$MyAgentPort"
     $gatewayBaseUrl = "http://127.0.0.1:$GatewayPort"
-    $eventAppId = $AppId
-    $eventAppSecret = $AppSecret
-    $decisionAppId = if ($ContractVersion -eq 'v2') { "simulation-decision-$runId" } else { $AppId }
-    $decisionAppSecret = if ($ContractVersion -eq 'v2') { "simulation-decision-secret-$runId" } else { $AppSecret }
-    $controlAppId = if ($ContractVersion -eq 'v2') { "simulation-control-$runId" } else { $AppId }
-    $controlAppSecret = if ($ContractVersion -eq 'v2') { "simulation-control-secret-$runId" } else { $AppSecret }
+    $eventAppId = if ([string]::IsNullOrWhiteSpace($AppId)) { "simulation-event-$runId" } else { $AppId }
+    $eventAppSecret = if ([string]::IsNullOrWhiteSpace($AppSecret)) { New-RunScopedSecret } else { $AppSecret }
+    $decisionAppId = "simulation-decision-$runId"
+    $decisionAppSecret = New-RunScopedSecret
+    $controlAppId = "simulation-control-$runId"
+    $controlAppSecret = New-RunScopedSecret
+    Assert-DirectionalIdentitiesDistinct `
+        -EventAppId $eventAppId `
+        -EventAppSecret $eventAppSecret `
+        -DecisionAppId $decisionAppId `
+        -DecisionAppSecret $decisionAppSecret `
+        -ControlAppId $controlAppId `
+        -ControlAppSecret $controlAppSecret `
+        -ModeName 'Simulation'
     $appSecrets = @{}
     $appSecrets[$eventAppId] = $eventAppSecret
     $appGateways = @{}
@@ -777,9 +815,14 @@ function Invoke-RealV2Mode {
     $controlAppId = Get-RequiredProcessEnvironment -Name 'E2E_GATEWAY_CONTROL_APP_ID'
     $controlAppSecret = Get-RequiredProcessEnvironment -Name 'E2E_GATEWAY_CONTROL_APP_SECRET'
     $testPostgresDsn = Get-RequiredProcessEnvironment -Name 'TEST_POSTGRES_DSN'
-    if ($eventAppId -eq $decisionAppId -or $eventAppSecret -eq $decisionAppSecret) {
-        throw 'Real v2 event 和 decision 身份必须不同。'
-    }
+    Assert-DirectionalIdentitiesDistinct `
+        -EventAppId $eventAppId `
+        -EventAppSecret $eventAppSecret `
+        -DecisionAppId $decisionAppId `
+        -DecisionAppSecret $decisionAppSecret `
+        -ControlAppId $controlAppId `
+        -ControlAppSecret $controlAppSecret `
+        -ModeName 'Real v2'
 
     $SgaiRoot = (Resolve-Path -LiteralPath $SgaiRoot).Path
     $python = Join-Path $MyAgentRoot '.venv\Scripts\python.exe'
@@ -993,6 +1036,23 @@ if ($ContractVersion -eq 'v2') {
     return
 }
 
+$eventAppId = Get-RequiredProcessEnvironment -Name 'E2E_EVENT_APP_ID'
+$eventAppSecret = Get-RequiredProcessEnvironment -Name 'E2E_EVENT_APP_SECRET'
+$decisionAppId = Get-RequiredProcessEnvironment -Name 'E2E_DECISION_APP_ID'
+$decisionAppSecret = Get-RequiredProcessEnvironment -Name 'E2E_DECISION_APP_SECRET'
+$controlAppId = Get-RequiredProcessEnvironment -Name 'E2E_GATEWAY_CONTROL_APP_ID'
+$controlAppSecret = Get-RequiredProcessEnvironment -Name 'E2E_GATEWAY_CONTROL_APP_SECRET'
+Assert-DirectionalIdentitiesDistinct `
+    -EventAppId $eventAppId `
+    -EventAppSecret $eventAppSecret `
+    -DecisionAppId $decisionAppId `
+    -DecisionAppSecret $decisionAppSecret `
+    -ControlAppId $controlAppId `
+    -ControlAppSecret $controlAppSecret `
+    -ModeName 'Real v1'
+$AppId = $controlAppId
+$AppSecret = $controlAppSecret
+
 $SgaiRoot = (Resolve-Path -LiteralPath $SgaiRoot).Path
 
 $myAgentBaseUrl = "http://127.0.0.1:$MyAgentPort"
@@ -1045,7 +1105,7 @@ if (-not $SkipBuild) {
 Assert-PathExists -Path $appDll -Message "SGAI App.dll 不存在：$appDll。请先构建 SGAI。"
 
 $appSecrets = @{}
-$appSecrets[$AppId] = $AppSecret
+$appSecrets[$eventAppId] = $eventAppSecret
 $appTenants = @{}
 $appTenants[$GatewayId] = $GatewayId
 
@@ -1056,13 +1116,15 @@ $envValues = @{
     'LLM_GATEWAY_APP_SECRETS' = ($appSecrets | ConvertTo-Json -Compress)
     'LLM_GATEWAY_APP_TENANTS' = ($appTenants | ConvertTo-Json -Compress)
     'LLM_GATEWAY_DECISION_URL' = "$gatewayBaseUrl/api/v1/hosting/llm/decision"
-    'LLM_GATEWAY_DECISION_APP_ID' = $AppId
-    'LLM_GATEWAY_DECISION_APP_SECRET' = $AppSecret
+    'LLM_GATEWAY_DECISION_APP_ID' = $decisionAppId
+    'LLM_GATEWAY_DECISION_APP_SECRET' = $decisionAppSecret
     'LLM_GATEWAY_DECISION_TIMEOUT_SECONDS' = '10'
     'ROBOT_GATEWAY_CONTROL_ADDRESS' = "$gatewayBaseUrl/"
     'ROBOT_GATEWAY_GATEWAY_ID' = $GatewayId
     'ROBOT_GATEWAY_APP_ID' = $AppId
     'ROBOT_GATEWAY_APP_SECRET' = $AppSecret
+    'ROBOT_GATEWAY_LLM_APP_ID' = $eventAppId
+    'ROBOT_GATEWAY_LLM_APP_SECRET' = $eventAppSecret
     'ROBOT_GATEWAY_PROCESS_INNER_PORT_20' = [string]$GatewayInnerPort
     'ROBOT_GATEWAY_LLM_ENABLED' = '1'
     'ROBOT_GATEWAY_LLM_BASE_URL' = $myAgentBaseUrl

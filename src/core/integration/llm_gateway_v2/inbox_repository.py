@@ -137,8 +137,13 @@ _LOCK_CLAIM_CANDIDATE = sa.text(
     FROM llm_gateway_events AS e
     JOIN llm_gateway_control_cycles AS c ON c.id = e.cycle_id
     JOIN llm_gateway_sessions AS s ON s.id = c.runtime_session_id
-    WHERE c.status IN ('pending', 'active', 'superseded')
-      AND e.event_sequence = c.next_event_sequence
+    WHERE (
+          (
+              c.status IN ('pending', 'active', 'superseded')
+              AND e.event_sequence = c.next_event_sequence
+          )
+          OR e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
+      )
       AND e.attempt_count < :max_attempts
       AND (
           (e.status IN ('pending', 'retryable_failed') AND e.next_attempt_at <= clock_timestamp())
@@ -148,7 +153,11 @@ _LOCK_CLAIM_CANDIDATE = sa.text(
               AND e.lock_until <= clock_timestamp()
           )
       )
-    ORDER BY e.control_generation DESC, e.received_at, e.id
+    ORDER BY
+        e.control_generation DESC,
+        CASE WHEN e.event_sequence = c.next_event_sequence THEN 0 ELSE 1 END,
+        e.received_at,
+        e.id
     FOR UPDATE OF s, c, e SKIP LOCKED
     LIMIT 1
     """
@@ -353,6 +362,33 @@ _ADVANCE_CYCLE = sa.text(
     """
 )
 
+_SKIP_COMPLETED_CONVERGENCE_EVENTS = sa.text(
+    """
+    WITH RECURSIVE positions(next_event_sequence) AS (
+        SELECT next_event_sequence
+        FROM llm_gateway_control_cycles
+        WHERE id = :cycle_id
+
+        UNION ALL
+
+        SELECT positions.next_event_sequence + 1
+        FROM positions
+        JOIN llm_gateway_events AS e
+          ON e.cycle_id = :cycle_id
+         AND e.event_sequence = positions.next_event_sequence
+        WHERE e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
+          AND e.status IN ('succeeded', 'dead_letter', 'manual', 'superseded')
+    )
+    UPDATE llm_gateway_control_cycles
+    SET next_event_sequence = (
+            SELECT max(next_event_sequence)
+            FROM positions
+        ),
+        updated_at = clock_timestamp()
+    WHERE id = :cycle_id
+    """
+)
+
 _ADVANCE_STALE_CYCLE = sa.text(
     """
     UPDATE llm_gateway_control_cycles
@@ -449,8 +485,16 @@ _RENEW_EVENT_CLAIM = sa.text(
       AND e.claimed_fence_version = :claimed_fence_version
       AND e.status = 'processing'
       AND e.lock_until > clock_timestamp()
-      AND s.current_generation = e.control_generation
-      AND s.fence_version = e.claimed_fence_version
+      AND (
+          (
+              s.current_generation = e.control_generation
+              AND s.fence_version = e.claimed_fence_version
+          )
+          OR (
+              e.control_generation < s.current_generation
+              AND e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
+          )
+      )
     RETURNING e.id
     """
 )
@@ -651,7 +695,10 @@ class InboxRepository:
                         },
                     )
                     await session.execute(_ACTIVATE_CYCLE, {"cycle_id": candidate["cycle_id"]})
-                elif str(candidate["cycle_status"]) == "pending":
+                elif (
+                    disposition is GenerationDisposition.CURRENT
+                    and str(candidate["cycle_status"]) == "pending"
+                ):
                     await session.execute(_ACTIVATE_CYCLE, {"cycle_id": candidate["cycle_id"]})
                     await session.execute(
                         _MARK_RUNTIME_ACTIVE,
@@ -676,7 +723,13 @@ class InboxRepository:
                 claim = claim_result.mappings().one_or_none()
                 if claim is None:
                     continue
-                return self._build_claimed_event(candidate, claim)
+                return self._build_claimed_event(
+                    candidate,
+                    claim,
+                    historical_recovery=(
+                        disposition is GenerationDisposition.HISTORICAL_RECOVERY
+                    ),
+                )
 
     async def renew_event_claim(
         self,
@@ -727,9 +780,21 @@ class InboxRepository:
             if locked is None:
                 return False
 
-            current_generation = self._optional_int(locked["current_generation"])
+            disposition = classify_generation(
+                self._optional_int(locked["current_generation"]),
+                int(locked["control_generation"]),
+                str(locked["event_type"]),
+                int(locked["event_sequence"]),
+            )
             current_fence = int(locked["fence_version"])
-            if current_generation != event.control_generation or current_fence != event.claimed_fence_version:
+            claim_is_valid = (
+                disposition is GenerationDisposition.HISTORICAL_RECOVERY
+                or (
+                    disposition is GenerationDisposition.CURRENT
+                    and current_fence == event.claimed_fence_version
+                )
+            )
+            if not claim_is_valid:
                 await self._supersede_locked_event(session, locked)
                 return False
 
@@ -757,12 +822,17 @@ class InboxRepository:
                         _COMPLETE_RETRYABLE,
                         {**common_parameters, "retry_delay_ms": retry_delay_ms},
                     )
-                return updated.scalar_one_or_none() is not None
+                completed = updated.scalar_one_or_none() is not None
+                if completed and int(locked["attempt_count"]) >= max_attempts:
+                    await self._skip_completed_convergence_events(session, locked)
+                return completed
 
             updated = await session.execute(_COMPLETE_MANUAL, common_parameters)
             if updated.scalar_one_or_none() is None:
                 return False
-            await session.execute(_MARK_CYCLE_MANUAL, {"cycle_id": event.cycle_id})
+            if disposition is not GenerationDisposition.HISTORICAL_RECOVERY:
+                await session.execute(_MARK_CYCLE_MANUAL, {"cycle_id": event.cycle_id})
+            await self._skip_completed_convergence_events(session, locked)
             return True
 
     async def persist_lease_context(
@@ -806,12 +876,21 @@ class InboxRepository:
                 if expired is None:
                     return dead_letter_count
 
-                current_generation = self._optional_int(expired["current_generation"])
+                disposition = classify_generation(
+                    self._optional_int(expired["current_generation"]),
+                    int(expired["control_generation"]),
+                    str(expired["event_type"]),
+                    int(expired["event_sequence"]),
+                )
                 claimed_fence_version = self._optional_int(expired["claimed_fence_version"])
-                if (
-                    current_generation != int(expired["control_generation"])
-                    or int(expired["fence_version"]) != claimed_fence_version
-                ):
+                claim_is_valid = (
+                    disposition is GenerationDisposition.HISTORICAL_RECOVERY
+                    or (
+                        disposition is GenerationDisposition.CURRENT
+                        and int(expired["fence_version"]) == claimed_fence_version
+                    )
+                )
+                if not claim_is_valid:
                     await self._supersede_locked_event(session, expired)
                     continue
 
@@ -827,6 +906,7 @@ class InboxRepository:
                 )
                 if completed.scalar_one_or_none() is None:
                     raise RuntimeError("expired event claim changed while locked")
+                await self._skip_completed_convergence_events(session, expired)
                 dead_letter_count += 1
 
     async def count_dead_letters(self) -> int:
@@ -864,6 +944,7 @@ class InboxRepository:
                 _ADVANCE_CYCLE,
                 {"cycle_id": event.cycle_id, "event_sequence": event.event_sequence},
             )
+            await self._skip_completed_convergence_events(session, row)
             return
         await session.execute(
             _STOP_CURRENT_CYCLE,
@@ -878,10 +959,28 @@ class InboxRepository:
             },
         )
 
+    async def _skip_completed_convergence_events(
+        self,
+        session: AsyncSession,
+        row: RowMapping,
+    ) -> None:
+        if str(row["event_type"]) not in {
+            "skill_started",
+            "skill_finished",
+            "decision_rejected",
+        } and int(row["next_event_sequence"]) != int(row["event_sequence"]):
+            return
+        await session.execute(
+            _SKIP_COMPLETED_CONVERGENCE_EVENTS,
+            {"cycle_id": row["cycle_id"]},
+        )
+
     @staticmethod
     def _build_claimed_event(
         candidate: RowMapping,
         claim: RowMapping,
+        *,
+        historical_recovery: bool,
     ) -> ClaimedGatewayEvent:
         lock_until = claim["lock_until"]
         if not isinstance(lock_until, datetime):
@@ -904,6 +1003,7 @@ class InboxRepository:
             attempt_count=int(claim["attempt_count"]),
             locked_by=str(claim["locked_by"]),
             lock_until=lock_until,
+            historical_recovery=historical_recovery,
         )
 
     @staticmethod

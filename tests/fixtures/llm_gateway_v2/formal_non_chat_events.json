@@ -1,0 +1,278 @@
+{
+  "fixtureType": "remediation_spec_simulation",
+  "realGatewayExport": false,
+  "contractSource": "docs/llm-remediation-technical.md",
+  "contractVersion": "llm-gateway-http-v2",
+  "events": [
+    {
+      "eventId": "fixture-session-started",
+      "eventType": "session_started",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 1,
+      "stateVersion": 1,
+      "decisionLeaseId": "lease-fixture-1",
+      "occurredAtMs": 1700000000001,
+      "payload": {
+        "reason": "decision_requested",
+        "lease": {
+          "sessionId": "session-fixture",
+          "controlGeneration": 1,
+          "stateVersion": 1,
+          "decisionLeaseId": "lease-fixture-1",
+          "leaseKind": "hosting_control",
+          "allowedActions": ["call_skill", "wait", "no_op"],
+          "allowedSkillName": "move_to",
+          "allowedSkillNames": ["move_to"],
+          "parentSkillName": null
+        },
+        "decisionContext": {
+          "session": {"accountId": "account-fixture", "status": "running"},
+          "availableSkills": [
+            {
+              "SkillName": "move_to",
+              "SchemaVersion": "v1",
+              "RequireRunning": true,
+              "CooldownMs": 0,
+              "exposure": {
+                "state": "Enabled",
+                "reason": "",
+                "exposeToAdminDefault": true,
+                "exposeToDecisionProvider": true,
+                "allowExplicitCall": true
+              }
+            }
+          ],
+          "skillArgumentHints": [
+            {
+              "skillName": "move_to",
+              "schemaVersion": "v1",
+              "argumentStatus": "ready",
+              "suggestedArgs": {},
+              "allowedArgs": [
+                {
+                  "path": "target.x",
+                  "type": "number",
+                  "status": "allowed",
+                  "source": "contract",
+                  "statePath": null,
+                  "reason": null,
+                  "nextStep": null
+                }
+              ],
+              "missingArgs": [],
+              "warnings": [],
+              "nextSteps": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eventId": "fixture-observation-updated",
+      "eventType": "observation_updated",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 2,
+      "stateVersion": 2,
+      "decisionLeaseId": "lease-fixture-2",
+      "occurredAtMs": 1700000000002,
+      "payload": {
+        "reason": "state_changed",
+        "lease": {
+          "sessionId": "session-fixture",
+          "controlGeneration": 1,
+          "stateVersion": 2,
+          "decisionLeaseId": "lease-fixture-2",
+          "leaseKind": "movement_control",
+          "allowedActions": ["call_skill", "wait"],
+          "allowedSkillName": "stop_move",
+          "allowedSkillNames": ["stop_move"],
+          "parentSkillName": "move_to"
+        },
+        "decisionContext": {
+          "session": {"accountId": "account-fixture", "status": "running"},
+          "availableSkills": [
+            {
+              "SkillName": "stop_move",
+              "SchemaVersion": "v1",
+              "RequireRunning": true,
+              "CooldownMs": 0
+            }
+          ],
+          "skillArgumentHints": [
+            {
+              "skillName": "stop_move",
+              "schemaVersion": "v1",
+              "argumentStatus": "ready",
+              "suggestedArgs": {},
+              "allowedArgs": [],
+              "missingArgs": [],
+              "warnings": [],
+              "nextSteps": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eventId": "fixture-vehicle-cancel-window",
+      "eventType": "observation_updated",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 3,
+      "stateVersion": 3,
+      "decisionLeaseId": "lease-fixture-3",
+      "occurredAtMs": 1700000000003,
+      "payload": {
+        "reason": "vehicle_cancel_window_opened",
+        "lease": {
+          "sessionId": "session-fixture",
+          "controlGeneration": 1,
+          "stateVersion": 3,
+          "decisionLeaseId": "lease-fixture-3",
+          "leaseKind": "vehicle_cancel_window",
+          "allowedActions": ["call_skill", "wait"],
+          "allowedSkillName": "hot_air_balloon_exit",
+          "allowedSkillNames": ["hot_air_balloon_exit"],
+          "parentSkillName": "hot_air_balloon_auto_schedule"
+        },
+        "decisionContext": {
+          "session": {"accountId": "account-fixture", "status": "running"},
+          "availableSkills": [
+            {
+              "SkillName": "hot_air_balloon_exit",
+              "SchemaVersion": "v1",
+              "RequireRunning": true,
+              "CooldownMs": 0
+            }
+          ],
+          "skillArgumentHints": [
+            {
+              "skillName": "hot_air_balloon_exit",
+              "schemaVersion": "v1",
+              "argumentStatus": "ready",
+              "suggestedArgs": {},
+              "allowedArgs": [],
+              "missingArgs": [],
+              "warnings": [],
+              "nextSteps": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eventId": "fixture-vehicle-recovery",
+      "eventType": "observation_updated",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 4,
+      "stateVersion": 4,
+      "decisionLeaseId": "lease-fixture-4",
+      "occurredAtMs": 1700000000004,
+      "payload": {
+        "reason": "vehicle_recovery_requested",
+        "lease": {
+          "sessionId": "session-fixture",
+          "controlGeneration": 1,
+          "stateVersion": 4,
+          "decisionLeaseId": "lease-fixture-4",
+          "leaseKind": "vehicle_recovery",
+          "allowedActions": ["call_skill", "wait"],
+          "allowedSkillName": "helicopter_exit",
+          "allowedSkillNames": ["helicopter_exit"],
+          "parentSkillName": "helicopter_auto_schedule"
+        },
+        "decisionContext": {
+          "session": {"accountId": "account-fixture", "status": "running"},
+          "availableSkills": [
+            {
+              "SkillName": "helicopter_exit",
+              "SchemaVersion": "v1",
+              "RequireRunning": true,
+              "CooldownMs": 0
+            }
+          ],
+          "skillArgumentHints": [
+            {
+              "skillName": "helicopter_exit",
+              "schemaVersion": "v1",
+              "argumentStatus": "ready",
+              "suggestedArgs": {},
+              "allowedArgs": [],
+              "missingArgs": [],
+              "warnings": [],
+              "nextSteps": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eventId": "fixture-skill-started",
+      "eventType": "skill_started",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 5,
+      "stateVersion": 4,
+      "decisionLeaseId": null,
+      "occurredAtMs": 1700000000005,
+      "payload": {
+        "decisionId": "decision-fixture-1",
+        "skillName": "stop_move",
+        "skillCallId": "call-fixture-1",
+        "startedAtMs": 1700000000005
+      }
+    },
+    {
+      "eventId": "fixture-skill-finished",
+      "eventType": "skill_finished",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 6,
+      "stateVersion": 5,
+      "decisionLeaseId": null,
+      "occurredAtMs": 1700000000006,
+      "payload": {
+        "decisionId": "decision-fixture-1",
+        "skillName": "stop_move",
+        "skillCallId": "call-fixture-1",
+        "status": "success",
+        "reason": "ok",
+        "failureCategory": null,
+        "retryable": false,
+        "startedAtMs": 1700000000005,
+        "finishedAtMs": 1700000000006
+      }
+    },
+    {
+      "eventId": "fixture-decision-rejected",
+      "eventType": "decision_rejected",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 7,
+      "stateVersion": 5,
+      "decisionLeaseId": null,
+      "occurredAtMs": 1700000000007,
+      "payload": {
+        "decisionId": "decision-fixture-2",
+        "reason": "stale_state"
+      }
+    },
+    {
+      "eventId": "fixture-session-stopped",
+      "eventType": "session_stopped",
+      "sessionId": "session-fixture",
+      "controlGeneration": 1,
+      "eventSequence": 8,
+      "stateVersion": 5,
+      "decisionLeaseId": null,
+      "occurredAtMs": 1700000000008,
+      "payload": {
+        "reason": "hosting_stopped",
+        "stoppedAtMs": 1700000000008
+      }
+    }
+  ]
+}

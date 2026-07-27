@@ -15,10 +15,22 @@ from src.core.integration.llm_gateway_v2.contracts import (
 
 def decision_lease_payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "sessionId": "session-1",
+        "controlGeneration": 1,
         "decisionLeaseId": "lease-1",
         "stateVersion": 0,
         "leaseKind": "hosting_control",
-        "allowedDecisionActions": ["wait"],
+        "allowedActions": ["wait"],
+        "allowedSkillName": None,
+        "allowedSkillNames": [],
+        "parentSkillName": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def decision_context_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "session": {
             "status": "active",
             "tags": ["initial"],
@@ -38,8 +50,14 @@ def session_started_event(**overrides: Any) -> dict[str, Any]:
         "sessionId": "session-1",
         "controlGeneration": 1,
         "eventSequence": 1,
+        "stateVersion": 0,
+        "decisionLeaseId": "lease-1",
         "occurredAtMs": 1_700_000_000_000,
-        "payload": {"lease": decision_lease_payload()},
+        "payload": {
+            "reason": "decision_requested",
+            "lease": decision_lease_payload(),
+            "decisionContext": decision_context_payload(),
+        },
     }
     event.update(overrides)
     return event
@@ -52,11 +70,19 @@ def skill_finished_event(**overrides: Any) -> dict[str, Any]:
         "sessionId": "session-1",
         "controlGeneration": 1,
         "eventSequence": 2,
+        "stateVersion": 1,
+        "decisionLeaseId": None,
         "occurredAtMs": 1_700_000_000_100,
         "payload": {
             "decisionId": "decision-1",
+            "skillName": "move_to",
             "skillCallId": "call-1",
-            "terminal": {"status": "success"},
+            "status": "success",
+            "reason": "ok",
+            "failureCategory": None,
+            "retryable": False,
+            "startedAtMs": 1_700_000_000_099,
+            "finishedAtMs": 1_700_000_000_100,
         },
     }
     event.update(overrides)
@@ -141,7 +167,7 @@ def test_batch_envelope_copies_event_payload_recursively() -> None:
 
     model = GatewayV2BatchEnvelope.model_validate(payload)
     event["eventId"] = "changed"
-    event["payload"]["lease"]["session"]["tags"].append("changed")
+    event["payload"]["decisionContext"]["session"]["tags"].append("changed")
 
     assert model.model_dump()["events"] == [expected]
 
@@ -156,9 +182,9 @@ def test_batch_envelope_events_are_deeply_immutable() -> None:
     with pytest.raises(ValidationError):
         model.events[0].event_id = "changed"
     with pytest.raises(TypeError):
-        model.events[0].payload.lease.session["metadata"]["source"] = "changed"
+        model.events[0].payload.decision_context.session["metadata"]["source"] = "changed"
     with pytest.raises(AttributeError):
-        model.events[0].payload.lease.session["tags"].append("changed")
+        model.events[0].payload.decision_context.session["tags"].append("changed")
     with pytest.raises(ValidationError):
         model.events[1].payload.terminal.status = "changed"
 
@@ -173,9 +199,9 @@ def test_batch_envelope_dump_thaws_nested_containers_to_json_types() -> None:
     assert type(dumped) is dict
     assert type(dumped["events"]) is list
     assert type(dumped["events"][0]) is dict
-    assert type(dumped["events"][0]["payload"]["lease"]["session"]) is dict
-    assert type(dumped["events"][0]["payload"]["lease"]["session"]["tags"]) is list
-    assert type(dumped["events"][1]["payload"]["terminal"]) is dict
+    assert type(dumped["events"][0]["payload"]["decisionContext"]["session"]) is dict
+    assert type(dumped["events"][0]["payload"]["decisionContext"]["session"]["tags"]) is list
+    assert dumped["events"][1]["payload"]["status"] == "success"
 
 
 @pytest.mark.parametrize(
@@ -205,7 +231,7 @@ def test_batch_envelope_rejects_values_outside_json_domain(
     invalid_value: Any,
 ) -> None:
     event = session_started_event()
-    event["payload"]["lease"]["session"] = {"value": invalid_value}
+    event["payload"]["decisionContext"]["session"] = {"value": invalid_value}
 
     with pytest.raises(ValidationError):
         GatewayV2BatchEnvelope.model_validate(
@@ -223,21 +249,20 @@ def test_batch_envelope_accepts_and_freezes_complete_json_value_domain() -> None
         "listValue": [None, False, 7, 2.5, "item", {"nested": ["value"]}],
         "objectValue": {"key": "value"},
     }
-    event = session_started_event(
-        payload={"lease": decision_lease_payload(session=session)}
-    )
+    event = session_started_event()
+    event["payload"]["decisionContext"] = decision_context_payload(session=session)
 
     model = GatewayV2BatchEnvelope.model_validate(envelope_payload(events=[event]))
     dumped = model.model_dump()
 
-    assert dumped["events"][0]["payload"]["lease"]["session"] == session
+    assert dumped["events"][0]["payload"]["decisionContext"]["session"] == session
     assert json.loads(model.model_dump_json())["events"] == [event]
     with pytest.raises(TypeError):
-        model.events[0].payload.lease.session["objectValue"]["key"] = "changed"
+        model.events[0].payload.decision_context.session["objectValue"]["key"] = "changed"
     with pytest.raises(AttributeError):
-        model.events[0].payload.lease.session["listValue"].append("changed")
+        model.events[0].payload.decision_context.session["listValue"].append("changed")
     with pytest.raises(AttributeError):
-        model.events[0].payload.lease.session["listValue"][5]["nested"].append(
+        model.events[0].payload.decision_context.session["listValue"][5]["nested"].append(
             "changed"
         )
 
@@ -274,6 +299,8 @@ def test_batch_envelope_rejects_unknown_event_type() -> None:
         "sessionId",
         "controlGeneration",
         "eventSequence",
+        "stateVersion",
+        "decisionLeaseId",
         "occurredAtMs",
         "payload",
     ],

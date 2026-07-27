@@ -105,7 +105,11 @@ class GatewayV2EventDispatcher:
             if isinstance(event, SkillFinishedEvent):
                 mutation = await self.terminal_repository.record_skill_finished(claimed)
                 outcome = self._mutation_result(mutation, stage="terminal")
-                if outcome.outcome != "succeeded" or event.payload.lease is None:
+                if (
+                    outcome.outcome != "succeeded"
+                    or event.payload.lease is None
+                    or claimed.historical_recovery
+                ):
                     return outcome
                 return await self._process_lease_event(claimed)
             if isinstance(event, DecisionRejectedEvent):

@@ -497,12 +497,18 @@ _LOCK_DECISION_FOR_REJECTION = sa.text(
 _APPLY_REJECTION = sa.text(
     """
     UPDATE llm_gateway_decisions
-    SET status = :status,
-        response_status = CASE WHEN :status = 'rejected' THEN 'rejected' ELSE response_status END,
+    SET status = CAST(:status AS VARCHAR(32)),
+        response_status = CASE
+            WHEN CAST(:status AS VARCHAR(32)) = 'rejected' THEN 'rejected'
+            ELSE response_status
+        END,
         response_reason = COALESCE(response_reason, :incoming_reason),
         error_stage = :error_stage,
         error_category = :error_category,
-        completed_at = CASE WHEN :status IN ('rejected', 'manual') THEN clock_timestamp() ELSE completed_at END,
+        completed_at = CASE
+            WHEN CAST(:status AS VARCHAR(32)) IN ('rejected', 'manual') THEN clock_timestamp()
+            ELSE completed_at
+        END,
         updated_at = clock_timestamp()
     WHERE id = :row_id
     """

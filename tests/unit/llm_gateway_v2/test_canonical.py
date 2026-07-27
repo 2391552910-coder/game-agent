@@ -8,13 +8,27 @@ from src.core.integration.llm_gateway_v2.contracts import GatewayV2BatchEnvelope
 
 def _lease() -> dict:
     return {
+        "sessionId": "session-1",
+        "controlGeneration": 1,
         "decisionLeaseId": "lease-1",
         "stateVersion": 1,
         "leaseKind": "hosting_control",
-        "allowedDecisionActions": ["wait"],
-        "session": {"status": "active", "position": {"x": 1, "y": 2}},
-        "availableSkills": [],
-        "skillArgumentHints": [],
+        "allowedActions": ["wait"],
+        "allowedSkillName": None,
+        "allowedSkillNames": [],
+        "parentSkillName": None,
+    }
+
+
+def _decision_payload(*, lease: dict | None = None) -> dict:
+    return {
+        "reason": "decision_requested",
+        "lease": lease or _lease(),
+        "decisionContext": {
+            "session": {"status": "active", "position": {"x": 1, "y": 2}},
+            "availableSkills": [],
+            "skillArgumentHints": [],
+        },
     }
 
 
@@ -25,8 +39,10 @@ def _event(**overrides: object) -> dict:
         "sessionId": "session-1",
         "controlGeneration": 1,
         "eventSequence": 1,
+        "stateVersion": 1,
+        "decisionLeaseId": "lease-1",
         "occurredAtMs": 1_700_000_000_000,
-        "payload": {"lease": _lease()},
+        "payload": _decision_payload(),
     }
     value.update(overrides)
     return value
@@ -58,12 +74,20 @@ def test_hash_excludes_envelope_and_hmac_transport_metadata() -> None:
 @pytest.mark.parametrize(
     "mutation",
     [
-        {"payload": {"lease": {**_lease(), "stateVersion": 2}}},
-        {"controlGeneration": 2},
+        {
+            "stateVersion": 2,
+            "payload": _decision_payload(lease={**_lease(), "stateVersion": 2}),
+        },
+        {
+            "controlGeneration": 2,
+            "payload": _decision_payload(
+                lease={**_lease(), "controlGeneration": 2}
+            ),
+        },
         {
             "eventType": "observation_updated",
             "eventSequence": 2,
-            "payload": {"lease": _lease()},
+            "payload": _decision_payload(),
         },
     ],
 )
@@ -83,6 +107,8 @@ def test_canonical_bytes_are_deterministic_compact_utf8_json() -> None:
         "occurredAtMs": first_payload["occurredAtMs"],
         "eventSequence": first_payload["eventSequence"],
         "controlGeneration": first_payload["controlGeneration"],
+        "stateVersion": first_payload["stateVersion"],
+        "decisionLeaseId": first_payload["decisionLeaseId"],
         "sessionId": first_payload["sessionId"],
         "eventType": first_payload["eventType"],
         "eventId": first_payload["eventId"],
