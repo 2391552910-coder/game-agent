@@ -70,7 +70,7 @@ def _event(
                 "controlGeneration": generation,
                 "decisionLeaseId": root_lease_id,
                 "stateVersion": resolved_state_version,
-                "leaseKind": "hosting_control",
+                "leaseKind": "observation",
                 "allowedActions": ["wait"],
                 "allowedSkillName": None,
                 "allowedSkillNames": [],
@@ -80,12 +80,19 @@ def _event(
                 "session": {"status": "active", "generation": generation},
                 "availableSkills": [],
                 "skillArgumentHints": [],
+                "lastSkillResult": None,
             },
         }
     elif resolved_type == "session_stopped":
         payload = {"reason": stop_reason, "stoppedAtMs": occurred_at_ms}
     elif resolved_type == "decision_rejected":
-        payload = {"decisionId": "decision-1", "reason": "stale_state"}
+        payload = {
+            "decisionId": "decision-1",
+            "action": "wait",
+            "skillName": None,
+            "reason": "stale_state",
+            "rejectedAtMs": occurred_at_ms,
+        }
     else:
         raise AssertionError(f"unsupported test event type: {resolved_type}")
     return parse_gateway_v2_event(

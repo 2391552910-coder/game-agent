@@ -16,12 +16,16 @@ import pytest
 from src.api import main
 from src.api.routes import gateway_v2
 from src.core.integration.llm_gateway_v2 import auth
+from src.core.integration.llm_gateway_v2.activity_plan_repository import ActivityPlanRepository
+from src.core.integration.llm_gateway_v2.activity_planner import ActivityPlanCoordinator
+from src.core.integration.llm_gateway_v2.auto_chat import AutoChatClient
 from src.core.integration.llm_gateway_v2.contracts import GatewayV2BatchAck, parse_gateway_v2_event
 from src.core.integration.llm_gateway_v2.event_worker import (
     ClaimedGatewayEvent,
     EventProcessResult,
     EventWorker,
 )
+from src.core.integration.llm_gateway_v2.hosted_chat import HostedChatService
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry
 
 APP_ID = "gateway-events"
@@ -118,6 +122,7 @@ def _v2_payload() -> dict[str, Any]:
                         "session": {"accountId": "account-1", "status": "active"},
                         "availableSkills": [],
                         "skillArgumentHints": [],
+                        "lastSkillResult": None,
                     },
                 },
             }
@@ -134,6 +139,50 @@ def _configure(settings, *, v1_enabled: bool, v2_enabled: bool) -> None:
     settings.llm_gateway_timestamp_tolerance_ms = 10**15
     auth.settings = settings
     gateway_v2.settings = settings
+
+
+@pytest.mark.parametrize(
+    ("control_enabled", "auto_chat_enabled"),
+    [(True, True), (True, False), (False, True), (False, False)],
+)
+def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
+    _mock_settings,
+    monkeypatch: pytest.MonkeyPatch,
+    control_enabled: bool,
+    auto_chat_enabled: bool,
+) -> None:
+    _mock_settings.llm_gateway_decision_url = (
+        "http://gateway.local/api/v1/hosting/llm/decision"
+    )
+    _mock_settings.llm_gateway_decision_app_id = "decision-app"
+    _mock_settings.llm_gateway_decision_app_secret = "decision-secret"
+    _mock_settings.llm_gateway_control_url = "http://gateway.local"
+    _mock_settings.llm_gateway_control_app_id = "control-app" if control_enabled else None
+    _mock_settings.llm_gateway_control_app_secret = "control-secret" if control_enabled else None
+    _mock_settings.llm_gateway_control_timeout_seconds = 10
+    _mock_settings.llm_gateway_control_max_retries = 1
+    _mock_settings.auto_chat_base_url = "http://auto-chat.local" if auto_chat_enabled else None
+    _mock_settings.auto_chat_timeout_seconds = 45
+    _mock_settings.auto_chat_deadline_safety_seconds = 10
+    _mock_settings.llm_gateway_hosted_chat_queue_size = 100
+    _mock_settings.llm_gateway_hosted_chat_state_ttl_seconds = 300
+    _mock_settings.llm_gateway_hosted_chat_max_state_entries = 10_000
+    monkeypatch.setattr(main, "settings", _mock_settings)
+
+    runtime = main.build_gateway_v2_runtime()
+
+    dispatcher = runtime.event_worker._processor
+    service = dispatcher.hosted_chat_service
+    expected_enabled = control_enabled and auto_chat_enabled
+    assert isinstance(service, HostedChatService) is expected_enabled
+    if expected_enabled:
+        assert isinstance(service._conversation_client, AutoChatClient)
+    assert isinstance(dispatcher.activity_repository, ActivityPlanRepository)
+    assert isinstance(dispatcher.decision_planner.activity_coordinator, ActivityPlanCoordinator)
+    assert (
+        dispatcher.decision_planner.activity_coordinator._repository
+        is dispatcher.activity_repository
+    )
 
 
 async def _post(client, path: str, payload: dict[str, Any]):
@@ -254,6 +303,14 @@ async def test_lifespan_starts_and_stops_dependencies_in_contract_order(_mock_se
                 AsyncMock(side_effect=lambda: operations.append("v1:stop")),
             ),
             patch("src.api.main.build_gateway_v2_runtime", MagicMock(return_value=runtime)),
+            patch(
+                "src.api.main.warmup_gateway_v2_rag",
+                AsyncMock(side_effect=lambda: operations.append("rag:warmup")),
+            ),
+            patch(
+                "src.api.main.shutdown_gateway_v2_rag",
+                AsyncMock(side_effect=lambda: operations.append("rag:stop")),
+            ),
         ):
             async with main.lifespan(main.app):
                 operations.append("serving")
@@ -264,6 +321,7 @@ async def test_lifespan_starts_and_stops_dependencies_in_contract_order(_mock_se
         "db:start",
         "redis:start",
         "v1:start",
+        "rag:warmup",
         "event:start",
         "decision:start",
         "readiness:enable",
@@ -271,10 +329,19 @@ async def test_lifespan_starts_and_stops_dependencies_in_contract_order(_mock_se
         "readiness:disable",
         "event:drain",
         "decision:drain",
+        "rag:stop",
         "v1:stop",
         "redis:stop",
         "db:stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_v2_rag_warmup_initializes_lightrag() -> None:
+    with patch("src.core.engine.lightrag_engine.get_rag", AsyncMock()) as get_rag:
+        await main.warmup_gateway_v2_rag()
+
+    get_rag.assert_awaited_once()
 
 
 @dataclass

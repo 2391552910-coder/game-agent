@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import logging
+import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -46,6 +49,32 @@ def test_sensitive_sdk_loggers_are_restricted_and_sql_echo_is_disabled() -> None
     assert engine.echo is False
 
 
+def test_uvicorn_access_log_includes_local_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    access_logger = logging.getLogger("uvicorn.access")
+    monkeypatch.setattr(access_logger, "handlers", [handler])
+    monkeypatch.setattr(access_logger, "propagate", False)
+    access_logger.setLevel(logging.INFO)
+
+    configure_logging()
+    access_logger.info(
+        '%s - "%s %s HTTP/%s" %d',
+        "127.0.0.1:54321",
+        "POST",
+        "/api/gateway/v2/events",
+        "1.1",
+        200,
+    )
+
+    output = stream.getvalue().strip()
+    assert re.fullmatch(
+        r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \[INFO\] '
+        r'127\.0\.0\.1:54321 - "POST /api/gateway/v2/events HTTP/1\.1" 200 OK',
+        output,
+    )
+
+
 def test_safe_exception_fields_include_only_stable_diagnostics() -> None:
     error = RuntimeError(SECRET_TEXT)
 
@@ -71,6 +100,40 @@ def test_safe_exception_fields_include_only_stable_diagnostics() -> None:
         "elapsed_ms": 12.5,
     }
     assert SECRET_TEXT not in repr(fields)
+
+
+def test_startup_runtime_summary_reports_effective_model_and_timeouts_without_secrets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import src.api.main as main
+
+    runtime_settings = SimpleNamespace(
+        llm_gateway_v1_enabled=False,
+        llm_gateway_v2_enabled=True,
+        llm_provider_source="env",
+        llm_provider="deepseek",
+        openai_base_url="https://ark.example.test/api/v3",
+        openai_default_model="deepseek-v4-flash-test",
+        openai_fast_model="deepseek-v4-flash-test",
+        openai_api_key="provider-secret-must-not-leak",
+        llm_gateway_v2_agent_timeout_seconds=60.0,
+        llm_gateway_decision_timeout_seconds=10.0,
+        llm_gateway_decision_app_secret="gateway-secret-must-not-leak",
+    )
+
+    with caplog.at_level(logging.INFO, logger="src.api.main"):
+        main.log_runtime_configuration(runtime_settings)
+
+    assert "v1_enabled=False" in caplog.text
+    assert "v2_enabled=True" in caplog.text
+    assert "provider=deepseek" in caplog.text
+    assert "base_url=https://ark.example.test/api/v3" in caplog.text
+    assert "default_model=deepseek-v4-flash-test" in caplog.text
+    assert "fast_model=deepseek-v4-flash-test" in caplog.text
+    assert "agent_timeout_seconds=60.0" in caplog.text
+    assert "decision_timeout_seconds=10.0" in caplog.text
+    assert "provider-secret-must-not-leak" not in caplog.text
+    assert "gateway-secret-must-not-leak" not in caplog.text
 
 
 async def test_agent_failure_log_does_not_include_exception_message(caplog: pytest.LogCaptureFixture) -> None:

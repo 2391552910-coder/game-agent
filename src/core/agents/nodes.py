@@ -46,6 +46,22 @@ _SINGLE_CALL_TIMEOUT = 60
 logger = logging.getLogger(__name__)
 
 
+def _truncate_context_to_token_limit(text: str, max_tokens: int) -> str:
+    if max_tokens <= 0 or not text:
+        return ""
+    try:
+        import tiktoken
+
+        encoding = tiktoken.get_encoding("o200k_base")
+        token_ids = encoding.encode(text)
+        if len(token_ids) <= max_tokens:
+            return text
+        return encoding.decode(token_ids[:max_tokens])
+    except Exception:
+        max_chars = max_tokens * 4
+        return text if len(text) <= max_chars else text[:max_chars]
+
+
 # 节点1 获取玩家快照
 async def fetch_snapshot_node(state: AnalysisState) -> dict[str, Any]:
     """
@@ -90,19 +106,37 @@ async def retrieve_rag_context_node(state: AnalysisState) -> dict[str, Any]:
             exact_context = await retrieve_exact_rag_context(query)
 
         query_start = perf_counter()
+        is_gateway_v2 = "gateway_context" in state
+        query_options: dict[str, Any] = {
+            "mode": settings.llm_gateway_v2_rag_mode if is_gateway_v2 else "hybrid",
+            "only_need_context": True,
+            "enable_rerank": settings.rerank_enabled,
+            "chunk_top_k": settings.lightrag_chunk_top_k,
+        }
+        if is_gateway_v2:
+            query_options.update(
+                {
+                    "top_k": settings.llm_gateway_v2_rag_top_k,
+                    "chunk_top_k": settings.llm_gateway_v2_rag_chunk_top_k,
+                    "max_entity_tokens": settings.llm_gateway_v2_rag_max_entity_tokens,
+                    "max_relation_tokens": settings.llm_gateway_v2_rag_max_relation_tokens,
+                    "max_total_tokens": settings.llm_gateway_v2_rag_max_total_tokens,
+                }
+            )
         context = await asyncio.wait_for(
             rag.aquery(
                 query,
-                param=QueryParam(
-                    mode="hybrid",
-                    enable_rerank=settings.rerank_enabled,
-                    chunk_top_k=settings.lightrag_chunk_top_k,
-                ),
+                param=QueryParam(**query_options),
             ),
             timeout=_SINGLE_CALL_TIMEOUT,
         )
         if exact_context:
             context = f"{exact_context}\n\n{context}" if context else exact_context
+        if "gateway_context" in state:
+            context = _truncate_context_to_token_limit(
+                context,
+                settings.llm_gateway_v2_rag_context_max_tokens,
+            )
         query_elapsed_ms = (perf_counter() - query_start) * 1000
         logger.info(
             (

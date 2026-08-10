@@ -61,6 +61,7 @@ def _event(
                 "session": {"status": "active"},
                 "availableSkills": [],
                 "skillArgumentHints": [],
+                "lastSkillResult": None,
             },
         }
         decision_lease_id = "lease-1"
@@ -82,6 +83,40 @@ def _event(
             "decisionLeaseId": decision_lease_id,
             "occurredAtMs": 1_700_000_000_000 + sequence,
             "payload": payload,
+        }
+    )
+
+
+def _chat_event(event_id: str = "chat-event-1", *, sequence: int = 2) -> GatewayV2Event:
+    return parse_gateway_v2_event(
+        {
+            "eventId": event_id,
+            "eventType": "chat_received",
+            "sessionId": "session-1",
+            "controlGeneration": 1,
+            "eventSequence": sequence,
+            "stateVersion": 0,
+            "decisionLeaseId": None,
+            "occurredAtMs": 1_700_000_000_000 + sequence,
+            "payload": {
+                "sessionId": "session-1",
+                "sender": {"avatarId": "100", "roleId": "200"},
+                "chatType": "friend",
+                "supported": True,
+                "text": "你好",
+                "serverTimeMs": 1_700_000_000_000 + sequence,
+                "conversation": {
+                    "conversationId": "conv-100-200-1",
+                    "pairKey": "100:200",
+                    "speakerRoleId": 100,
+                    "targetRoleId": 200,
+                    "brainUsername": "conv-100",
+                    "historyRounds": [],
+                    "completedRounds": 0,
+                    "maxRounds": 6,
+                    "expiresAtMs": 1_800_000_000_000,
+                },
+            },
         }
     )
 
@@ -144,6 +179,31 @@ async def test_new_duplicate_mixed_batch_and_retry_are_durable(session_factory) 
     async with session_factory() as session:
         assert await session.scalar(sa.text("SELECT status FROM llm_gateway_control_cycles")) == "pending"
         assert await session.scalar(sa.text("SELECT status FROM llm_gateway_events LIMIT 1")) == "pending"
+
+
+async def test_hosted_chat_event_is_admitted_once_without_a_decision_lease(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    started = _event("session-started")
+    chat = _chat_event()
+
+    first = await repository.accept_event_batch(IDENTITY, "trace-chat", (started, chat))
+    duplicate = await repository.accept_event_batch(IDENTITY, "trace-chat-retry", (chat,))
+
+    assert first.received_event_ids == ("session-started", "chat-event-1")
+    assert duplicate.received_event_ids == ()
+    assert duplicate.duplicate_event_ids == ("chat-event-1",)
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT event_type, event_body FROM llm_gateway_events "
+                    "WHERE event_id = 'chat-event-1'"
+                )
+            )
+        ).mappings().one()
+    assert row["event_type"] == "chat_received"
+    assert row["event_body"]["stateVersion"] == 0
+    assert row["event_body"]["decisionLeaseId"] is None
 
 
 async def test_complete_event_body_hash_and_trace_are_persisted(session_factory) -> None:

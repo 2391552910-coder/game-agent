@@ -497,7 +497,7 @@ async def handle_gateway_event(request: Request):
     batch = _parse_gateway_event_batch_envelope(raw_body)
     if batch is None:
         return _protocol_error("bad_request", 400)
-    if not bool(getattr(_settings(), "llm_gateway_v1_enabled", True)):
+    if not bool(getattr(_settings(), "llm_gateway_v1_enabled", False)):
         return _protocol_error("service_disabled", 503)
 
     received_event_ids: list[str] = []

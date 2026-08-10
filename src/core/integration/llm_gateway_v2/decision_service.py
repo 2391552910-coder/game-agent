@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Mapping, Sequence
+import logging
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Protocol, cast
+
+from pydantic import ValidationError
 
 from src.core.agents.gateway_v2_models import (
     GatewayV2AgentAction,
@@ -15,6 +19,17 @@ from src.core.agents.gateway_v2_models import (
     GatewayV2StopHostingAction,
     GatewayV2WaitAction,
     parse_gateway_v2_agent_action,
+)
+from src.core.integration.llm_gateway_v2.activity_plan_repository import (
+    ActivityPlanBinding,
+    ActivityPlanContext,
+)
+from src.core.integration.llm_gateway_v2.activity_planner import ActivityPlanCoordinator
+from src.core.integration.llm_gateway_v2.auto_chat import (
+    AutoChatMessage,
+    AutoChatPermanentError,
+    AutoChatRetryableError,
+    ConversationContext,
 )
 from src.core.integration.llm_gateway_v2.canonical import canonical_json_bytes
 from src.core.integration.llm_gateway_v2.contracts import (
@@ -33,6 +48,8 @@ from src.core.integration.llm_gateway_v2.outbox_repository import (
     PlannedDecision,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class GatewayV2DecisionSelectionError(Exception):
     def __init__(self) -> None:
@@ -48,14 +65,32 @@ class GatewayV2AgentExecutionError(Exception):
         super().__init__("gateway v2 agent execution failed")
 
 
+class GatewayV2ConversationExecutionError(Exception):
+    stage = "conversation"
+
+    def __init__(self, category: str, *, retryable: bool) -> None:
+        self.category = category
+        self.retryable = retryable
+        super().__init__("gateway v2 conversation execution failed")
+
+
 class GatewayV2AgentRunner(Protocol):
     async def ainvoke(self, state: dict[str, Any]) -> Mapping[str, Any]: ...
+
+
+class GatewayV2ConversationDecisionService(Protocol):
+    async def decide(self, context: GatewayV2AgentContext) -> GatewayV2AgentAction: ...
+
+
+class AutoChatMessageGenerator(Protocol):
+    async def generate(self, conversation: ConversationContext) -> AutoChatMessage: ...
 
 
 def build_gateway_v2_agent_context(event: GatewayV2Event) -> GatewayV2AgentContext:
     terminal_result: Mapping[str, Any] | None = None
     if isinstance(event, (SessionStartedEvent, ObservationUpdatedEvent)):
         lease = event.payload.lease
+        terminal_result = event.payload.decision_context.last_skill_result
     elif isinstance(event, SkillFinishedEvent) and event.payload.lease is not None:
         lease = event.payload.lease
         terminal_result = event.payload.terminal.model_dump(mode="json", by_alias=True)
@@ -106,19 +141,30 @@ def _lease_pairing_is_permitted(
     context: GatewayV2AgentContext,
     candidate: GatewayV2CallSkillAction,
 ) -> bool:
+    paired_exits = {
+        "hot_air_balloon_auto_schedule": "hot_air_balloon_exit",
+        "helicopter_auto_schedule": "helicopter_exit",
+    }
+    if context.lease_kind == "observation":
+        return candidate.skill_name not in set(paired_exits.values())
+
     if context.lease_kind == "movement_control":
         if candidate.skill_name not in {"jump", "stop_move"}:
             return False
         return candidate.skill_name != "stop_move" or context.parent_skill_name == "move_to"
 
-    if context.lease_kind in {"vehicle_cancel_window", "vehicle_recovery"}:
-        paired_exits = {
-            "hot_air_balloon_auto_schedule": "hot_air_balloon_exit",
-            "helicopter_auto_schedule": "helicopter_exit",
-        }
+    if context.lease_kind == "vehicle_cancel_window":
         return paired_exits.get(context.parent_skill_name) == candidate.skill_name
 
-    return True
+    if context.lease_kind == "vehicle_recovery":
+        return candidate.skill_name == "observe_state" or (
+            paired_exits.get(context.parent_skill_name) == candidate.skill_name
+        )
+
+    if context.lease_kind == "conversation":
+        return candidate.skill_name == "nearby_chat_send"
+
+    return False
 
 
 def _skill_is_permitted(
@@ -129,16 +175,19 @@ def _skill_is_permitted(
         return False
     if candidate.skill_name == "ground":
         return False
-    allowed_skill_names = set(context.allowed_skill_names)
-    if context.allowed_skill_name is not None:
-        allowed_skill_names.add(context.allowed_skill_name)
+    if context.lease_kind == "observation":
+        allowed_skill_names = {skill.skill_name for skill in context.available_skills}
+    else:
+        allowed_skill_names = set(context.allowed_skill_names)
+        if context.allowed_skill_name is not None:
+            allowed_skill_names.add(context.allowed_skill_name)
     if candidate.skill_name not in allowed_skill_names:
         return False
     if not _lease_pairing_is_permitted(context, candidate):
         return False
     tracking_metadata = candidate.tracking_metadata()
     if tracking_metadata is not None:
-        account_id = context.session_snapshot.get("accountId")
+        account_id = context.session_snapshot.get("AccountId", context.session_snapshot.get("accountId"))
         if tracking_metadata.user_id != account_id or tracking_metadata.action_type != candidate.skill_name:
             return False
 
@@ -185,6 +234,237 @@ def select_gateway_v2_action(
     raise GatewayV2DecisionSelectionError
 
 
+def _snapshot_value(snapshot: Mapping[str, Any], canonical: str, legacy: str) -> Any:
+    return snapshot.get(canonical, snapshot.get(legacy))
+
+
+def _initial_room_transition_action(
+    context: GatewayV2AgentContext,
+) -> GatewayV2CallSkillAction | None:
+    if context.lease_kind != "observation":
+        return None
+
+    snapshot = context.session_snapshot
+    scene_id = _snapshot_value(snapshot, "SceneId", "sceneId")
+    scene_name = _snapshot_value(snapshot, "SceneName", "sceneName")
+    navigation_available = _snapshot_value(
+        snapshot,
+        "NavigationAvailable",
+        "navigationAvailable",
+    )
+    skill_executing = _snapshot_value(snapshot, "SkillExecuting", "skillExecuting")
+    last_skill_name = _snapshot_value(snapshot, "LastSkillName", "lastSkillName")
+    if (
+        str(scene_id) != "1"
+        or not isinstance(scene_name, str)
+        or scene_name.casefold() != "lobby"
+        or navigation_available not in (False, "false", "False", 0)
+        or skill_executing in (True, "true", "True", 1)
+        or (
+            isinstance(last_skill_name, str)
+            and last_skill_name.casefold() == "scene_tornado"
+        )
+    ):
+        return None
+
+    tornado_skill = next(
+        (skill for skill in context.available_skills if skill.skill_name == "scene_tornado"),
+        None,
+    )
+    if tornado_skill is None:
+        return None
+    candidate = GatewayV2CallSkillAction(
+        action="call_skill",
+        skillName=tornado_skill.skill_name,
+        schemaVersion=tornado_skill.schema_version,
+        arguments={},
+        reason="Move the autonomously hosted role from the initial room to the plaza",
+    )
+    return candidate if _skill_is_permitted(context, candidate) else None
+
+
+def _planned_activity_action(
+    context: GatewayV2AgentContext,
+    activity_context: ActivityPlanContext,
+) -> GatewayV2AgentAction | None:
+    step = activity_context.plan.current_step()
+    if step.skill_name is None:
+        if "wait" in context.allowed_decision_actions:
+            return GatewayV2WaitAction(
+                reason="Remain available for the next opportunity in the activity plan",
+                waitMs=1_000,
+            )
+        if "no_op" in context.allowed_decision_actions:
+            return GatewayV2NoOpAction(
+                reason="Remain available for the next opportunity in the activity plan"
+            )
+        return None
+
+    assert step.schema_version is not None
+    return _gateway_v2_activity_skill_action(
+        context,
+        step.skill_name,
+        step.schema_version,
+        reason=step.intent,
+    )
+
+
+def _gateway_v2_activity_skill_action(
+    context: GatewayV2AgentContext,
+    skill_name: str,
+    schema_version: str,
+    *,
+    reason: str,
+) -> GatewayV2CallSkillAction | None:
+    identity = (skill_name, schema_version)
+    hint = next(
+        (
+            item
+            for item in context.skill_argument_hints
+            if (item.skill_name, item.schema_version) == identity
+        ),
+        None,
+    )
+    arguments: Mapping[str, Any] = {} if hint is None else hint.suggested_args
+    try:
+        candidate = GatewayV2CallSkillAction(
+            action="call_skill",
+            skillName=skill_name,
+            schemaVersion=schema_version,
+            arguments=arguments,
+            reason=reason,
+        )
+    except Exception:
+        return None
+    return candidate if _skill_is_permitted(context, candidate) else None
+
+
+def gateway_v2_activity_skill_is_permitted(
+    context: GatewayV2AgentContext,
+    skill_name: str,
+    schema_version: str,
+) -> bool:
+    return (
+        _gateway_v2_activity_skill_action(
+            context,
+            skill_name,
+            schema_version,
+            reason="Validate the current activity step against the Gateway lease",
+        )
+        is not None
+    )
+
+
+class GatewayV2AutoChatDecisionService:
+    def __init__(
+        self,
+        *,
+        client: AutoChatMessageGenerator,
+        decision_ttl_ms: int = 10_000,
+        now_ms: Callable[[], int] | None = None,
+    ) -> None:
+        if decision_ttl_ms <= 0:
+            raise ValueError("decision_ttl_ms must be positive")
+        self._client = client
+        self._decision_ttl_ms = decision_ttl_ms
+        self._now_ms = now_ms or (lambda: int(time.time() * 1_000))
+
+    async def decide(self, context: GatewayV2AgentContext) -> GatewayV2AgentAction:
+        if context.lease_kind != "conversation":
+            raise GatewayV2ConversationExecutionError(
+                "lease_kind_invalid",
+                retryable=False,
+            )
+        try:
+            conversation = ConversationContext.model_validate(
+                context.session_snapshot.get("conversation")
+            )
+        except ValidationError:
+            raise GatewayV2ConversationExecutionError(
+                "conversation_context_invalid",
+                retryable=False,
+            ) from None
+
+        started_at = time.monotonic()
+        try:
+            message = await self._client.generate(conversation)
+        except AutoChatRetryableError as error:
+            self._log_failure(conversation, started_at, error.category)
+            raise GatewayV2ConversationExecutionError(
+                error.category,
+                retryable=True,
+            ) from None
+        except AutoChatPermanentError as error:
+            self._log_failure(conversation, started_at, error.category)
+            raise GatewayV2ConversationExecutionError(
+                error.category,
+                retryable=False,
+            ) from None
+
+        remaining_ms = conversation.expires_at_ms - self._now_ms()
+        if remaining_ms <= 0:
+            raise GatewayV2ConversationExecutionError(
+                "deadline_exhausted",
+                retryable=False,
+            )
+        candidate = GatewayV2CallSkillAction(
+            action="call_skill",
+            skillName="nearby_chat_send",
+            schemaVersion="v1",
+            arguments={
+                "conversationId": conversation.conversation_id,
+                "targetRoleId": conversation.target_role_id,
+                "content": message.content,
+            },
+            reason="Auto Chat generated a nearby conversation message",
+            ttlMs=min(self._decision_ttl_ms, remaining_ms),
+        )
+        try:
+            selected = select_gateway_v2_action(context, [candidate])
+        except GatewayV2DecisionSelectionError:
+            self._log_failure(
+                conversation,
+                started_at,
+                "conversation_lease_not_permitted",
+            )
+            raise GatewayV2ConversationExecutionError(
+                "conversation_lease_not_permitted",
+                retryable=False,
+            ) from None
+        logger.info(
+            "Auto Chat conversation message generated",
+            extra=self._log_fields(conversation, started_at),
+        )
+        return selected
+
+    @staticmethod
+    def _log_fields(
+        conversation: ConversationContext,
+        started_at: float,
+    ) -> dict[str, Any]:
+        return {
+            "conversation_id": conversation.conversation_id,
+            "speaker_role_id": conversation.speaker_role_id,
+            "target_role_id": conversation.target_role_id,
+            "elapsed_ms": max(int((time.monotonic() - started_at) * 1_000), 0),
+        }
+
+    @classmethod
+    def _log_failure(
+        cls,
+        conversation: ConversationContext,
+        started_at: float,
+        category: str,
+    ) -> None:
+        logger.warning(
+            "Auto Chat conversation message generation failed",
+            extra={
+                **cls._log_fields(conversation, started_at),
+                "error_category": category,
+            },
+        )
+
+
 class GatewayV2DecisionService:
     def __init__(
         self,
@@ -207,7 +487,18 @@ class GatewayV2DecisionService:
         *,
         user_id: str,
         tenant_id: str,
+        activity_context: ActivityPlanContext | None = None,
     ) -> GatewayV2AgentAction:
+        activity_plan = (
+            None
+            if activity_context is None
+            else activity_context.plan.model_dump(mode="json", by_alias=True)
+        )
+        current_step = (
+            None
+            if activity_context is None
+            else activity_context.plan.current_step().model_dump(mode="json", by_alias=True)
+        )
         initial_state = {
             "user_id": user_id,
             "tenant_id": tenant_id,
@@ -224,6 +515,15 @@ class GatewayV2DecisionService:
             "intent_result": {},
             "goal_evaluation_result": {},
             "player_memory": {},
+            "activity_plan": activity_plan,
+            "recent_action_history": (
+                [] if activity_context is None else [dict(item) for item in activity_context.recent_actions]
+            ),
+            "recent_failure_history": (
+                [] if activity_context is None else [dict(item) for item in activity_context.recent_failures]
+            ),
+            "current_phase": None if activity_context is None else activity_context.plan.phase,
+            "current_step": current_step,
         }
         try:
             result = await asyncio.wait_for(
@@ -260,11 +560,14 @@ class FrozenGatewayV2Decision:
 
 def freeze_gateway_v2_decision(
     decision_id: str,
+    trace_id: str,
     context: GatewayV2AgentContext,
     action: GatewayV2AgentAction,
 ) -> FrozenGatewayV2Decision:
     payload: dict[str, Any] = {
+        "traceId": trace_id,
         "contractVersion": "llm-gateway-http-v2",
+        "sessionId": context.session_id,
         "decisionId": decision_id,
         "decisionLeaseId": context.decision_lease_id,
         "stateVersion": context.state_version,
@@ -280,8 +583,6 @@ def freeze_gateway_v2_decision(
                 "arguments": action.model_dump(mode="json", by_alias=True)["arguments"],
             }
         )
-    elif isinstance(action, GatewayV2WaitAction):
-        payload["waitMs"] = action.wait_ms
 
     decision = parse_gateway_v2_decision(payload)
     body_json = decision.model_dump(mode="json", by_alias=True)
@@ -302,6 +603,7 @@ class _DecisionPlanRepository(Protocol):
         event: ClaimedGatewayEvent,
         context: GatewayV2AgentContext,
         action: GatewayV2AgentAction,
+        activity_binding: ActivityPlanBinding | None = None,
     ) -> PlannedDecision: ...
 
 
@@ -309,6 +611,8 @@ class _DecisionPlanRepository(Protocol):
 class GatewayV2DecisionPlanner:
     decision_service: GatewayV2DecisionService
     repository: _DecisionPlanRepository
+    conversation_service: GatewayV2ConversationDecisionService | None = None
+    activity_coordinator: ActivityPlanCoordinator | None = None
 
     async def __call__(
         self,
@@ -320,15 +624,88 @@ class GatewayV2DecisionPlanner:
             if existing is not None:
                 return EventProcessResult("succeeded")
 
-            account_id = context.session_snapshot.get("accountId")
+            account_id = context.session_snapshot.get("AccountId", context.session_snapshot.get("accountId"))
             if not isinstance(account_id, str) or not account_id.strip():
-                raise GatewayV2AgentExecutionError("missing_account_id")
-            action = await self.decision_service.decide(
-                context,
-                user_id=account_id,
-                tenant_id=str(event.tenant_id),
-            )
-            await self.repository.plan_decision(event, context, action)
+                return EventProcessResult(
+                    "manual",
+                    error_stage="agent",
+                    error_category="missing_account_id",
+                )
+            if context.lease_kind == "conversation":
+                return EventProcessResult(
+                    "manual",
+                    error_stage="chat",
+                    error_category="conversation_lease_not_supported",
+                )
+            activity_context = None
+            if self.activity_coordinator is not None:
+                activity_context = await self.activity_coordinator.prepare(event, context)
+            action = _initial_room_transition_action(context)
+            if activity_context is not None:
+                planned_action = _planned_activity_action(context, activity_context)
+                if planned_action is not None:
+                    action = planned_action
+            if action is None:
+                try:
+                    action = await self.decision_service.decide(
+                        context,
+                        user_id=account_id,
+                        tenant_id=str(event.tenant_id),
+                        activity_context=activity_context,
+                    )
+                except GatewayV2AgentExecutionError as error:
+                    if error.category != "timeout" or "wait" not in context.allowed_decision_actions:
+                        raise
+                    logger.warning(
+                        "LLM Gateway v2 Agent timed out; planning lease-authorized wait decision",
+                        extra={
+                            "event_id": event.event_id,
+                            "trace_id": event.trace_id,
+                            "session_id": context.session_id,
+                            "control_generation": context.control_generation,
+                            "decision_lease_id": context.decision_lease_id,
+                            "state_version": context.state_version,
+                            "error_category": error.category,
+                        },
+                    )
+                    action = GatewayV2WaitAction(
+                        reason="Agent timed out; defer decision within the current lease",
+                        waitMs=1_000,
+                    )
+            elif isinstance(action, GatewayV2CallSkillAction):
+                logger.info(
+                    "LLM Gateway v2 deterministic skill selected",
+                    extra={
+                        "event_id": event.event_id,
+                        "trace_id": event.trace_id,
+                        "session_id": context.session_id,
+                        "control_generation": context.control_generation,
+                        "decision_lease_id": context.decision_lease_id,
+                        "state_version": context.state_version,
+                        "skill_name": action.skill_name,
+                    },
+                )
+            if activity_context is not None and isinstance(action, GatewayV2CallSkillAction):
+                current_step = activity_context.plan.current_step()
+                if current_step.skill_name != action.skill_name:
+                    if "wait" in context.allowed_decision_actions:
+                        action = GatewayV2WaitAction(
+                            reason="Current activity step is not authorized by this lease",
+                            waitMs=1_000,
+                        )
+                    elif "no_op" in context.allowed_decision_actions:
+                        action = GatewayV2NoOpAction(
+                            reason="Current activity step is not authorized by this lease"
+                        )
+            if activity_context is None:
+                await self.repository.plan_decision(event, context, action)
+            else:
+                await self.repository.plan_decision(
+                    event,
+                    context,
+                    action,
+                    activity_binding=activity_context.binding,
+                )
             return EventProcessResult("succeeded")
         except DecisionPlanFencedError:
             return EventProcessResult("manual", error_stage="fence", error_category="claim_lost")
@@ -343,6 +720,12 @@ class GatewayV2DecisionPlanner:
         except GatewayV2AgentExecutionError as error:
             return EventProcessResult(
                 "retryable_failed",
+                error_stage=error.stage,
+                error_category=error.category,
+            )
+        except GatewayV2ConversationExecutionError as error:
+            return EventProcessResult(
+                "retryable_failed" if error.retryable else "manual",
                 error_stage=error.stage,
                 error_category=error.category,
             )

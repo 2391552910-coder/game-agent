@@ -111,6 +111,43 @@ class TestRetrieveRagContext:
         assert query_param.enable_rerank is False
 
     @pytest.mark.asyncio
+    async def test_retrieval_requests_context_without_lightrag_answer_generation(self):
+        mock_rag = AsyncMock()
+        mock_rag.aquery = AsyncMock(return_value="商业区开放时间: 9:00-22:00")
+
+        with patch("src.core.agents.nodes.get_rag", AsyncMock(return_value=mock_rag)):
+            result = await retrieve_rag_context_node(_base_state())
+
+        assert result["rag_context"] == "商业区开放时间: 9:00-22:00"
+        query_param = mock_rag.aquery.call_args.kwargs["param"]
+        assert query_param.only_need_context is True
+
+    @pytest.mark.asyncio
+    async def test_gateway_v2_retrieval_bounds_context_before_final_prompt(self):
+        mock_rag = AsyncMock()
+        full_context = "RAG context entry. " * 200
+        mock_rag.aquery = AsyncMock(return_value=full_context)
+
+        with (
+            patch("src.config.settings.rag_exact_match_enabled", False, create=True),
+            patch("src.config.settings.llm_gateway_v2_rag_context_max_tokens", 32, create=True),
+            patch("src.core.agents.nodes.get_rag", AsyncMock(return_value=mock_rag)),
+        ):
+            result = await retrieve_rag_context_node(
+                _base_state(gateway_context={"eventId": "gateway-v2-test"})
+            )
+
+        assert result["rag_context"] != full_context
+        assert len(result["rag_context"]) < len(full_context)
+        query_param = mock_rag.aquery.call_args.kwargs["param"]
+        assert query_param.mode == "naive"
+        assert query_param.top_k == 10
+        assert query_param.chunk_top_k == 10
+        assert query_param.max_entity_tokens == 1_500
+        assert query_param.max_relation_tokens == 2_500
+        assert query_param.max_total_tokens == 6_000
+
+    @pytest.mark.asyncio
     async def test_retrieval_uses_configured_chunk_top_k_and_prepends_exact_context(self):
         mock_rag = AsyncMock()
         mock_rag.aquery = AsyncMock(return_value="向量检索内容")

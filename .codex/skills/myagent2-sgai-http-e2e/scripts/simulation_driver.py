@@ -279,7 +279,7 @@ def _v2_lease(state: SimulationState, *, state_version: int, index: int) -> dict
         "controlGeneration": 1,
         "decisionLeaseId": lease_id,
         "stateVersion": state_version,
-        "leaseKind": "hosting_control",
+        "leaseKind": "observation",
         "allowedActions": ["call_skill"],
         "allowedSkillName": "observe_state",
         "allowedSkillNames": ["observe_state"],
@@ -313,6 +313,7 @@ def _v2_decision_context(state: SimulationState) -> dict[str, Any]:
                 "nextSteps": [],
             }
         ],
+        "lastSkillResult": None,
     }
 
 
@@ -616,11 +617,24 @@ def _make_handler(state: SimulationState) -> type[BaseHTTPRequestHandler]:
                 with state.lock:
                     state.metrics["llmDecisionsRejected"] += 1
                 raise
-            self._send(200, {
+            response = {
                 "status": "accepted",
                 "reason": "ok",
                 "skillCallId": skill_call_id,
-            })
+            }
+            if state.contract_version == V2_CONTRACT_VERSION:
+                response.update(
+                    {
+                        "accepted": True,
+                        "traceId": payload["traceId"],
+                        "sessionId": payload["sessionId"],
+                        "decisionId": payload["decisionId"],
+                        "controlGeneration": payload["controlGeneration"],
+                        "stateVersion": payload["stateVersion"],
+                        "nextDecisionLeaseId": None,
+                    }
+                )
+            self._send(200, response)
             if first_decision:
                 if state.contract_version == V2_CONTRACT_VERSION:
                     target = _send_v2_skill_terminal

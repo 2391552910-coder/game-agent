@@ -28,6 +28,7 @@ def _claimed(
     event_id: str = "event-1",
     generation: int = 1,
     sequence: int = 1,
+    lock_ttl_ms: int = 30_000,
 ) -> ClaimedGatewayEvent:
     event_type = "session_started" if sequence == 1 else "session_stopped"
     payload: dict[str, Any]
@@ -50,6 +51,7 @@ def _claimed(
                 "session": {"status": "active"},
                 "availableSkills": [],
                 "skillArgumentHints": [],
+                "lastSkillResult": None,
             },
         }
     else:
@@ -89,7 +91,7 @@ def _claimed(
         claimed_fence_version=generation,
         attempt_count=1,
         locked_by="worker-1",
-        lock_until=now + timedelta(seconds=30),
+        lock_until=now + timedelta(milliseconds=lock_ttl_ms),
     )
 
 
@@ -276,16 +278,178 @@ async def test_completion_failure_is_not_retried_in_memory() -> None:
 
 
 async def test_long_processor_renews_claim_until_completion() -> None:
+    repository = FakeRepository(deque([_claimed(lock_ttl_ms=150), None]))
+
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        del event
+        await asyncio.sleep(0.38)
+        return EventProcessResult("succeeded")
+
+    assert await _worker(repository, processor, claim_ttl_ms=150, max_parallelism=1).run_once() == 1
+    assert repository.renewals >= 2
+    assert len(repository.completions) == 1
+
+
+async def test_long_processor_refreshes_worker_heartbeat_during_claim_renewal() -> None:
+    ticks = iter(float(value) for value in range(1, 20))
+    registry = WorkerStatusRegistry(monotonic=lambda: next(ticks))
+    repository = FakeRepository(deque([_claimed(lock_ttl_ms=150), None]))
+
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        del event
+        await asyncio.sleep(0.18)
+        return EventProcessResult("succeeded")
+
+    await _worker(
+        repository,
+        processor,
+        status=registry,
+        claim_ttl_ms=150,
+        max_parallelism=1,
+    ).run_once()
+
+    assert repository.renewals >= 2
+    assert registry.snapshot().heartbeat_monotonic >= 5.0
+
+
+async def test_long_processor_refreshes_heartbeat_before_first_claim_renewal() -> None:
+    ticks = iter(float(value) for value in range(1, 30))
+    registry = WorkerStatusRegistry(monotonic=lambda: next(ticks))
     repository = FakeRepository(deque([_claimed(), None]))
 
     async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
         del event
-        await asyncio.sleep(0.08)
+        await asyncio.sleep(0.04)
         return EventProcessResult("succeeded")
 
-    assert await _worker(repository, processor, claim_ttl_ms=30, max_parallelism=1).run_once() == 1
-    assert repository.renewals >= 2
-    assert len(repository.completions) == 1
+    await _worker(
+        repository,
+        processor,
+        status=registry,
+        claim_ttl_ms=300,
+        max_parallelism=1,
+    ).run_once()
+
+    assert repository.renewals == 0
+    assert registry.snapshot().heartbeat_monotonic > 2.0
+
+
+async def test_heartbeat_continues_while_claim_renewal_is_pending() -> None:
+    class BlockingRenewalRepository(FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(deque([_claimed(lock_ttl_ms=150), None]))
+            self.renewal_started = asyncio.Event()
+            self.renewal_release = asyncio.Event()
+
+        async def renew_event_claim(
+            self,
+            event: ClaimedGatewayEvent,
+            *,
+            claim_ttl_ms: int,
+        ) -> bool:
+            del event, claim_ttl_ms
+            self.renewals += 1
+            self.renewal_started.set()
+            await self.renewal_release.wait()
+            return True
+
+    registry = WorkerStatusRegistry()
+    repository = BlockingRenewalRepository()
+    processor_release = asyncio.Event()
+
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        del event
+        await processor_release.wait()
+        return EventProcessResult("succeeded")
+
+    running = asyncio.create_task(
+        _worker(
+            repository,
+            processor,
+            status=registry,
+            claim_ttl_ms=150,
+            max_parallelism=1,
+        ).run_once()
+    )
+    try:
+        await asyncio.wait_for(repository.renewal_started.wait(), timeout=1)
+        heartbeat_before = registry.snapshot().heartbeat_monotonic
+        await asyncio.sleep(0.02)
+        heartbeat_after = registry.snapshot().heartbeat_monotonic
+    finally:
+        repository.renewal_release.set()
+        processor_release.set()
+        await asyncio.wait_for(running, timeout=1)
+
+    assert heartbeat_before is not None
+    assert heartbeat_after is not None
+    assert heartbeat_after > heartbeat_before
+
+
+async def test_claim_renewal_timeout_cancels_inflight_processor() -> None:
+    class StalledRenewalRepository(FakeRepository):
+        async def renew_event_claim(
+            self,
+            event: ClaimedGatewayEvent,
+            *,
+            claim_ttl_ms: int,
+        ) -> bool:
+            del event, claim_ttl_ms
+            self.renewals += 1
+            await asyncio.Event().wait()
+            return True
+
+    repository = StalledRenewalRepository(deque([_claimed(lock_ttl_ms=120), None]))
+    processor_cancelled = asyncio.Event()
+
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        del event
+        try:
+            await asyncio.Event().wait()
+        finally:
+            processor_cancelled.set()
+
+    worker = _worker(repository, processor, claim_ttl_ms=120, max_parallelism=1)
+
+    assert await asyncio.wait_for(worker.run_once(), timeout=0.3) == 1
+    assert repository.renewals == 1
+    assert processor_cancelled.is_set()
+    assert repository.completions == []
+
+
+async def test_first_renewal_honors_database_lock_expiry_after_claim_delay() -> None:
+    claim = _claimed(lock_ttl_ms=500)
+
+    class DelayedPollRepository(FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(deque([claim, None]))
+            self.renewal_times: list[datetime] = []
+
+        async def count_dead_letters(self) -> int:
+            await asyncio.sleep(0.35)
+            return 0
+
+        async def renew_event_claim(
+            self,
+            event: ClaimedGatewayEvent,
+            *,
+            claim_ttl_ms: int,
+        ) -> bool:
+            del event, claim_ttl_ms
+            self.renewals += 1
+            self.renewal_times.append(datetime.now(UTC))
+            return True
+
+    repository = DelayedPollRepository()
+
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        del event
+        await asyncio.sleep(0.1)
+        return EventProcessResult("succeeded")
+
+    assert await _worker(repository, processor, claim_ttl_ms=500, max_parallelism=1).run_once() == 1
+    assert repository.renewal_times
+    assert repository.renewal_times[0] < claim.lock_until
 
 
 async def test_lost_claim_renewal_cancels_inflight_processor() -> None:

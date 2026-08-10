@@ -34,6 +34,7 @@ VALID_V2_SETTINGS = {
 }
 
 _MYAGENT_ENV_PREFIXES = (
+    "AUTO_CHAT_",
     "OPENAI_",
     "LLM_",
     "EMBEDDING_",
@@ -192,10 +193,11 @@ def test_production_missing_required_setting_fails(tmp_path: Path, missing_name:
     assert missing_name.lower() in result.stderr.lower()
 
 
-def test_v2_defaults_and_v1_defaults_are_independent() -> None:
+def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_GATEWAY_V1_ENABLED", raising=False)
     config = Settings(_env_file=None, **REQUIRED_SETTINGS)
 
-    assert config.llm_gateway_v1_enabled is True
+    assert config.llm_gateway_v1_enabled is False
     assert config.llm_gateway_v2_enabled is False
     assert config.embedding_enabled is True
     assert config.llm_gateway_app_gateways == {}
@@ -206,11 +208,51 @@ def test_v2_defaults_and_v1_defaults_are_independent() -> None:
     assert config.llm_gateway_v2_retry_base_ms == 1_000
     assert config.llm_gateway_v2_retry_max_ms == 300_000
     assert config.llm_gateway_v2_claim_ttl_ms == 30_000
-    assert config.llm_gateway_v2_agent_timeout_seconds == 30.0
+    assert config.llm_gateway_v2_agent_timeout_seconds == 60.0
     assert config.llm_gateway_v2_poll_ms == 250
     assert config.llm_gateway_v2_shutdown_grace_seconds == 10
     assert config.llm_gateway_v2_readiness_timeout_seconds == 3
     assert config.llm_gateway_v2_readiness_cache_seconds == 5
+    assert config.auto_chat_base_url is None
+    assert config.auto_chat_timeout_seconds == 45.0
+    assert config.auto_chat_deadline_safety_seconds == 10.0
+    assert config.llm_gateway_simple_chat_timeout_seconds == 3.0
+
+
+def test_auto_chat_configuration_accepts_internal_service_url() -> None:
+    config = Settings(
+        _env_file=None,
+        **REQUIRED_SETTINGS,
+        auto_chat_base_url="http://192.168.1.50:8000/",
+        auto_chat_timeout_seconds=40,
+        auto_chat_deadline_safety_seconds=8,
+        llm_gateway_simple_chat_timeout_seconds=2.5,
+    )
+
+    assert config.auto_chat_base_url == "http://192.168.1.50:8000/"
+    assert config.auto_chat_timeout_seconds == 40
+    assert config.auto_chat_deadline_safety_seconds == 8
+    assert config.llm_gateway_simple_chat_timeout_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("auto_chat_timeout_seconds", 0),
+        ("auto_chat_timeout_seconds", 61),
+        ("auto_chat_deadline_safety_seconds", -1),
+        ("auto_chat_deadline_safety_seconds", 46),
+        ("llm_gateway_simple_chat_timeout_seconds", 0),
+        ("llm_gateway_simple_chat_timeout_seconds", 3.1),
+    ],
+)
+def test_auto_chat_numeric_limits(field_name: str, invalid_value: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **REQUIRED_SETTINGS,
+            **{field_name: invalid_value},
+        )
 
 
 def test_v2_disabled_accepts_v1_only_identity_and_non_uuid_tenant() -> None:

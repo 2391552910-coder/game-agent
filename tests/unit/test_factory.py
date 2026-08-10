@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.llm.balancer import NoProviderAvailable
-from src.core.llm.factory import _fallback_llm, get_llm
+from src.core.llm.factory import _fallback_llm, get_env_llm, get_llm
 
 # patch factory 内部延迟导入的 balancer 单例
 _BALANCER_PATH = "src.core.llm.balancer.balancer"
@@ -79,6 +79,19 @@ class TestGetLlm:
                 result = await get_llm("fast", 0.1)
 
         assert result.model_name == "test-model-fast"
+
+    @pytest.mark.asyncio
+    async def test_env_llm_always_uses_environment_fast_model(self):
+        import src.core.llm.factory as factory_mod
+        factory_mod._fallback_cache.clear()
+
+        with patch(_FACTORY_SETTINGS) as mock_s:
+            mock_s.openai_fast_model = "test-env-fast"
+            mock_s.openai_api_key = "sk-test"
+            mock_s.openai_base_url = "http://test"
+            result = await get_env_llm("fast", 0.1, timeout_seconds=3, max_retries=0)
+
+        assert result.model_name == "test-env-fast"
 
 
 class TestFallbackLlm:

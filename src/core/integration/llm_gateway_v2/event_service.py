@@ -7,12 +7,19 @@ from typing import Protocol
 from uuid import UUID
 
 from src.core.agents.gateway_v2_models import GatewayV2AgentContext
+from src.core.integration.llm_gateway_v2.activity_plan_repository import (
+    ActivityPlanRepository,
+    ActivityPlanUnavailableError,
+)
 from src.core.integration.llm_gateway_v2.auth import InboundGatewayIdentity
 from src.core.integration.llm_gateway_v2.contracts import (
+    ChatReceivedEvent,
+    ChatSendResultEvent,
     DecisionRejectedEvent,
     GatewayV2BatchAck,
     GatewayV2BatchEnvelope,
     GatewayV2Event,
+    NearbyFriendChatRequestedEvent,
     ObservationUpdatedEvent,
     SessionStartedEvent,
     SessionStoppedEvent,
@@ -25,6 +32,7 @@ from src.core.integration.llm_gateway_v2.decision_service import (
 )
 from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent, EventProcessResult
+from src.core.integration.llm_gateway_v2.hosted_chat import HostedChatPermanentError, HostedChatRetryableError
 from src.core.integration.llm_gateway_v2.inbox_repository import (
     BatchAcceptance,
     EventAdmissionConflict,
@@ -81,6 +89,26 @@ class _OutboxRepository(Protocol):
     async def close_generation(self, event: ClaimedGatewayEvent) -> MutationResult: ...
 
 
+class _HostedChatService(Protocol):
+    async def handle_chat_received(self, gateway_id: str, event: ChatReceivedEvent) -> None: ...
+
+    async def handle_nearby_friend_request(self, gateway_id: str, event: NearbyFriendChatRequestedEvent) -> None: ...
+
+    async def handle_send_result(self, gateway_id: str, event: ChatSendResultEvent) -> None: ...
+
+
+class _ActivityPlanRepository(Protocol):
+    async def record_skill_started(self, event: ClaimedGatewayEvent) -> bool: ...
+
+    async def record_skill_finished(self, event: ClaimedGatewayEvent) -> bool: ...
+
+    async def record_decision_rejected(self, event: ClaimedGatewayEvent) -> bool: ...
+
+    async def record_chat_opportunity(self, event: ClaimedGatewayEvent) -> bool: ...
+
+    async def close(self, event: ClaimedGatewayEvent) -> bool: ...
+
+
 DecisionPlanner = Callable[
     [ClaimedGatewayEvent, GatewayV2AgentContext],
     Awaitable[EventProcessResult],
@@ -93,18 +121,50 @@ class GatewayV2EventDispatcher:
     terminal_repository: _TerminalRepository
     outbox_repository: _OutboxRepository
     decision_planner: DecisionPlanner
+    hosted_chat_service: _HostedChatService | None = None
+    activity_repository: _ActivityPlanRepository | ActivityPlanRepository | None = None
 
     async def __call__(self, claimed: ClaimedGatewayEvent) -> EventProcessResult:
         try:
             event = claimed.event
+            if isinstance(event, ChatReceivedEvent):
+                if self.hosted_chat_service is None:
+                    return EventProcessResult("manual", error_stage="chat", error_category="chat_not_configured")
+                await self.hosted_chat_service.handle_chat_received(claimed.gateway_id, event)
+                return EventProcessResult("succeeded")
+            if isinstance(event, NearbyFriendChatRequestedEvent):
+                if self.hosted_chat_service is None:
+                    return EventProcessResult("manual", error_stage="chat", error_category="chat_not_configured")
+                await self.hosted_chat_service.handle_nearby_friend_request(claimed.gateway_id, event)
+                if self.activity_repository is not None and not claimed.historical_recovery:
+                    await self.activity_repository.record_chat_opportunity(claimed)
+                return EventProcessResult("succeeded")
+            if isinstance(event, ChatSendResultEvent):
+                if self.hosted_chat_service is None:
+                    return EventProcessResult("manual", error_stage="chat", error_category="chat_not_configured")
+                await self.hosted_chat_service.handle_send_result(claimed.gateway_id, event)
+                return EventProcessResult("succeeded")
             if isinstance(event, (SessionStartedEvent, ObservationUpdatedEvent)):
                 return await self._process_lease_event(claimed)
             if isinstance(event, SkillStartedEvent):
                 mutation = await self.terminal_repository.record_skill_started(claimed)
-                return self._mutation_result(mutation, stage="terminal")
+                outcome = self._mutation_result(mutation, stage="terminal")
+                if (
+                    outcome.outcome == "succeeded"
+                    and self.activity_repository is not None
+                    and not claimed.historical_recovery
+                ):
+                    await self.activity_repository.record_skill_started(claimed)
+                return outcome
             if isinstance(event, SkillFinishedEvent):
                 mutation = await self.terminal_repository.record_skill_finished(claimed)
                 outcome = self._mutation_result(mutation, stage="terminal")
+                if (
+                    outcome.outcome == "succeeded"
+                    and self.activity_repository is not None
+                    and not claimed.historical_recovery
+                ):
+                    await self.activity_repository.record_skill_finished(claimed)
                 if (
                     outcome.outcome != "succeeded"
                     or event.payload.lease is None
@@ -114,8 +174,17 @@ class GatewayV2EventDispatcher:
                 return await self._process_lease_event(claimed)
             if isinstance(event, DecisionRejectedEvent):
                 mutation = await self.outbox_repository.merge_decision_rejected(claimed)
-                return self._mutation_result(mutation, stage="decision")
+                outcome = self._mutation_result(mutation, stage="decision")
+                if (
+                    outcome.outcome == "succeeded"
+                    and self.activity_repository is not None
+                    and not claimed.historical_recovery
+                ):
+                    await self.activity_repository.record_decision_rejected(claimed)
+                return outcome
             if isinstance(event, SessionStoppedEvent):
+                if self.activity_repository is not None:
+                    await self.activity_repository.close(claimed)
                 mutation = await self.outbox_repository.close_generation(claimed)
                 return self._mutation_result(mutation, stage="session")
             return EventProcessResult("manual", error_stage="contract", error_category="unsupported_event")
@@ -135,6 +204,16 @@ class GatewayV2EventDispatcher:
                 error_stage=error.stage,
                 error_category=error.category,
             )
+        except HostedChatRetryableError as error:
+            return EventProcessResult("retryable_failed", error_stage="chat", error_category=error.category)
+        except HostedChatPermanentError as error:
+            return EventProcessResult("manual", error_stage="chat", error_category=error.category)
+        except ActivityPlanUnavailableError:
+            return EventProcessResult(
+                "retryable_failed",
+                error_stage="database",
+                error_category="activity_plan_unavailable",
+            )
         except Exception as error:
             logger.error(
                 "LLM Gateway v2 event operation failed",
@@ -145,6 +224,7 @@ class GatewayV2EventDispatcher:
                     trace_id=claimed.trace_id,
                     event_id=claimed.event_id,
                 ),
+                exc_info=True,
             )
             return EventProcessResult(
                 "retryable_failed",

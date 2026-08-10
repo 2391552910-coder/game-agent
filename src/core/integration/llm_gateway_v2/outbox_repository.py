@@ -20,6 +20,7 @@ from src.core.integration.llm_gateway_v2.terminal_repository import MutationDisp
 
 if TYPE_CHECKING:
     from src.core.agents.gateway_v2_models import GatewayV2AgentAction, GatewayV2AgentContext
+    from src.core.integration.llm_gateway_v2.activity_plan_repository import ActivityPlanBinding
     from src.core.integration.llm_gateway_v2.decision_client import DecisionClientResult
 
 
@@ -194,12 +195,14 @@ _INSERT_PLANNED_DECISION = sa.text(
         id, tenant_id, cycle_id, source_event_id, action_tracking_id,
         gateway_id, session_id, decision_id, decision_lease_id,
         control_generation, state_version, lease_expires_at_ms, action,
-        request_body_json, request_body_bytes, body_hash, status
+        request_body_json, request_body_bytes, body_hash, status,
+        activity_plan_id, activity_plan_version, activity_step_id, activity_phase
     ) VALUES (
         :id, :tenant_id, :cycle_id, :source_event_id, :action_tracking_id,
         :gateway_id, :session_id, :decision_id, :decision_lease_id,
         :control_generation, :state_version, :lease_expires_at_ms, :action,
-        :request_body_json, :request_body_bytes, :body_hash, 'planned'
+        :request_body_json, :request_body_bytes, :body_hash, 'planned',
+        :activity_plan_id, :activity_plan_version, :activity_step_id, :activity_phase
     )
     RETURNING id
     """
@@ -657,6 +660,7 @@ class OutboxRepository:
         event: ClaimedGatewayEvent,
         context: GatewayV2AgentContext,
         action: GatewayV2AgentAction,
+        activity_binding: ActivityPlanBinding | None = None,
     ) -> PlannedDecision:
         from src.core.agents.gateway_v2_models import GatewayV2CallSkillAction
         from src.core.integration.llm_gateway_v2.decision_service import freeze_gateway_v2_decision
@@ -703,7 +707,7 @@ class OutboxRepository:
 
                 if conflict_category is None:
                     decision_id = self._decision_id_factory()
-                    frozen = freeze_gateway_v2_decision(decision_id, context, action)
+                    frozen = freeze_gateway_v2_decision(decision_id, event.trace_id, context, action)
                     identity_result = await session.execute(
                         _SELECT_DECISION_BY_ID,
                         {"gateway_id": event.gateway_id, "decision_id": decision_id},
@@ -762,6 +766,18 @@ class OutboxRepository:
                                 "request_body_json": frozen.body_json,
                                 "request_body_bytes": frozen.body_bytes,
                                 "body_hash": frozen.body_hash,
+                                "activity_plan_id": (
+                                    None if activity_binding is None else activity_binding.plan_id
+                                ),
+                                "activity_plan_version": (
+                                    None if activity_binding is None else activity_binding.version
+                                ),
+                                "activity_step_id": (
+                                    None if activity_binding is None else activity_binding.step_id
+                                ),
+                                "activity_phase": (
+                                    None if activity_binding is None else activity_binding.phase
+                                ),
                             },
                         )
                         if inserted.scalar_one_or_none() is None:

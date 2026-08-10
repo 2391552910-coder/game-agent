@@ -42,6 +42,7 @@ def _event(event_id: str = "event-1", *, sequence: int = 1) -> dict:
                 "session": {"status": "active"},
                 "availableSkills": [],
                 "skillArgumentHints": [],
+                "lastSkillResult": None,
             },
         }
         decision_lease_id = "lease-1"

@@ -127,6 +127,13 @@ def _mock_settings():
     mock.llm_gateway_v2_retry_max_ms = 300_000
     mock.llm_gateway_v2_claim_ttl_ms = 30_000
     mock.llm_gateway_v2_agent_timeout_seconds = 30.0
+    mock.llm_gateway_v2_rag_mode = "naive"
+    mock.llm_gateway_v2_rag_top_k = 10
+    mock.llm_gateway_v2_rag_chunk_top_k = 10
+    mock.llm_gateway_v2_rag_max_entity_tokens = 1_500
+    mock.llm_gateway_v2_rag_max_relation_tokens = 2_500
+    mock.llm_gateway_v2_rag_max_total_tokens = 6_000
+    mock.llm_gateway_v2_rag_context_max_tokens = 6_000
     mock.llm_gateway_v2_poll_ms = 250
     mock.llm_gateway_v2_event_max_parallelism = 4
     mock.llm_gateway_v2_decision_max_parallelism = 4

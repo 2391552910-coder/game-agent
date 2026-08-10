@@ -27,10 +27,19 @@ from src.core.integration.gateway_event_queue import (  # noqa: E402
     start_gateway_event_worker,
     stop_gateway_event_worker,
 )
+from src.core.integration.llm_gateway_v2.activity_plan_repository import (  # noqa: E402
+    ActivityPlanRepository,
+)
+from src.core.integration.llm_gateway_v2.activity_planner import (  # noqa: E402
+    ActivityPlanCoordinator,
+    GatewayV2ActivityPlanGenerator,
+)
+from src.core.integration.llm_gateway_v2.auto_chat import AutoChatClient  # noqa: E402
 from src.core.integration.llm_gateway_v2.decision_client import GatewayV2DecisionClient  # noqa: E402
 from src.core.integration.llm_gateway_v2.decision_service import (  # noqa: E402
     GatewayV2DecisionPlanner,
     GatewayV2DecisionService,
+    gateway_v2_activity_skill_is_permitted,
 )
 from src.core.integration.llm_gateway_v2.decision_worker import DecisionWorker  # noqa: E402
 from src.core.integration.llm_gateway_v2.errors import (  # noqa: E402
@@ -39,14 +48,20 @@ from src.core.integration.llm_gateway_v2.errors import (  # noqa: E402
 )
 from src.core.integration.llm_gateway_v2.event_service import GatewayV2EventDispatcher  # noqa: E402
 from src.core.integration.llm_gateway_v2.event_worker import EventWorker  # noqa: E402
+from src.core.integration.llm_gateway_v2.hosted_chat import (  # noqa: E402
+    HostedChatControlClient,
+    HostedChatService,
+)
 from src.core.integration.llm_gateway_v2.inbox_repository import InboxRepository  # noqa: E402
 from src.core.integration.llm_gateway_v2.outbox_repository import OutboxRepository  # noqa: E402
 from src.core.integration.llm_gateway_v2.readiness import (  # noqa: E402
     ReadinessService,
     build_readiness_service,
 )
+from src.core.integration.llm_gateway_v2.simple_chat import SimpleChatRouter  # noqa: E402
 from src.core.integration.llm_gateway_v2.terminal_repository import TerminalRepository  # noqa: E402
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry  # noqa: E402
+from src.core.llm.factory import get_env_llm  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +92,24 @@ decision_worker_status.set_state_change_callback(readiness_service.invalidate)
 readiness_service.disable()
 
 
+def log_runtime_configuration(runtime_settings: object) -> None:
+    logger.info(
+        "Runtime configuration: "
+        "v1_enabled=%s v2_enabled=%s provider_source=%s provider=%s "
+        "base_url=%s default_model=%s fast_model=%s "
+        "agent_timeout_seconds=%s decision_timeout_seconds=%s",
+        getattr(runtime_settings, "llm_gateway_v1_enabled", False),
+        getattr(runtime_settings, "llm_gateway_v2_enabled", False),
+        getattr(runtime_settings, "llm_provider_source", "env"),
+        getattr(runtime_settings, "llm_provider", ""),
+        getattr(runtime_settings, "openai_base_url", ""),
+        getattr(runtime_settings, "openai_default_model", ""),
+        getattr(runtime_settings, "openai_fast_model", ""),
+        getattr(runtime_settings, "llm_gateway_v2_agent_timeout_seconds", ""),
+        getattr(runtime_settings, "llm_gateway_decision_timeout_seconds", ""),
+    )
+
+
 class ManagedGatewayV2Worker(Protocol):
     async def start(self) -> None: ...
 
@@ -89,6 +122,40 @@ class ManagedGatewayV2Worker(Protocol):
 class GatewayV2Runtime:
     event_worker: ManagedGatewayV2Worker
     decision_worker: ManagedGatewayV2Worker
+
+
+async def warmup_gateway_v2_rag() -> None:
+    from src.core.engine.lightrag_engine import get_rag, shutdown_rag
+
+    started_at = time.monotonic()
+    try:
+        await get_rag()
+    except Exception as error:
+        await shutdown_rag()
+        logger.error(
+            "LLM Gateway v2 RAG warmup failed",
+            extra=safe_exception_fields(
+                stage="startup",
+                category="rag_unavailable",
+                error=error,
+                elapsed_ms=(time.monotonic() - started_at) * 1_000,
+            ),
+        )
+        raise GatewayV2OperationalError(
+            stage="startup",
+            category="rag_unavailable",
+            retryable=True,
+        ) from None
+    logger.info(
+        "LLM Gateway v2 RAG warmup completed in %.2f ms",
+        (time.monotonic() - started_at) * 1_000,
+    )
+
+
+async def shutdown_gateway_v2_rag() -> None:
+    from src.core.engine.lightrag_engine import shutdown_rag
+
+    await shutdown_rag()
 
 
 def build_gateway_v2_runtime() -> GatewayV2Runtime:
@@ -105,17 +172,63 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
     inbox_repository = InboxRepository()
     outbox_repository = OutboxRepository()
     terminal_repository = TerminalRepository()
+    activity_repository = ActivityPlanRepository()
+    hosted_chat_service = None
+    control_url = getattr(settings, "llm_gateway_control_url", None)
+    control_app_id = getattr(settings, "llm_gateway_control_app_id", None)
+    control_secret = getattr(settings, "llm_gateway_control_app_secret", None)
+    auto_chat_base_url = getattr(settings, "auto_chat_base_url", None)
+    if all(
+        isinstance(value, str) and value.strip()
+        for value in (control_url, control_app_id, control_secret, auto_chat_base_url)
+    ):
+        simple_chat_timeout = getattr(settings, "llm_gateway_simple_chat_timeout_seconds", 3.0)
+        if not isinstance(simple_chat_timeout, (int, float)):
+            simple_chat_timeout = 3.0
+        hosted_chat_service = HostedChatService(
+            conversation_client=AutoChatClient(
+                base_url=auto_chat_base_url,
+                timeout_seconds=getattr(settings, "auto_chat_timeout_seconds", 45.0),
+                deadline_safety_seconds=getattr(settings, "auto_chat_deadline_safety_seconds", 10.0),
+            ),
+            simple_router=SimpleChatRouter(
+                model_factory=lambda: get_env_llm(
+                    model_type="fast",
+                    temperature=0.1,
+                    timeout_seconds=simple_chat_timeout,
+                    max_retries=0,
+                ),
+                timeout_seconds=simple_chat_timeout,
+            ),
+            sender=HostedChatControlClient(
+                base_url=control_url,
+                app_id=control_app_id,
+                app_secret=SecretStr(control_secret),
+                timeout_seconds=getattr(settings, "llm_gateway_control_timeout_seconds", 10.0),
+                max_retries=getattr(settings, "llm_gateway_control_max_retries", 1),
+            ),
+            max_queue_size=getattr(settings, "llm_gateway_hosted_chat_queue_size", 100),
+            state_ttl_seconds=getattr(settings, "llm_gateway_hosted_chat_state_ttl_seconds", 300),
+            max_state_entries=getattr(settings, "llm_gateway_hosted_chat_max_state_entries", 10_000),
+        )
     decision_planner = GatewayV2DecisionPlanner(
         decision_service=GatewayV2DecisionService(
             timeout_seconds=settings.llm_gateway_v2_agent_timeout_seconds,
         ),
         repository=outbox_repository,
+        activity_coordinator=ActivityPlanCoordinator(
+            repository=activity_repository,
+            generator=GatewayV2ActivityPlanGenerator(),
+            step_authorizer=gateway_v2_activity_skill_is_permitted,
+        ),
     )
     event_dispatcher = GatewayV2EventDispatcher(
         context_repository=inbox_repository,
         terminal_repository=terminal_repository,
         outbox_repository=outbox_repository,
         decision_planner=decision_planner,
+        hosted_chat_service=hosted_chat_service,
+        activity_repository=activity_repository,
     )
     runtime_id = uuid4().hex
     event_worker = EventWorker(
@@ -210,10 +323,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     db_started = False
     redis_started = False
     gateway_worker_started = False
+    gateway_v2_rag_started = False
     gateway_v2_runtime: GatewayV2Runtime | None = None
     service: ReadinessService = app.state.readiness_service
     try:
         logger.info("服务启动中...")
+        log_runtime_configuration(settings)
         await init_db()
         db_started = True
         await init_redis()
@@ -229,6 +344,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await start_gateway_event_worker(webhooks.process_gateway_event_record)
             gateway_worker_started = True
         if settings.llm_gateway_v2_enabled:
+            await warmup_gateway_v2_rag()
+            gateway_v2_rag_started = True
             gateway_v2_runtime = build_gateway_v2_runtime()
             app.state.gateway_v2_runtime = gateway_v2_runtime
             await gateway_v2_runtime.event_worker.start()
@@ -260,6 +377,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 grace_seconds=settings.llm_gateway_v2_shutdown_grace_seconds,
             )
             app.state.gateway_v2_runtime = None
+        if gateway_v2_rag_started:
+            await shutdown_gateway_v2_rag()
         if gateway_worker_started:
             await stop_gateway_event_worker()
         if redis_started:

@@ -84,15 +84,19 @@ def argument_hint(
 def decision_context_payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session": {
-            "status": "active",
-            "position": {"x": 1.25, "y": 2},
-            "tags": ["initial"],
+            "AccountId": "account-1",
+            "SessionId": "session-1",
+            "SceneId": "scene-1",
+            "State": "active",
+            "SeatState": "standing",
+            "Position": {"x": 1.25, "y": 2},
         },
         "availableSkills": [
             skill_descriptor("move", "v1"),
             skill_descriptor("observe", "v2"),
         ],
         "skillArgumentHints": [argument_hint()],
+        "lastSkillResult": None,
     }
     payload.update(overrides)
     return payload
@@ -129,7 +133,10 @@ def event_payload(event_type: str, **overrides: Any) -> dict[str, Any]:
         },
         "decision_rejected": {
             "decisionId": "decision-1",
+            "action": "call_skill",
+            "skillName": None,
             "reason": "lease expired",
+            "rejectedAtMs": 1_700_000_000_000,
         },
         "session_stopped": {
             "reason": "hosting stopped",
@@ -426,16 +433,64 @@ def test_decision_lease_rejects_skill_alias_outside_allowlist() -> None:
 def test_decision_context_owns_and_freezes_session_and_skill_metadata() -> None:
     source = decision_context_payload()
     context = DecisionContext.model_validate(source)
-    source["session"]["status"] = "changed"
-    source["session"]["tags"].append("changed")
+    source["session"]["State"] = "changed"
+    source["session"]["Position"]["x"] = 99
 
     assert context.model_dump() == decision_context_payload()
     assert isinstance(context.available_skills[0], AvailableSkill)
     assert isinstance(context.skill_argument_hints[0], SkillArgumentHint)
     with pytest.raises(TypeError):
-        context.session["status"] = "changed"
-    with pytest.raises(AttributeError):
-        context.session["tags"].append("changed")
+        context.session["State"] = "changed"
+    with pytest.raises(TypeError):
+        context.session["Position"]["x"] = 99
+
+
+def test_decision_context_requires_nullable_last_skill_result() -> None:
+    missing = decision_context_payload()
+    missing.pop("lastSkillResult")
+    with pytest.raises(ValidationError):
+        DecisionContext.model_validate(missing)
+
+    null_context = DecisionContext.model_validate(decision_context_payload(lastSkillResult=None))
+    result_context = DecisionContext.model_validate(
+        decision_context_payload(
+            lastSkillResult={
+                "decisionId": "decision-previous",
+                "skillCallId": "call-previous",
+                "skillName": "jump",
+                "status": "success",
+            }
+        )
+    )
+
+    assert null_context.last_skill_result is None
+    assert result_context.model_dump()["lastSkillResult"]["skillName"] == "jump"
+
+
+def test_observation_reason_is_nullable_but_other_reasons_are_not() -> None:
+    observation = event_payload("observation_updated")
+    observation["payload"]["reason"] = None
+
+    parsed = parse_gateway_v2_event(observation)
+
+    assert parsed.payload.reason is None
+    for event_type in ("session_started", "skill_finished", "decision_rejected", "session_stopped"):
+        payload = event_payload(event_type)
+        payload["payload"]["reason"] = None
+        with pytest.raises(ValidationError):
+            parse_gateway_v2_event(payload)
+
+
+def test_decision_rejected_accepts_full_payload_with_nullable_skill_name() -> None:
+    event = parse_gateway_v2_event(event_payload("decision_rejected"))
+
+    assert event.payload.model_dump() == {
+        "decisionId": "decision-1",
+        "action": "call_skill",
+        "skillName": None,
+        "reason": "lease expired",
+        "rejectedAtMs": 1_700_000_000_000,
+    }
 
 
 def test_decision_context_rejects_hint_not_published_by_gateway() -> None:
@@ -467,7 +522,7 @@ def test_decision_context_rejects_hint_not_published_by_gateway() -> None:
                 "finishedAtMs",
             ],
         ),
-        ("decision_rejected", ["decisionId", "reason"]),
+        ("decision_rejected", ["decisionId", "action", "skillName", "reason", "rejectedAtMs"]),
         ("session_stopped", ["reason", "stoppedAtMs"]),
     ],
 )

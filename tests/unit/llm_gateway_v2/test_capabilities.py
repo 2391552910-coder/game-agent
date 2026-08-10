@@ -24,6 +24,9 @@ EXPECTED_CAPABILITIES = {
         "skill_finished",
         "decision_rejected",
         "session_stopped",
+        "chat_received",
+        "nearby_friend_chat_requested",
+        "chat_send_result",
     ],
     "maxEventBatchSize": 64,
     "maxDecisionTtlMs": 30_000,
@@ -91,6 +94,9 @@ def test_fixed_capability_collections_are_deeply_immutable() -> None:
         "skill_finished",
         "decision_rejected",
         "session_stopped",
+        "chat_received",
+        "nearby_friend_chat_requested",
+        "chat_send_result",
     )
 
     with pytest.raises(TypeError):

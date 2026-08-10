@@ -31,7 +31,7 @@ def _lease() -> dict[str, Any]:
         "controlGeneration": 1,
         "decisionLeaseId": "lease-next",
         "stateVersion": 2,
-        "leaseKind": "hosting_control",
+        "leaseKind": "observation",
         "allowedActions": ["wait"],
         "allowedSkillName": None,
         "allowedSkillNames": [],
@@ -44,6 +44,7 @@ def _decision_context() -> dict[str, Any]:
         "session": {"status": "active"},
         "availableSkills": [],
         "skillArgumentHints": [],
+        "lastSkillResult": None,
     }
 
 
@@ -90,7 +91,13 @@ def _claimed(
             "startedAtMs": occurred_at_ms - 1,
             "finishedAtMs": occurred_at_ms,
         },
-        "decision_rejected": {"decisionId": "decision-1", "reason": "lease expired"},
+        "decision_rejected": {
+            "decisionId": "decision-1",
+            "action": "call_skill",
+            "skillName": "jump",
+            "reason": "lease expired",
+            "rejectedAtMs": occurred_at_ms,
+        },
         "session_stopped": {"reason": reason, "stoppedAtMs": occurred_at_ms},
     }
     if event_type == "skill_finished" and with_lease:
@@ -178,6 +185,36 @@ class _OutboxRepository:
 
 
 @dataclass
+class _ActivityRepository:
+    operations: list[str]
+
+    async def record_skill_started(self, event) -> bool:
+        del event
+        self.operations.append("activity_started")
+        return True
+
+    async def record_skill_finished(self, event) -> bool:
+        del event
+        self.operations.append("activity_terminal")
+        return True
+
+    async def record_decision_rejected(self, event) -> bool:
+        del event
+        self.operations.append("activity_rejected")
+        return True
+
+    async def record_chat_opportunity(self, event) -> bool:
+        del event
+        self.operations.append("activity_chat")
+        return True
+
+    async def close(self, event) -> bool:
+        del event
+        self.operations.append("activity_closed")
+        return True
+
+
+@dataclass
 class _Planner:
     operations: list[str]
     result: EventProcessResult = EventProcessResult("succeeded")
@@ -196,6 +233,7 @@ def _dispatcher(
     context_result: bool = True,
     terminal_result: MutationResult | None = None,
     outbox_result: MutationResult | None = None,
+    with_activity: bool = False,
 ) -> tuple[GatewayV2EventDispatcher, _Planner]:
     planner = _Planner(operations)
     terminal_result = terminal_result or MutationResult(MutationDisposition.APPLIED)
@@ -206,6 +244,9 @@ def _dispatcher(
             terminal_repository=_TerminalRepository(operations, result=terminal_result),
             outbox_repository=_OutboxRepository(operations, result=outbox_result),
             decision_planner=planner,
+            activity_repository=(
+                _ActivityRepository(operations) if with_activity else None
+            ),
         ),
         planner,
     )
@@ -231,6 +272,14 @@ async def test_skill_started_only_upserts_started_call() -> None:
     assert operations == ["started"]
 
 
+async def test_skill_started_records_activity_after_terminal_state() -> None:
+    operations: list[str] = []
+    dispatcher, _ = _dispatcher(operations, with_activity=True)
+
+    assert await dispatcher(_claimed("skill_started")) == EventProcessResult("succeeded")
+    assert operations == ["started", "activity_started"]
+
+
 async def test_skill_finished_without_lease_only_converges_terminal() -> None:
     operations: list[str] = []
     dispatcher, _ = _dispatcher(operations)
@@ -247,9 +296,31 @@ async def test_skill_finished_with_lease_converges_terminal_before_agent() -> No
     assert operations == ["terminal", "context", "agent"]
 
 
+async def test_skill_finished_advances_activity_before_next_decision() -> None:
+    operations: list[str] = []
+    dispatcher, _ = _dispatcher(operations, with_activity=True)
+
+    result = await dispatcher(_claimed("skill_finished", with_lease=True))
+
+    assert result == EventProcessResult("succeeded")
+    assert operations == ["terminal", "activity_terminal", "context", "agent"]
+
+
 async def test_historical_skill_finished_never_reactivates_agent_cycle() -> None:
     operations: list[str] = []
     dispatcher, _ = _dispatcher(operations)
+    historical = replace(
+        _claimed("skill_finished", with_lease=True),
+        historical_recovery=True,
+    )
+
+    assert await dispatcher(historical) == EventProcessResult("succeeded")
+    assert operations == ["terminal"]
+
+
+async def test_historical_skill_finished_does_not_advance_current_activity() -> None:
+    operations: list[str] = []
+    dispatcher, _ = _dispatcher(operations, with_activity=True)
     historical = replace(
         _claimed("skill_finished", with_lease=True),
         historical_recovery=True,
@@ -267,12 +338,28 @@ async def test_decision_rejected_only_merges_rejection() -> None:
     assert operations == ["rejected"]
 
 
+async def test_decision_rejected_updates_activity_after_outbox() -> None:
+    operations: list[str] = []
+    dispatcher, _ = _dispatcher(operations, with_activity=True)
+
+    assert await dispatcher(_claimed("decision_rejected")) == EventProcessResult("succeeded")
+    assert operations == ["rejected", "activity_rejected"]
+
+
 async def test_session_stopped_only_closes_generation() -> None:
     operations: list[str] = []
     dispatcher, _ = _dispatcher(operations)
 
     assert await dispatcher(_claimed("session_stopped")) == EventProcessResult("succeeded")
     assert operations == ["stopped"]
+
+
+async def test_session_stopped_closes_activity_before_generation() -> None:
+    operations: list[str] = []
+    dispatcher, _ = _dispatcher(operations, with_activity=True)
+
+    assert await dispatcher(_claimed("session_stopped")) == EventProcessResult("succeeded")
+    assert operations == ["activity_closed", "stopped"]
 
 
 async def test_lost_lease_context_fence_does_not_run_agent() -> None:

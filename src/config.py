@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 from uuid import UUID
 
 from pydantic import Field, PostgresDsn, model_validator
@@ -86,8 +87,13 @@ class Settings(BaseSettings):
     robotgateway_callback_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     robotgateway_callback_api_key: str | None = Field(default=None)
 
+    # ── Auto Chat ──
+    auto_chat_base_url: str | None = Field(default=None)
+    auto_chat_timeout_seconds: float = Field(default=45.0, gt=0, le=60.0)
+    auto_chat_deadline_safety_seconds: float = Field(default=10.0, ge=0, le=45.0)
+
     # ── LLM Gateway shared / v1 runtime ──
-    llm_gateway_v1_enabled: bool = Field(default=True)
+    llm_gateway_v1_enabled: bool = Field(default=False)
     llm_gateway_v2_enabled: bool = Field(default=False)
     llm_gateway_app_secrets: dict[str, str] = Field(default_factory=dict)
     llm_gateway_app_gateways: dict[str, list[str]] = Field(default_factory=dict)
@@ -99,6 +105,15 @@ class Settings(BaseSettings):
     llm_gateway_decision_app_secret: str | None = Field(default=None)
     llm_gateway_decision_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     llm_gateway_decision_max_retries: int = Field(default=1, ge=0, le=5)
+    llm_gateway_simple_chat_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
+    llm_gateway_control_url: str | None = Field(default=None)
+    llm_gateway_control_app_id: str | None = Field(default=None)
+    llm_gateway_control_app_secret: str | None = Field(default=None)
+    llm_gateway_control_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    llm_gateway_control_max_retries: int = Field(default=1, ge=0, le=5)
+    llm_gateway_hosted_chat_queue_size: int = Field(default=100, ge=1, le=10_000)
+    llm_gateway_hosted_chat_state_ttl_seconds: int = Field(default=300, ge=30, le=86_400)
+    llm_gateway_hosted_chat_max_state_entries: int = Field(default=10_000, ge=1, le=1_000_000)
     llm_gateway_event_worker_enabled: bool = Field(default=True)
     llm_gateway_event_stream_key: str = Field(default="llm-gateway:events")
     llm_gateway_event_consumer_group: str = Field(default="myagent2")
@@ -113,7 +128,14 @@ class Settings(BaseSettings):
     llm_gateway_v2_retry_base_ms: int = Field(default=1_000, ge=1, le=3_600_000)
     llm_gateway_v2_retry_max_ms: int = Field(default=300_000, ge=1, le=3_600_000)
     llm_gateway_v2_claim_ttl_ms: int = Field(default=30_000, ge=1, le=3_600_000)
-    llm_gateway_v2_agent_timeout_seconds: float = Field(default=30.0, gt=0, le=300.0)
+    llm_gateway_v2_agent_timeout_seconds: float = Field(default=60.0, gt=0, le=300.0)
+    llm_gateway_v2_rag_mode: Literal["naive", "hybrid", "mix"] = "naive"
+    llm_gateway_v2_rag_top_k: int = Field(default=10, ge=1, le=200)
+    llm_gateway_v2_rag_chunk_top_k: int = Field(default=10, ge=1, le=200)
+    llm_gateway_v2_rag_max_entity_tokens: int = Field(default=1_500, ge=256, le=30_000)
+    llm_gateway_v2_rag_max_relation_tokens: int = Field(default=2_500, ge=256, le=30_000)
+    llm_gateway_v2_rag_max_total_tokens: int = Field(default=6_000, ge=512, le=30_000)
+    llm_gateway_v2_rag_context_max_tokens: int = Field(default=6_000, ge=256, le=30_000)
     llm_gateway_v2_poll_ms: int = Field(default=250, ge=1, le=60_000)
     llm_gateway_v2_event_max_parallelism: int = Field(default=4, ge=1, le=64)
     llm_gateway_v2_decision_max_parallelism: int = Field(default=4, ge=1, le=64)

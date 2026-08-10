@@ -21,7 +21,9 @@ from src.core.integration.llm_gateway_v2.contracts import (
 
 def decision_payload(decision_action: str, **overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "traceId": "trace-1",
         "contractVersion": "llm-gateway-http-v2",
+        "sessionId": "session-1",
         "decisionId": "decision-1",
         "decisionLeaseId": "lease-1",
         "stateVersion": 0,
@@ -40,8 +42,6 @@ def decision_payload(decision_action: str, **overrides: Any) -> dict[str, Any]:
                 },
             }
         )
-    elif decision_action == "wait":
-        payload["waitMs"] = 1_000
     payload.update(overrides)
     return payload
 
@@ -71,7 +71,9 @@ def test_parse_decision_returns_concrete_frozen_wire_model(
 @pytest.mark.parametrize(
     "field",
     [
+        "traceId",
         "contractVersion",
+        "sessionId",
         "decisionId",
         "decisionLeaseId",
         "stateVersion",
@@ -238,25 +240,10 @@ def test_call_skill_arguments_are_deeply_frozen_and_input_detached() -> None:
         decision.arguments["nested"]["items"].append(2)
 
 
-@pytest.mark.parametrize("wait_ms", [1, 30_000])
-def test_wait_accepts_strict_positive_wait_ms(wait_ms: int) -> None:
-    decision = parse_gateway_v2_decision(decision_payload("wait", waitMs=wait_ms))
-
-    assert decision.model_dump()["waitMs"] == wait_ms
-
-
-@pytest.mark.parametrize("wait_ms", [None, 0, -1, True, 1.0, "1"])
-def test_wait_rejects_invalid_wait_ms(wait_ms: Any) -> None:
+def test_wait_forbids_wait_ms() -> None:
+    assert parse_gateway_v2_decision(decision_payload("wait")).action == "wait"
     with pytest.raises(ValidationError):
-        parse_gateway_v2_decision(decision_payload("wait", waitMs=wait_ms))
-
-
-def test_wait_requires_wait_ms() -> None:
-    payload = decision_payload("wait")
-    payload.pop("waitMs")
-
-    with pytest.raises(ValidationError):
-        parse_gateway_v2_decision(payload)
+        parse_gateway_v2_decision(decision_payload("wait", waitMs=1_000))
 
 
 @pytest.mark.parametrize(
@@ -307,18 +294,47 @@ def test_decision_union_json_schema_has_action_discriminator() -> None:
 VALID_RESPONSES: list[tuple[dict[str, Any], type]] = [
     (
         {
+            "accepted": True,
             "status": "accepted",
-            "reason": "decision accepted",
+            "traceId": "trace-1",
+            "sessionId": "session-1",
+            "decisionId": "decision-1",
+            "controlGeneration": 1,
             "skillCallId": "call-1",
+            "stateVersion": 8,
+            "nextDecisionLeaseId": None,
+            "reason": "decision accepted",
         },
         GatewayV2DecisionAccepted,
     ),
     (
-        {"status": "accepted", "reason": "decision accepted"},
+        {
+            "accepted": True,
+            "status": "accepted",
+            "traceId": "trace-1",
+            "sessionId": "session-1",
+            "decisionId": "decision-1",
+            "controlGeneration": 1,
+            "skillCallId": None,
+            "stateVersion": 8,
+            "nextDecisionLeaseId": None,
+            "reason": "decision accepted",
+        },
         GatewayV2DecisionAccepted,
     ),
     (
-        {"status": "rejected", "reason": "gateway_policy_changed"},
+        {
+            "accepted": False,
+            "status": "rejected",
+            "traceId": None,
+            "sessionId": None,
+            "decisionId": None,
+            "controlGeneration": 0,
+            "skillCallId": None,
+            "stateVersion": 0,
+            "nextDecisionLeaseId": None,
+            "reason": "gateway_policy_changed",
+        },
         GatewayV2DecisionRejected,
     ),
 ]
@@ -347,9 +363,30 @@ def test_parse_response_returns_concrete_frozen_wire_model(
     ],
 )
 def test_rejected_accepts_any_nonempty_reason(reason: str) -> None:
-    response = parse_gateway_v2_decision_response({"status": "rejected", "reason": reason})
+    payload = deepcopy(VALID_RESPONSES[-1][0])
+    payload["reason"] = reason
+    response = parse_gateway_v2_decision_response(payload)
 
     assert response.reason == reason
+
+
+def test_rejected_accepts_optional_blocking_context() -> None:
+    payload = deepcopy(VALID_RESPONSES[-1][0])
+    payload.update(
+        {
+            "blockedByState": "seated",
+            "blockedByActivity": "coffee",
+            "blockedBySceneId": "scene-1",
+            "blockedByChairId": "chair-1",
+        }
+    )
+
+    response = parse_gateway_v2_decision_response(payload)
+
+    assert response.blocked_by_state == "seated"
+    assert response.blocked_by_activity == "coffee"
+    assert response.blocked_by_scene_id == "scene-1"
+    assert response.blocked_by_chair_id == "chair-1"
 
 
 @pytest.mark.parametrize(
@@ -389,14 +426,11 @@ def test_response_rejects_invalid_field_combinations(payload: Any) -> None:
         parse_gateway_v2_decision_response(payload)
 
 
-def test_accepted_response_skill_call_id_is_omittable_but_not_nullable_in_schema() -> None:
+def test_accepted_response_requires_nullable_skill_call_id_and_null_next_lease() -> None:
     schema = GatewayV2DecisionAccepted.model_json_schema()
-    skill_call_id_schema = schema["properties"]["skillCallId"]
-
-    assert "skillCallId" not in schema["required"]
-    assert skill_call_id_schema.get("type") == "string"
-    assert "default" not in skill_call_id_schema
-    assert "anyOf" not in skill_call_id_schema
+    assert "skillCallId" in schema["required"]
+    assert "nextDecisionLeaseId" in schema["required"]
+    assert schema["properties"]["nextDecisionLeaseId"]["type"] == "null"
 
 
 def test_response_union_json_schema_has_status_discriminator() -> None:
@@ -416,17 +450,10 @@ def test_response_union_json_schema_has_status_discriminator() -> None:
 
 
 def test_response_model_does_not_apply_request_action_skill_call_id_rules() -> None:
-    accepted_without_call = parse_gateway_v2_decision_response({"status": "accepted", "reason": "accepted no-op"})
-    accepted_with_call = parse_gateway_v2_decision_response(
-        {
-            "status": "accepted",
-            "reason": "accepted call",
-            "skillCallId": "call-1",
-        }
-    )
+    no_call_payload = deepcopy(VALID_RESPONSES[1][0])
+    call_payload = deepcopy(VALID_RESPONSES[0][0])
+    accepted_without_call = parse_gateway_v2_decision_response(no_call_payload)
+    accepted_with_call = parse_gateway_v2_decision_response(call_payload)
 
-    assert accepted_without_call.model_dump() == {
-        "status": "accepted",
-        "reason": "accepted no-op",
-    }
+    assert accepted_without_call.skill_call_id is None
     assert accepted_with_call.model_dump()["skillCallId"] == "call-1"

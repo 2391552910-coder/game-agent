@@ -220,9 +220,14 @@ def _assert_sessions(database_url: URL, details: dict[str, Any]) -> None:
     )
 
 
-def _assert_cycles(database_url: URL, details: dict[str, Any]) -> None:
+def _assert_cycles(
+    database_url: URL,
+    details: dict[str, Any],
+    *,
+    activity_plan: bool = False,
+) -> None:
     columns = details["columns"]
-    assert set(columns) == {
+    expected_columns = {
         "id",
         "tenant_id",
         "runtime_session_id",
@@ -239,6 +244,21 @@ def _assert_cycles(database_url: URL, details: dict[str, Any]) -> None:
         "started_at",
         "stopped_at",
     }
+    if activity_plan:
+        expected_columns.update(
+            {
+                "activity_plan_id",
+                "activity_goal",
+                "activity_plan",
+                "activity_phase",
+                "activity_status",
+                "activity_current_step_id",
+                "activity_plan_version",
+                "activity_last_event_id",
+                "activity_last_event_sequence",
+            }
+        )
+    assert set(columns) == expected_columns
     _assert_column(columns, "id", sa.UUID, nullable=False)
     _assert_column(columns, "tenant_id", sa.UUID, nullable=False)
     _assert_column(columns, "runtime_session_id", sa.UUID, nullable=False)
@@ -254,6 +274,16 @@ def _assert_cycles(database_url: URL, details: dict[str, Any]) -> None:
     _assert_column(columns, "updated_at", sa.DateTime, nullable=False, default="now()", timezone=True)
     _assert_column(columns, "started_at", sa.DateTime, nullable=True, timezone=True)
     _assert_column(columns, "stopped_at", sa.DateTime, nullable=True, timezone=True)
+    if activity_plan:
+        _assert_column(columns, "activity_plan_id", sa.String, nullable=True, length=128)
+        _assert_column(columns, "activity_goal", JSONB, nullable=True)
+        _assert_column(columns, "activity_plan", JSONB, nullable=True)
+        _assert_column(columns, "activity_phase", sa.String, nullable=True, length=64)
+        _assert_column(columns, "activity_status", sa.String, nullable=False, default="'inactive'", length=24)
+        _assert_column(columns, "activity_current_step_id", sa.String, nullable=True, length=128)
+        _assert_column(columns, "activity_plan_version", sa.BigInteger, nullable=False, default="0")
+        _assert_column(columns, "activity_last_event_id", sa.UUID, nullable=True)
+        _assert_column(columns, "activity_last_event_sequence", sa.BigInteger, nullable=True)
     _assert_primary_key(details, "pk_llm_gateway_control_cycles")
     _assert_foreign_keys(
         details,
@@ -284,6 +314,27 @@ def _assert_cycles(database_url: URL, details: dict[str, Any]) -> None:
             "ck_llm_gateway_cycles_next_event_sequence_positive": ("next_event_sequence", "> 0"),
             "ck_llm_gateway_cycles_latest_state_version_nonnegative": ("latest_state_version", ">= 0"),
             "ck_llm_gateway_cycles_status": ("pending", "active", "stopped", "superseded", "manual"),
+            **(
+                {
+                    "ck_llm_gateway_cycles_activity_status": (
+                        "inactive",
+                        "active",
+                        "completed",
+                        "paused",
+                        "abandoned",
+                    ),
+                    "ck_llm_gateway_cycles_activity_plan_version_nonnegative": (
+                        "activity_plan_version",
+                        ">= 0",
+                    ),
+                    "ck_llm_gateway_cycles_activity_last_sequence_positive": (
+                        "activity_last_event_sequence",
+                        "> 0",
+                    ),
+                }
+                if activity_plan
+                else {}
+            ),
         },
     )
 
@@ -293,6 +344,7 @@ def _assert_events(
     details: dict[str, Any],
     *,
     processing_index: bool = True,
+    hosted_chat: bool = False,
 ) -> None:
     columns = details["columns"]
     assert set(columns) == {
@@ -383,6 +435,11 @@ def _assert_events(
                 "skill_finished",
                 "decision_rejected",
                 "session_stopped",
+            )
+            + (
+                ("chat_received", "nearby_friend_chat_requested", "chat_send_result")
+                if hosted_chat
+                else ()
             ),
             "ck_llm_gateway_events_event_sequence_positive": ("event_sequence", "> 0"),
             "ck_llm_gateway_events_status": (
@@ -403,9 +460,14 @@ def _assert_events(
             ),
         },
     )
-def _assert_decisions(database_url: URL, details: dict[str, Any]) -> None:
+def _assert_decisions(
+    database_url: URL,
+    details: dict[str, Any],
+    *,
+    activity_plan: bool = False,
+) -> None:
     columns = details["columns"]
-    assert set(columns) == {
+    expected_columns = {
         "id",
         "tenant_id",
         "cycle_id",
@@ -440,6 +502,16 @@ def _assert_decisions(database_url: URL, details: dict[str, Any]) -> None:
         "sent_at",
         "completed_at",
     }
+    if activity_plan:
+        expected_columns.update(
+            {
+                "activity_plan_id",
+                "activity_plan_version",
+                "activity_step_id",
+                "activity_phase",
+            }
+        )
+    assert set(columns) == expected_columns
     _assert_column(columns, "id", sa.UUID, nullable=False, default="gen_random_uuid()")
     _assert_column(columns, "tenant_id", sa.UUID, nullable=False)
     _assert_column(columns, "cycle_id", sa.UUID, nullable=False)
@@ -465,6 +537,11 @@ def _assert_decisions(database_url: URL, details: dict[str, Any]) -> None:
     _assert_column(columns, "response_status", sa.String, nullable=True, length=32)
     _assert_column(columns, "response_reason", sa.String, nullable=True, length=256)
     _assert_column(columns, "skill_call_id", sa.String, nullable=True, length=128)
+    if activity_plan:
+        _assert_column(columns, "activity_plan_id", sa.String, nullable=True, length=128)
+        _assert_column(columns, "activity_plan_version", sa.BigInteger, nullable=True)
+        _assert_column(columns, "activity_step_id", sa.String, nullable=True, length=128)
+        _assert_column(columns, "activity_phase", sa.String, nullable=True, length=64)
     _assert_column(columns, "error_stage", sa.String, nullable=True, length=64)
     _assert_column(columns, "error_category", sa.String, nullable=True, length=64)
     _assert_column(columns, "created_at", sa.DateTime, nullable=False, default="now()", timezone=True)
@@ -585,23 +662,49 @@ def _assert_skill_calls(database_url: URL, details: dict[str, Any]) -> None:
     )
 
 
-def _assert_inbox_schema(database_url: URL, *, processing_index: bool = True) -> None:
+def _assert_inbox_schema(
+    database_url: URL,
+    *,
+    processing_index: bool = True,
+    hosted_chat: bool = False,
+    activity_plan: bool = False,
+) -> None:
     snapshot = _inspect_schema(database_url)
     assert snapshot["tables"] >= INBOX_TABLES
     _assert_sessions(database_url, snapshot["details"]["llm_gateway_sessions"])
-    _assert_cycles(database_url, snapshot["details"]["llm_gateway_control_cycles"])
+    _assert_cycles(
+        database_url,
+        snapshot["details"]["llm_gateway_control_cycles"],
+        activity_plan=activity_plan,
+    )
     _assert_events(
         database_url,
         snapshot["details"]["llm_gateway_events"],
         processing_index=processing_index,
+        hosted_chat=hosted_chat,
     )
 
 
-def _assert_v2_schema(database_url: URL, *, processing_index: bool = True) -> None:
+def _assert_v2_schema(
+    database_url: URL,
+    *,
+    processing_index: bool = True,
+    hosted_chat: bool = False,
+    activity_plan: bool = False,
+) -> None:
     snapshot = _inspect_schema(database_url)
     assert snapshot["tables"] >= V2_TABLES
-    _assert_inbox_schema(database_url, processing_index=processing_index)
-    _assert_decisions(database_url, snapshot["details"]["llm_gateway_decisions"])
+    _assert_inbox_schema(
+        database_url,
+        processing_index=processing_index,
+        hosted_chat=hosted_chat,
+        activity_plan=activity_plan,
+    )
+    _assert_decisions(
+        database_url,
+        snapshot["details"]["llm_gateway_decisions"],
+        activity_plan=activity_plan,
+    )
     _assert_skill_calls(database_url, snapshot["details"]["llm_gateway_skill_calls"])
 
 
@@ -663,7 +766,7 @@ def _prepare_revision_007(migration_config: Config, database_url: URL) -> None:
         return
 
     current_revision = _current_revision(database_url)
-    if current_revision in {"008", "009", "010", "011"}:
+    if current_revision in {"008", "009", "010", "011", "012", "013"}:
         command.downgrade(migration_config, "007")
         return
     if current_revision in {"001", "002", "003", "004", "005", "006", "007"}:
@@ -701,20 +804,36 @@ def test_gateway_v2_migration_round_trip(
 
     command.upgrade(migration_config, "head")
     assert _current_database(test_postgres_url) == test_postgres_url.database
-    assert _current_revision(test_postgres_url) == "011"
-    _assert_v2_schema(test_postgres_url, processing_index=False)
-    schema_at_011 = _v2_schema_fingerprint(test_postgres_url)
+    assert _current_revision(test_postgres_url) == "013"
+    _assert_v2_schema(
+        test_postgres_url,
+        processing_index=False,
+        hosted_chat=True,
+        activity_plan=True,
+    )
+    schema_at_013 = _v2_schema_fingerprint(test_postgres_url)
+
+    command.downgrade(migration_config, "012")
+    assert _current_revision(test_postgres_url) == "012"
+    _assert_v2_schema(test_postgres_url, processing_index=False, hosted_chat=True)
+    schema_at_012 = _v2_schema_fingerprint(test_postgres_url)
+    assert schema_at_012 != schema_at_013
 
     command.downgrade(migration_config, "010")
     assert _current_revision(test_postgres_url) == "010"
     _assert_v2_schema(test_postgres_url, processing_index=True)
     schema_at_010 = _v2_schema_fingerprint(test_postgres_url)
-    assert schema_at_010 != schema_at_011
+    assert schema_at_010 != schema_at_012
 
     command.upgrade(migration_config, "head")
-    assert _current_revision(test_postgres_url) == "011"
-    _assert_v2_schema(test_postgres_url, processing_index=False)
-    assert _v2_schema_fingerprint(test_postgres_url) == schema_at_011
+    assert _current_revision(test_postgres_url) == "013"
+    _assert_v2_schema(
+        test_postgres_url,
+        processing_index=False,
+        hosted_chat=True,
+        activity_plan=True,
+    )
+    assert _v2_schema_fingerprint(test_postgres_url) == schema_at_013
 
     command.downgrade(migration_config, "009")
     assert _current_revision(test_postgres_url) == "009"

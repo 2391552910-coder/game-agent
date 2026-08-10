@@ -344,15 +344,77 @@ class EventWorker:
         return await self._processor(event)
 
     async def _maintain_claim(self, event: ClaimedGatewayEvent) -> None:
+        claim_ttl_seconds = max(self._claim_ttl_ms / 1_000, 0.001)
         renewal_interval_seconds = max(self._claim_ttl_ms / 3_000, 0.001)
+        heartbeat_interval_seconds = min(
+            renewal_interval_seconds,
+            max(self._poll_interval_seconds, 0.001),
+            1.0,
+        )
+        loop = asyncio.get_running_loop()
+        remaining_claim_seconds = max(
+            (event.lock_until - datetime.now(tz=event.lock_until.tzinfo)).total_seconds(),
+            0.0,
+        )
+        claim_expires_at = loop.time() + remaining_claim_seconds
+        next_renewal = loop.time() + min(
+            renewal_interval_seconds,
+            max(remaining_claim_seconds / 3, 0.001),
+        )
         while True:
-            await asyncio.sleep(renewal_interval_seconds)
-            renewed = await self._repository.renew_event_claim(
+            await asyncio.sleep(
+                min(
+                    heartbeat_interval_seconds,
+                    max(next_renewal - loop.time(), 0.0),
+                )
+            )
+            self._status.heartbeat()
+            if loop.time() < next_renewal:
+                continue
+            renewed = await self._renew_claim_before_expiry(
                 event,
-                claim_ttl_ms=self._claim_ttl_ms,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                timeout_seconds=max(claim_expires_at - loop.time(), 0.0),
             )
             if not renewed:
                 return
+            self._status.heartbeat()
+            renewed_at = loop.time()
+            next_renewal = renewed_at + renewal_interval_seconds
+            claim_expires_at = renewed_at + claim_ttl_seconds
+
+    async def _renew_claim_before_expiry(
+        self,
+        event: ClaimedGatewayEvent,
+        *,
+        heartbeat_interval_seconds: float,
+        timeout_seconds: float,
+    ) -> bool:
+        if timeout_seconds <= 0:
+            return False
+        renewal_task = asyncio.create_task(
+            self._repository.renew_event_claim(
+                event,
+                claim_ttl_ms=self._claim_ttl_ms,
+            ),
+            name=f"llm-gateway-v2-renew-request-{event.event_id}",
+        )
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        try:
+            while True:
+                remaining_seconds = deadline - asyncio.get_running_loop().time()
+                if remaining_seconds <= 0:
+                    return False
+                done, _ = await asyncio.wait(
+                    {renewal_task},
+                    timeout=min(heartbeat_interval_seconds, remaining_seconds),
+                )
+                self._status.heartbeat()
+                if renewal_task in done:
+                    return renewal_task.result()
+        finally:
+            if not renewal_task.done():
+                await self._cancel_and_wait(renewal_task)
 
     @staticmethod
     async def _cancel_and_wait(*tasks: asyncio.Task[Any]) -> None:

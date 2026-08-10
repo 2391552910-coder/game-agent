@@ -54,7 +54,7 @@ def _invalid_arguments(skill_name: str) -> dict:
 def _context(
     skill_name: str,
     *,
-    lease_kind: str = "hosting_control",
+    lease_kind: str = "observation",
     parent_skill_name: str | None = None,
     allowed_skill_names: list[str] | None = None,
 ) -> GatewayV2AgentContext:
@@ -138,7 +138,16 @@ def test_each_gateway_non_chat_skill_builds_a_v2_call_skill_decision(
             "reason": "out of scope arguments",
         }
     )
-    context = _context(skill_name)
+    vehicle_parent_by_exit = {
+        "hot_air_balloon_exit": "hot_air_balloon_auto_schedule",
+        "helicopter_exit": "helicopter_auto_schedule",
+    }
+    parent_skill_name = vehicle_parent_by_exit.get(skill_name)
+    context = _context(
+        skill_name,
+        lease_kind="vehicle_cancel_window" if parent_skill_name is not None else "observation",
+        parent_skill_name=parent_skill_name,
+    )
 
     selected = select_gateway_v2_action(
         context,
@@ -146,6 +155,7 @@ def test_each_gateway_non_chat_skill_builds_a_v2_call_skill_decision(
     )
     frozen = freeze_gateway_v2_decision(
         f"decision-{skill_name}",
+        "trace-catalog-1",
         context,
         selected,
     )

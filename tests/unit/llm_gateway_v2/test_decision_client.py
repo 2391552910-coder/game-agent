@@ -25,13 +25,43 @@ def _client(transport: httpx.AsyncBaseTransport) -> GatewayV2DecisionClient:
     )
 
 
+def _accepted_response(*, skill_call_id: str | None) -> dict[str, object]:
+    return {
+        "accepted": True,
+        "status": "accepted",
+        "traceId": "trace-1",
+        "sessionId": "session-1",
+        "decisionId": "decision-1",
+        "controlGeneration": 1,
+        "skillCallId": skill_call_id,
+        "stateVersion": 1,
+        "nextDecisionLeaseId": None,
+        "reason": "ok",
+    }
+
+
+def _rejected_response(reason: str) -> dict[str, object]:
+    return {
+        "accepted": False,
+        "status": "rejected",
+        "traceId": None,
+        "sessionId": None,
+        "decisionId": None,
+        "controlGeneration": 0,
+        "skillCallId": None,
+        "stateVersion": 0,
+        "nextDecisionLeaseId": None,
+        "reason": reason,
+    }
+
+
 @pytest.mark.parametrize("action", ["call_skill", "stop_hosting"])
 async def test_client_accepts_skill_actions_only_with_skill_call_id(action: str) -> None:
     requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json={"status": "accepted", "reason": "ok", "skillCallId": "call-1"})
+        return httpx.Response(200, json=_accepted_response(skill_call_id="call-1"))
 
     raw_body = b'{"decisionId":"decision-1"}'
     result = await _client(httpx.MockTransport(handler)).send(action=action, raw_body=raw_body)
@@ -49,7 +79,7 @@ async def test_client_accepts_skill_actions_only_with_skill_call_id(action: str)
 @pytest.mark.parametrize("action", ["wait", "no_op"])
 async def test_client_accepts_non_skill_actions_without_skill_call_id(action: str) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(204, json={"status": "accepted", "reason": "ok"})
+        return httpx.Response(204, json=_accepted_response(skill_call_id=None))
 
     result = await _client(httpx.MockTransport(handler)).send(action=action, raw_body=b"{}")
 
@@ -59,7 +89,7 @@ async def test_client_accepts_non_skill_actions_without_skill_call_id(action: st
 
 async def test_client_parses_non_2xx_unknown_rejected_reason_before_http_classification() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(409, json={"status": "rejected", "reason": "gateway_policy_v27"})
+        return httpx.Response(409, json=_rejected_response("gateway_policy_v27"))
 
     result = await _client(httpx.MockTransport(handler)).send(action="wait", raw_body=b"{}")
 
@@ -71,7 +101,7 @@ async def test_client_parses_non_2xx_unknown_rejected_reason_before_http_classif
 
 async def test_client_preserves_idempotency_conflict_as_structured_rejection() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(409, json={"status": "rejected", "reason": "idempotency_key_conflict"})
+        return httpx.Response(409, json=_rejected_response("idempotency_key_conflict"))
 
     result = await _client(httpx.MockTransport(handler)).send(action="call_skill", raw_body=b"{}")
 
@@ -93,7 +123,7 @@ async def test_client_rejects_non_json_response() -> None:
 @pytest.mark.parametrize("action", ["call_skill", "stop_hosting"])
 async def test_client_rejects_accepted_skill_action_without_skill_call_id(action: str) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": "accepted", "reason": "ok"})
+        return httpx.Response(200, json=_accepted_response(skill_call_id=None))
 
     with pytest.raises(DecisionClientProtocolError) as raised:
         await _client(httpx.MockTransport(handler)).send(action=action, raw_body=b"{}")
@@ -104,7 +134,7 @@ async def test_client_rejects_accepted_skill_action_without_skill_call_id(action
 @pytest.mark.parametrize("action", ["wait", "no_op"])
 async def test_client_rejects_skill_call_id_for_non_skill_action(action: str) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": "accepted", "reason": "ok", "skillCallId": "call-1"})
+        return httpx.Response(200, json=_accepted_response(skill_call_id="call-1"))
 
     with pytest.raises(DecisionClientProtocolError) as raised:
         await _client(httpx.MockTransport(handler)).send(action=action, raw_body=b"{}")
@@ -114,7 +144,7 @@ async def test_client_rejects_skill_call_id_for_non_skill_action(action: str) ->
 
 async def test_client_rejects_non_2xx_accepted_body() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, json={"status": "accepted", "reason": "ok"})
+        return httpx.Response(503, json=_accepted_response(skill_call_id=None))
 
     with pytest.raises(DecisionClientProtocolError) as raised:
         await _client(httpx.MockTransport(handler)).send(action="wait", raw_body=b"{}")
@@ -124,15 +154,11 @@ async def test_client_rejects_non_2xx_accepted_body() -> None:
 
 async def test_client_rejects_response_with_extra_gateway_fields() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
+        payload = _accepted_response(skill_call_id=None)
+        payload["extra"] = "forbidden"
         return httpx.Response(
             200,
-            content=json.dumps(
-                {
-                    "status": "accepted",
-                    "reason": "ok",
-                    "traceId": "must-not-create-a-new-lease-source",
-                }
-            ).encode(),
+            content=json.dumps(payload).encode(),
         )
 
     with pytest.raises(DecisionClientProtocolError) as raised:

@@ -28,6 +28,7 @@ def _decision_payload(*, lease: dict | None = None) -> dict:
             "session": {"status": "active", "position": {"x": 1, "y": 2}},
             "availableSkills": [],
             "skillArgumentHints": [],
+            "lastSkillResult": None,
         },
     }
 

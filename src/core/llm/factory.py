@@ -46,22 +46,50 @@ async def get_llm(model_type: str = "default", temperature: float = 0.1) -> Base
         return _fallback_llm(model_type, temperature)
 
 
-def _fallback_llm(model_type: str, temperature: float) -> BaseChatModel:
+async def get_env_llm(
+    model_type: str = "default",
+    temperature: float = 0.1,
+    *,
+    timeout_seconds: float | None = None,
+    max_retries: int = 2,
+) -> BaseChatModel:
+    """获取只使用 .env 配置的模型实例。
+
+    该入口用于有严格时延预算的内部路径，避免意外切换到 DB provider pool。
+    """
+    return _fallback_llm(
+        model_type,
+        temperature,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+    )
+
+
+def _fallback_llm(
+    model_type: str,
+    temperature: float,
+    *,
+    timeout_seconds: float | None = None,
+    max_retries: int = 2,
+) -> BaseChatModel:
     """回退到 settings 配置（原逻辑保留）。"""
-    cache_key = f"{model_type}_{temperature}"
+    cache_key = f"{model_type}_{temperature}_{timeout_seconds}_{max_retries}"
     if cache_key in _fallback_cache:
         return _fallback_cache[cache_key]
 
     model = settings.openai_default_model if model_type == "default" else settings.openai_fast_model
 
-    llm = ChatOpenAI(
-        model=model,
-        temperature=temperature,
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-        streaming=False,   # DashScope 流式接口可能有问题，先禁用
-        max_retries=2,
-    )
+    params = {
+        "model": model,
+        "temperature": temperature,
+        "api_key": settings.openai_api_key,
+        "base_url": settings.openai_base_url,
+        "streaming": False,  # DashScope 流式接口可能有问题，先禁用
+        "max_retries": max_retries,
+    }
+    if timeout_seconds is not None:
+        params["timeout"] = timeout_seconds
+    llm = ChatOpenAI(**params)
     _fallback_cache[cache_key] = llm
     return llm
 

@@ -38,6 +38,7 @@ def decision_context_payload(**overrides: Any) -> dict[str, Any]:
         },
         "availableSkills": [],
         "skillArgumentHints": [],
+        "lastSkillResult": None,
     }
     payload.update(overrides)
     return payload

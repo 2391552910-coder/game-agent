@@ -66,6 +66,7 @@ def _decision_context() -> dict[str, Any]:
                 "nextSteps": [],
             }
         ],
+        "lastSkillResult": None,
     }
 
 
@@ -75,7 +76,7 @@ def _lease() -> dict[str, Any]:
         "controlGeneration": 1,
         "stateVersion": 7,
         "decisionLeaseId": "lease-1",
-        "leaseKind": "hosting_control",
+        "leaseKind": "observation",
         "allowedActions": ["call_skill", "wait", "no_op"],
         "allowedSkillName": "move_to",
         "allowedSkillNames": ["move_to"],
@@ -153,7 +154,13 @@ def _formal_events() -> list[dict[str, Any]]:
         _event(
             "decision_rejected",
             sequence=5,
-            payload={"decisionId": "decision-2", "reason": "stale_state"},
+            payload={
+                "decisionId": "decision-2",
+                "action": "call_skill",
+                "skillName": "move_to",
+                "reason": "stale_state",
+                "rejectedAtMs": 1_700_000_000_005,
+            },
         ),
         _event(
             "session_stopped",
@@ -209,7 +216,7 @@ def test_remediation_spec_simulation_fixture_covers_non_chat_contract() -> None:
         if hasattr(event.payload, "lease") and event.payload.lease is not None
     }
     assert lease_kinds == {
-        "hosting_control",
+        "observation",
         "movement_control",
         "vehicle_cancel_window",
         "vehicle_recovery",

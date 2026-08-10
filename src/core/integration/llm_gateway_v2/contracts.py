@@ -19,6 +19,8 @@ from pydantic import (
 )
 from pydantic.json_schema import SkipJsonSchema
 
+from src.core.integration.llm_gateway_v2.auto_chat import ConversationContext
+
 StrictPositiveInt = Annotated[int, Strict(), Field(gt=0)]
 SUPPORTED_DECISION_ACTIONS: tuple[
     Literal["call_skill"],
@@ -33,6 +35,9 @@ SUPPORTED_EVENT_TYPES: tuple[
     Literal["skill_finished"],
     Literal["decision_rejected"],
     Literal["session_stopped"],
+    Literal["chat_received"],
+    Literal["nearby_friend_chat_requested"],
+    Literal["chat_send_result"],
 ] = (
     "session_started",
     "observation_updated",
@@ -40,6 +45,9 @@ SUPPORTED_EVENT_TYPES: tuple[
     "skill_finished",
     "decision_rejected",
     "session_stopped",
+    "chat_received",
+    "nearby_friend_chat_requested",
+    "chat_send_result",
 )
 
 
@@ -98,6 +106,9 @@ class GatewayV2Capabilities(BaseModel):
         Literal["skill_finished"],
         Literal["decision_rejected"],
         Literal["session_stopped"],
+        Literal["chat_received"],
+        Literal["nearby_friend_chat_requested"],
+        Literal["chat_send_result"],
     ] = Field(
         default=SUPPORTED_EVENT_TYPES,
         validation_alias="supportedEventTypes",
@@ -350,6 +361,8 @@ class SkillArgumentHint(_WireModel):
 
 
 DecisionAction = Literal["call_skill", "wait", "no_op", "stop_hosting"]
+ChatType = Literal["friend", "private"]
+ChatSendResultStatus = Literal["sent", "failed", "cancelled", "delivery_unknown"]
 
 
 class DecisionLeaseContext(_WireModel):
@@ -435,12 +448,23 @@ class DecisionContext(_WireModel):
         validation_alias="skillArgumentHints",
         serialization_alias="skillArgumentHints",
     )
+    last_skill_result: Mapping[str, Any] | None = Field(
+        validation_alias="lastSkillResult",
+        serialization_alias="lastSkillResult",
+    )
 
     @field_validator("session")
     @classmethod
     def freeze_session(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
         if not value:
             raise ValueError("session must contain at least one field")
+        return cast(Mapping[str, Any], _deep_freeze(value))
+
+    @field_validator("last_skill_result")
+    @classmethod
+    def freeze_last_skill_result(cls, value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        if value is None:
+            return None
         return cast(Mapping[str, Any], _deep_freeze(value))
 
     @model_validator(mode="after")
@@ -459,6 +483,12 @@ class DecisionContext(_WireModel):
 
     @field_serializer("session")
     def serialize_session(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], _deep_thaw(value))
+
+    @field_serializer("last_skill_result")
+    def serialize_last_skill_result(self, value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
         return cast(dict[str, Any], _deep_thaw(value))
 
     @field_serializer("available_skills", "skill_argument_hints", mode="wrap")
@@ -480,7 +510,7 @@ class SessionStartedPayload(_WireModel):
 
 
 class ObservationUpdatedPayload(_WireModel):
-    reason: NonEmptyString256
+    reason: NonEmptyString256 | None
     lease: DecisionLeaseContext
     decision_context: DecisionContext = Field(
         validation_alias="decisionContext",
@@ -640,7 +670,16 @@ class DecisionRejectedPayload(_WireModel):
         validation_alias="decisionId",
         serialization_alias="decisionId",
     )
+    action: DecisionAction
+    skill_name: NonEmptyString128 | None = Field(
+        validation_alias="skillName",
+        serialization_alias="skillName",
+    )
     reason: NonEmptyString256
+    rejected_at_ms: StrictNonNegativeInt = Field(
+        validation_alias="rejectedAtMs",
+        serialization_alias="rejectedAtMs",
+    )
 
 
 class SessionStoppedPayload(_WireModel):
@@ -649,6 +688,107 @@ class SessionStoppedPayload(_WireModel):
         validation_alias="stoppedAtMs",
         serialization_alias="stoppedAtMs",
     )
+
+
+class ChatSender(_WireModel):
+    avatar_id: NonEmptyString128 = Field(validation_alias="avatarId", serialization_alias="avatarId")
+    role_id: NonEmptyString128 = Field(validation_alias="roleId", serialization_alias="roleId")
+
+    @field_validator("avatar_id", "role_id")
+    @classmethod
+    def validate_positive_int64_identifier(cls, value: str) -> str:
+        if not value.isdigit() or value == "0" or int(value) > 9_223_372_036_854_775_807:
+            raise ValueError("chat identifiers must be positive Int64 strings")
+        return value
+
+
+class ChatTarget(_WireModel):
+    avatar_id: NonEmptyString128 = Field(validation_alias="avatarId", serialization_alias="avatarId")
+    role_id: NonEmptyString128 = Field(validation_alias="roleId", serialization_alias="roleId")
+
+    @field_validator("avatar_id", "role_id")
+    @classmethod
+    def validate_positive_int64_identifier(cls, value: str) -> str:
+        if not value.isdigit() or value == "0" or int(value) > 9_223_372_036_854_775_807:
+            raise ValueError("chat identifiers must be positive Int64 strings")
+        return value
+
+
+class ChatReceivedPayload(_WireModel):
+    session_id: NonEmptyString128 = Field(validation_alias="sessionId", serialization_alias="sessionId")
+    sender: ChatSender
+    chat_type: ChatType = Field(validation_alias="chatType", serialization_alias="chatType")
+    supported: StrictBool
+    text: str | None = None
+    server_time_ms: StrictNonNegativeInt = Field(validation_alias="serverTimeMs", serialization_alias="serverTimeMs")
+    conversation: ConversationContext
+
+    @field_validator("text")
+    @classmethod
+    def normalize_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped or len(stripped.encode("utf-16-le")) // 2 > 1000:
+            raise ValueError("text must be non-blank and at most 1000 UTF-16 code units")
+        return stripped
+
+    @model_validator(mode="after")
+    def validate_supported_text(self) -> "ChatReceivedPayload":
+        if self.supported and self.text is None:
+            raise ValueError("supported chat_received requires text")
+        if int(self.sender.role_id) != self.conversation.target_role_id:
+            raise ValueError("chat sender roleId does not match conversation targetRoleId")
+        return self
+
+
+class NearbyFriendChatRequestedPayload(_WireModel):
+    session_id: NonEmptyString128 = Field(validation_alias="sessionId", serialization_alias="sessionId")
+    target: ChatTarget
+    chat_type: Literal["friend"] = Field(validation_alias="chatType", serialization_alias="chatType")
+    distance: float = Field(ge=0)
+    friend_chat_count: StrictNonNegativeInt = Field(
+        validation_alias="friendChatCount",
+        serialization_alias="friendChatCount",
+    )
+    conversation: ConversationContext
+
+    @field_validator("distance")
+    @classmethod
+    def validate_distance(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("distance must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def validate_conversation_target(self) -> "NearbyFriendChatRequestedPayload":
+        if int(self.target.role_id) != self.conversation.target_role_id:
+            raise ValueError("chat target roleId does not match conversation targetRoleId")
+        return self
+
+
+class ChatSendResultPayload(_WireModel):
+    session_id: NonEmptyString128 = Field(validation_alias="sessionId", serialization_alias="sessionId")
+    chat_message_id: NonEmptyString128 = Field(validation_alias="chatMessageId", serialization_alias="chatMessageId")
+    target: ChatTarget
+    chat_type: ChatType = Field(validation_alias="chatType", serialization_alias="chatType")
+    status: ChatSendResultStatus
+    reason: NonEmptyString256 | None = None
+    upstream_code: NonEmptyString128 | None = Field(
+        default=None,
+        validation_alias="upstreamCode",
+        serialization_alias="upstreamCode",
+    )
+    completed_at_ms: StrictNonNegativeInt = Field(
+        validation_alias="completedAtMs",
+        serialization_alias="completedAtMs",
+    )
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> "ChatSendResultPayload":
+        if self.status == "failed" and self.reason is None:
+            raise ValueError("failed chat result requires reason")
+        return self
 
 
 class _GatewayV2EventBase(_WireModel):
@@ -766,13 +906,57 @@ class SessionStoppedEvent(_GatewayV2EventBase):
     payload: SessionStoppedPayload
 
 
+class ChatReceivedEvent(_GatewayV2EventBase):
+    event_type: Literal["chat_received"] = Field(validation_alias="eventType", serialization_alias="eventType")
+    payload: ChatReceivedPayload
+
+    @model_validator(mode="after")
+    def validate_chat_event(self) -> "ChatReceivedEvent":
+        if self.state_version != 0 or self.decision_lease_id is not None:
+            raise ValueError("chat_received must use stateVersion=0 and no decision lease")
+        if self.payload.session_id != self.session_id:
+            raise ValueError("payload sessionId does not match event")
+        return self
+
+
+class NearbyFriendChatRequestedEvent(_GatewayV2EventBase):
+    event_type: Literal["nearby_friend_chat_requested"] = Field(
+        validation_alias="eventType", serialization_alias="eventType"
+    )
+    payload: NearbyFriendChatRequestedPayload
+
+    @model_validator(mode="after")
+    def validate_chat_event(self) -> "NearbyFriendChatRequestedEvent":
+        if self.state_version != 0 or self.decision_lease_id is not None:
+            raise ValueError("nearby_friend_chat_requested must use stateVersion=0 and no decision lease")
+        if self.payload.session_id != self.session_id:
+            raise ValueError("payload sessionId does not match event")
+        return self
+
+
+class ChatSendResultEvent(_GatewayV2EventBase):
+    event_type: Literal["chat_send_result"] = Field(validation_alias="eventType", serialization_alias="eventType")
+    payload: ChatSendResultPayload
+
+    @model_validator(mode="after")
+    def validate_chat_event(self) -> "ChatSendResultEvent":
+        if self.state_version != 0 or self.decision_lease_id is not None:
+            raise ValueError("chat_send_result must use stateVersion=0 and no decision lease")
+        if self.payload.session_id != self.session_id:
+            raise ValueError("payload sessionId does not match event")
+        return self
+
+
 GatewayV2Event = Annotated[
     SessionStartedEvent
     | ObservationUpdatedEvent
     | SkillStartedEvent
     | SkillFinishedEvent
     | DecisionRejectedEvent
-    | SessionStoppedEvent,
+    | SessionStoppedEvent
+    | ChatReceivedEvent
+    | NearbyFriendChatRequestedEvent
+    | ChatSendResultEvent,
     Field(discriminator="event_type"),
 ]
 _GATEWAY_V2_EVENT_ADAPTER: TypeAdapter[GatewayV2Event] = TypeAdapter(GatewayV2Event)
@@ -871,9 +1055,17 @@ class GatewayV2Error(_WireModel):
 
 
 class _GatewayV2DecisionBase(_WireModel):
+    trace_id: NonEmptyString128 = Field(
+        validation_alias="traceId",
+        serialization_alias="traceId",
+    )
     contract_version: Literal["llm-gateway-http-v2"] = Field(
         validation_alias="contractVersion",
         serialization_alias="contractVersion",
+    )
+    session_id: NonEmptyString128 = Field(
+        validation_alias="sessionId",
+        serialization_alias="sessionId",
     )
     decision_id: NonEmptyString128 = Field(
         validation_alias="decisionId",
@@ -924,10 +1116,6 @@ class GatewayV2CallSkillDecision(_GatewayV2DecisionBase):
 
 class GatewayV2WaitDecision(_GatewayV2DecisionBase):
     action: Literal["wait"]
-    wait_ms: StrictPositiveInt = Field(
-        validation_alias="waitMs",
-        serialization_alias="waitMs",
-    )
 
 
 class GatewayV2NoOpDecision(_GatewayV2DecisionBase):
@@ -950,36 +1138,105 @@ def parse_gateway_v2_decision(value: object) -> GatewayV2Decision:
 
 
 class GatewayV2DecisionAccepted(_WireModel):
+    accepted: Literal[True]
     status: Literal["accepted"]
-    reason: NonEmptyString256
-    skill_call_id: NonEmptyString128 | SkipJsonSchema[None] = Field(
-        default=None,
+    trace_id: NonEmptyString128 = Field(
+        validation_alias="traceId",
+        serialization_alias="traceId",
+    )
+    session_id: NonEmptyString128 = Field(
+        validation_alias="sessionId",
+        serialization_alias="sessionId",
+    )
+    decision_id: NonEmptyString128 = Field(
+        validation_alias="decisionId",
+        serialization_alias="decisionId",
+    )
+    control_generation: StrictPositiveInt = Field(
+        validation_alias="controlGeneration",
+        serialization_alias="controlGeneration",
+    )
+    skill_call_id: NonEmptyString128 | None = Field(
         validation_alias="skillCallId",
         serialization_alias="skillCallId",
-        json_schema_extra=_omit_internal_default_from_schema,
     )
-
-    @field_validator("skill_call_id", mode="before")
-    @classmethod
-    def reject_explicit_null_skill_call_id(cls, value: object) -> object:
-        if value is None:
-            raise ValueError("skillCallId must be omitted instead of null")
-        return value
-
-    @model_serializer(mode="wrap")
-    def serialize_without_internal_skill_call_id_default(
-        self,
-        handler: Any,
-    ) -> dict[str, Any]:
-        serialized: dict[str, Any] = handler(self)
-        if self.skill_call_id is None:
-            serialized.pop("skillCallId", None)
-        return serialized
+    state_version: StrictNonNegativeInt = Field(
+        validation_alias="stateVersion",
+        serialization_alias="stateVersion",
+    )
+    next_decision_lease_id: Literal[None] = Field(
+        validation_alias="nextDecisionLeaseId",
+        serialization_alias="nextDecisionLeaseId",
+    )
+    reason: NonEmptyString256
 
 
 class GatewayV2DecisionRejected(_WireModel):
+    accepted: Literal[False]
     status: Literal["rejected"]
+    trace_id: NonEmptyString128 | None = Field(
+        validation_alias="traceId",
+        serialization_alias="traceId",
+    )
+    session_id: NonEmptyString128 | None = Field(
+        validation_alias="sessionId",
+        serialization_alias="sessionId",
+    )
+    decision_id: NonEmptyString128 | None = Field(
+        validation_alias="decisionId",
+        serialization_alias="decisionId",
+    )
+    control_generation: StrictNonNegativeInt = Field(
+        validation_alias="controlGeneration",
+        serialization_alias="controlGeneration",
+    )
+    skill_call_id: NonEmptyString128 | None = Field(
+        validation_alias="skillCallId",
+        serialization_alias="skillCallId",
+    )
+    state_version: StrictNonNegativeInt = Field(
+        validation_alias="stateVersion",
+        serialization_alias="stateVersion",
+    )
+    next_decision_lease_id: Literal[None] = Field(
+        validation_alias="nextDecisionLeaseId",
+        serialization_alias="nextDecisionLeaseId",
+    )
     reason: NonEmptyString
+    blocked_by_state: NonEmptyString256 | None = Field(
+        default=None,
+        validation_alias="blockedByState",
+        serialization_alias="blockedByState",
+    )
+    blocked_by_activity: NonEmptyString256 | None = Field(
+        default=None,
+        validation_alias="blockedByActivity",
+        serialization_alias="blockedByActivity",
+    )
+    blocked_by_scene_id: NonEmptyString128 | None = Field(
+        default=None,
+        validation_alias="blockedBySceneId",
+        serialization_alias="blockedBySceneId",
+    )
+    blocked_by_chair_id: NonEmptyString128 | None = Field(
+        default=None,
+        validation_alias="blockedByChairId",
+        serialization_alias="blockedByChairId",
+    )
+
+    @model_serializer(mode="wrap")
+    def serialize_only_supplied_blocking_context(self, handler: Any) -> dict[str, Any]:
+        serialized: dict[str, Any] = handler(self)
+        aliases = {
+            "blocked_by_state": "blockedByState",
+            "blocked_by_activity": "blockedByActivity",
+            "blocked_by_scene_id": "blockedBySceneId",
+            "blocked_by_chair_id": "blockedByChairId",
+        }
+        for field_name, alias in aliases.items():
+            if field_name not in self.model_fields_set:
+                serialized.pop(alias, None)
+        return serialized
 
 
 GatewayV2DecisionResponse = Annotated[

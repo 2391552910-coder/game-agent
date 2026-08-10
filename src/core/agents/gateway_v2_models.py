@@ -52,7 +52,7 @@ class _GatewayV2AgentModel(BaseModel):
 
 
 class _GatewayV2ActionBase(_GatewayV2AgentModel):
-    reason: str = Field(min_length=1, max_length=512)
+    reason: str = Field(default="Model selected this action", min_length=1, max_length=512)
     ttl_ms: int = Field(default=30_000, alias="ttlMs", gt=0)
 
 
@@ -141,7 +141,7 @@ class GatewayV2CallSkillAction(_GatewayV2ActionBase):
 
 class GatewayV2WaitAction(_GatewayV2ActionBase):
     action: Literal["wait"] = "wait"
-    wait_ms: int = Field(alias="waitMs", gt=0)
+    wait_ms: int = Field(default=1_000, alias="waitMs", gt=0)
 
 
 class GatewayV2NoOpAction(_GatewayV2ActionBase):
