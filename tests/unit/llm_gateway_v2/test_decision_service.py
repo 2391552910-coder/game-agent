@@ -187,7 +187,7 @@ def _event(*, lease: dict[str, Any] | None = None, terminal: dict[str, Any] | No
             "occurredAtMs": 1_700_000_000_003,
             "payload": {
                 "decisionId": "decision-1",
-                "skillName": "jump",
+                "skillName": terminal.get("skillName", "jump"),
                 "skillCallId": "call-1",
                 "status": status,
                 "reason": terminal.get("reason", "ok"),
@@ -1773,6 +1773,112 @@ async def test_planner_executes_current_activity_step_without_second_model_call(
     assert repository.stored is not None
     assert repository.stored.request_body_json["skillName"] == "dance_auto_schedule"
     assert repository.activity_bindings == [activity_context.binding]
+
+
+def _forced_activity_lease() -> dict[str, Any]:
+    return _lease(
+        available_skills=[
+            {"skillName": "paper_plane_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "darts_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "paper_plane_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["planeName", "useTimeMs", "isComplete"],
+                "missingArgs": ["planeName", "useTimeMs", "isComplete"],
+            },
+            {
+                "skillName": "darts_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score", "darts", "allowPurchaseWhenInsufficient"],
+                "missingArgs": ["score", "darts", "allowPurchaseWhenInsufficient"],
+            },
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            },
+        ],
+    )
+
+
+async def test_force_skills_bypasses_activity_plan_and_agent_with_contract_arguments() -> None:
+    event = _event(lease=_forced_activity_lease())
+    plan = record_step_terminal(create_plaza_social_plan("plan-force"), "arrival", succeeded=True)
+    coordinator = _ActivityCoordinator(
+        ActivityPlanContext(
+            plan=plan,
+            binding=ActivityPlanBinding("plan-force", 1, "dance", "activity"),
+            recent_actions=(),
+            recent_failures=(),
+        )
+    )
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        activity_coordinator=coordinator,
+        force_skills=("paper_plane_auto_schedule", "darts_auto_schedule"),
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert coordinator.calls == 0
+    assert runner.calls == 0
+    assert repository.stored is not None
+    body = repository.stored.request_body_json
+    assert body["skillName"] == "paper_plane_auto_schedule"
+    assert body["arguments"]["planeName"] in {"初级", "中级", "高级"}
+    assert body["arguments"]["isComplete"] is True
+
+
+async def test_force_skills_rotates_after_successful_skill_finished() -> None:
+    event = _event(
+        lease=_forced_activity_lease(),
+        terminal={"status": "success", "skillName": "paper_plane_auto_schedule"},
+    )
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        force_skills=("paper_plane_auto_schedule", "darts_auto_schedule"),
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    body = repository.stored.request_body_json
+    assert body["skillName"] == "darts_auto_schedule"
+    assert 1 <= body["arguments"]["score"] <= 50
+    assert sum(item["count"] for item in body["arguments"]["darts"]) == 9
+    assert body["arguments"]["allowPurchaseWhenInsufficient"] is False
+
+
+async def test_force_skills_waits_when_gateway_lease_publishes_none_of_them() -> None:
+    event = _event()
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        force_skills=("paper_plane_auto_schedule", "darts_auto_schedule"),
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert repository.stored.request_body_json["waitMs"] == 1_000
 
 
 async def test_planner_resolves_scene_target_to_trusted_move_coordinates() -> None:

@@ -488,6 +488,41 @@ def _defer_unresolvable_activity_step(
     return None
 
 
+def _forced_test_skill_action(
+    event: ClaimedGatewayEvent,
+    context: GatewayV2AgentContext,
+    force_skills: tuple[str, ...],
+) -> GatewayV2AgentAction:
+    start_index = 0
+    if isinstance(event.event, SkillFinishedEvent) and event.event.payload.skill_name in force_skills:
+        completed_index = force_skills.index(event.event.payload.skill_name)
+        start_index = completed_index + (1 if event.event.payload.status == "success" else 0)
+    else:
+        last_skill_name = _snapshot_value(context.session_snapshot, "LastSkillName", "lastSkillName")
+        if isinstance(last_skill_name, str) and last_skill_name in force_skills:
+            start_index = force_skills.index(last_skill_name) + 1
+
+    for offset in range(len(force_skills)):
+        skill_name = force_skills[(start_index + offset) % len(force_skills)]
+        action = _gateway_v2_activity_skill_action(
+            context,
+            skill_name,
+            "v1",
+            reason="Forced by LLM_GATEWAY_V2_FORCE_SKILLS for Gateway testing",
+        )
+        if action is not None:
+            return action
+
+    reason = "None of the configured test skills is authorized by the current Gateway lease"
+    if "wait" in context.allowed_decision_actions:
+        return GatewayV2WaitAction(reason=reason, waitMs=1_000)
+    if "no_op" in context.allowed_decision_actions:
+        return GatewayV2NoOpAction(reason=reason)
+    if "stop_hosting" in context.allowed_decision_actions:
+        return GatewayV2StopHostingAction(reason=reason)
+    raise GatewayV2DecisionSelectionError
+
+
 def _gateway_v2_activity_skill_action(
     context: GatewayV2AgentContext,
     skill_name: str,
@@ -827,6 +862,7 @@ class GatewayV2DecisionPlanner:
     conversation_service: GatewayV2ConversationDecisionService | None = None
     activity_coordinator: ActivityPlanCoordinator | None = None
     scene_catalog: SceneCatalog | None = None
+    force_skills: tuple[str, ...] = ()
 
     async def __call__(
         self,
@@ -852,12 +888,14 @@ class GatewayV2DecisionPlanner:
                     error_category="conversation_lease_not_supported",
                 )
             activity_context = None
-            if self.activity_coordinator is not None:
+            if not self.force_skills and self.activity_coordinator is not None:
                 activity_context = await self.activity_coordinator.prepare(event, context)
             action: GatewayV2AgentAction | None = _initial_room_transition_action(
                 context
             )
-            if activity_context is not None:
+            if action is None and self.force_skills:
+                action = _forced_test_skill_action(event, context, self.force_skills)
+            elif activity_context is not None:
                 planned_action = _planned_activity_action(
                     context,
                     activity_context,

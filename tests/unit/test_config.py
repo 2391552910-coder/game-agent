@@ -55,6 +55,7 @@ _MYAGENT_ENV_PREFIXES = (
 )
 _MYAGENT_ENV_NAMES = {"ENV", "LOG_LEVEL", "APP_WORKERS", "CORS_ALLOWED_ORIGINS"}
 _V2_ENV_NAMES = {name.upper() for name in VALID_V2_SETTINGS if name.startswith("llm_gateway_")}
+_V2_ENV_NAMES.add("LLM_GATEWAY_V2_FORCE_SKILLS")
 _SAFE_TEST_PROCESS_ENVIRONMENT = {
     "ENV": "test",
     "OPENAI_API_KEY": "test-openai-key",
@@ -209,6 +210,7 @@ def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyP
     assert config.llm_gateway_v2_retry_max_ms == 300_000
     assert config.llm_gateway_v2_claim_ttl_ms == 30_000
     assert config.llm_gateway_v2_agent_timeout_seconds == 60.0
+    assert config.llm_gateway_v2_force_skills == ()
     assert config.llm_gateway_v2_poll_ms == 250
     assert config.llm_gateway_v2_shutdown_grace_seconds == 10
     assert config.llm_gateway_v2_readiness_timeout_seconds == 3
@@ -217,6 +219,35 @@ def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyP
     assert config.auto_chat_timeout_seconds == 45.0
     assert config.auto_chat_deadline_safety_seconds == 10.0
     assert config.llm_gateway_simple_chat_timeout_seconds == 3.0
+
+
+def test_v2_force_skills_accepts_comma_separated_env_value() -> None:
+    config = Settings(
+        _env_file=None,
+        **REQUIRED_SETTINGS,
+        llm_gateway_v2_force_skills="paper_plane_auto_schedule, darts_auto_schedule",
+    )
+
+    assert config.llm_gateway_v2_force_skills == (
+        "paper_plane_auto_schedule",
+        "darts_auto_schedule",
+    )
+
+
+@pytest.mark.parametrize(
+    "force_skills",
+    [
+        "paper_plane_auto_schedule,unknown_skill",
+        "paper_plane_auto_schedule,paper_plane_auto_schedule",
+    ],
+)
+def test_v2_force_skills_rejects_unknown_or_duplicate_skills(force_skills: str) -> None:
+    with pytest.raises(ValidationError, match="force_skills"):
+        Settings(
+            _env_file=None,
+            **REQUIRED_SETTINGS,
+            llm_gateway_v2_force_skills=force_skills,
+        )
 
 
 def test_auto_chat_configuration_accepts_internal_service_url() -> None:

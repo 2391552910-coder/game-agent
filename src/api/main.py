@@ -100,7 +100,7 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         "Runtime configuration: "
         "v1_enabled=%s v2_enabled=%s provider_source=%s provider=%s "
         "base_url=%s default_model=%s fast_model=%s "
-        "agent_timeout_seconds=%s decision_timeout_seconds=%s",
+        "agent_timeout_seconds=%s decision_timeout_seconds=%s force_skills=%s",
         getattr(runtime_settings, "llm_gateway_v1_enabled", False),
         getattr(runtime_settings, "llm_gateway_v2_enabled", False),
         getattr(runtime_settings, "llm_provider_source", "env"),
@@ -110,6 +110,7 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         getattr(runtime_settings, "openai_fast_model", ""),
         getattr(runtime_settings, "llm_gateway_v2_agent_timeout_seconds", ""),
         getattr(runtime_settings, "llm_gateway_decision_timeout_seconds", ""),
+        ",".join(getattr(runtime_settings, "llm_gateway_v2_force_skills", ())) or "disabled",
     )
 
 
@@ -236,6 +237,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             scene_catalog=scene_catalog,
         ),
         scene_catalog=scene_catalog,
+        force_skills=settings.llm_gateway_v2_force_skills,
     )
     event_dispatcher = GatewayV2EventDispatcher(
         context_repository=inbox_repository,

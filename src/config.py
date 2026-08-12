@@ -1,9 +1,11 @@
 import os
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field, PostgresDsn, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, PostgresDsn, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from src.core.integration.llm_gateway_v2.activity_plan import CANONICAL_NON_CHAT_SKILLS
 
 
 class Settings(BaseSettings):
@@ -129,6 +131,7 @@ class Settings(BaseSettings):
     llm_gateway_v2_retry_max_ms: int = Field(default=300_000, ge=1, le=3_600_000)
     llm_gateway_v2_claim_ttl_ms: int = Field(default=30_000, ge=1, le=3_600_000)
     llm_gateway_v2_agent_timeout_seconds: float = Field(default=60.0, gt=0, le=300.0)
+    llm_gateway_v2_force_skills: Annotated[tuple[str, ...], NoDecode] = Field(default=())
     llm_gateway_v2_rag_mode: Literal["naive", "hybrid", "mix"] = "naive"
     llm_gateway_v2_rag_top_k: int = Field(default=10, ge=1, le=200)
     llm_gateway_v2_rag_chunk_top_k: int = Field(default=10, ge=1, le=200)
@@ -146,6 +149,27 @@ class Settings(BaseSettings):
     # ── Token 配额 ──
     default_monthly_tokens: int = Field(default=40_000_000)
     quota_warning_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    @field_validator("llm_gateway_v2_force_skills", mode="before")
+    @classmethod
+    def parse_llm_gateway_v2_force_skills(cls, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            skills = tuple(item.strip() for item in value.split(",") if item.strip())
+        elif isinstance(value, (list, tuple)):
+            skills = tuple(str(item).strip() for item in value if str(item).strip())
+        else:
+            raise ValueError("llm_gateway_v2_force_skills must be a comma-separated skill list")
+
+        if len(skills) != len(set(skills)):
+            raise ValueError("llm_gateway_v2_force_skills must not contain duplicates")
+        unknown = [skill for skill in skills if skill not in CANONICAL_NON_CHAT_SKILLS]
+        if unknown:
+            raise ValueError(
+                "llm_gateway_v2_force_skills contains unsupported skills: " + ", ".join(unknown)
+            )
+        return skills
 
     @model_validator(mode="after")
     def validate_llm_gateway_v2(self) -> "Settings":
