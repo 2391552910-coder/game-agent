@@ -32,7 +32,9 @@ from src.core.agents.gateway_v2_prompts import (
 from src.core.agents.models import RecommendedAction
 from src.core.integration.llm_gateway_v2 import decision_service as decision_service_module
 from src.core.integration.llm_gateway_v2.activity_plan import (
+    ActivityPlanProposal,
     create_plaza_social_plan,
+    materialize_activity_plan,
     record_step_terminal,
 )
 from src.core.integration.llm_gateway_v2.activity_plan_repository import (
@@ -50,12 +52,19 @@ from src.core.integration.llm_gateway_v2.decision_service import (
     GatewayV2DecisionPlanner,
     GatewayV2DecisionSelectionError,
     GatewayV2DecisionService,
+    _gateway_v2_activity_skill_action,
     build_gateway_v2_agent_context,
     freeze_gateway_v2_decision,
     select_gateway_v2_action,
 )
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent, EventProcessResult
 from src.core.integration.llm_gateway_v2.outbox_repository import PlannedDecision
+from src.core.integration.llm_gateway_v2.scene_catalog import (
+    SceneCatalog,
+    SceneCoordinates,
+    SceneTarget,
+    load_default_scene_catalog,
+)
 
 
 def _lease(
@@ -539,6 +548,260 @@ def test_selector_rejects_argument_paths_outside_hint_allowlist() -> None:
     )
 
     assert isinstance(selected, GatewayV2WaitAction)
+
+
+def test_paper_plane_activity_action_replaces_gateway_suggested_arguments() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "paper_plane_auto_schedule", "schemaVersion": "v1"}
+        ],
+        hints=[
+            {
+                "skillName": "paper_plane_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["planeName", "useTimeMs", "isComplete"],
+                "missingArgs": ["planeName", "useTimeMs", "isComplete"],
+            }
+        ],
+    )
+    payload["decisionContext"]["skillArgumentHints"][0]["suggestedArgs"] = {
+        "planeName": "纸飞机A",
+        "useTimeMs": 12,
+        "isComplete": False,
+    }
+    context = build_gateway_v2_agent_context(_event(lease=payload))
+
+    action = _gateway_v2_activity_skill_action(
+        context,
+        "paper_plane_auto_schedule",
+        "v1",
+        reason="paper plane",
+    )
+
+    assert action is not None
+    assert action.arguments != {"planeName": "纸飞机A", "useTimeMs": 12, "isComplete": False}
+    assert action.arguments["planeName"] in {"初级", "中级", "高级"}
+    minimum, maximum = {
+        "初级": (100_000, 200_000),
+        "中级": (90_000, 180_000),
+        "高级": (70_000, 130_000),
+    }[action.arguments["planeName"]]
+    assert minimum <= action.arguments["useTimeMs"] <= maximum
+    assert action.arguments["isComplete"] is True
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "allowed_args", "bad_suggested"),
+    [
+        (
+            "darts_auto_schedule",
+            ["score", "darts", "allowPurchaseWhenInsufficient"],
+            {"score": 120, "darts": [], "allowPurchaseWhenInsufficient": True},
+        ),
+        (
+            "shooting_auto_schedule",
+            ["distance", "weapon", "posture", "score"],
+            {"distance": "invalid", "weapon": "pistol", "posture": "prone", "score": 86},
+        ),
+    ],
+)
+def test_competitive_activity_replaces_invalid_gateway_suggestions(
+    skill_name: str,
+    allowed_args: list[str],
+    bad_suggested: dict[str, Any],
+) -> None:
+    payload = _lease(
+        available_skills=[{"skillName": skill_name, "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": skill_name,
+                "schemaVersion": "v1",
+                "allowedArgs": allowed_args,
+                "missingArgs": allowed_args,
+            }
+        ],
+    )
+    payload["decisionContext"]["skillArgumentHints"][0]["suggestedArgs"] = bad_suggested
+    context = build_gateway_v2_agent_context(_event(lease=payload))
+
+    action = _gateway_v2_activity_skill_action(context, skill_name, "v1", reason="activity")
+
+    assert action is not None
+    assert action.arguments != bad_suggested
+    if skill_name == "darts_auto_schedule":
+        assert 1 <= action.arguments["score"] <= 50
+        assert sum(item["count"] for item in action.arguments["darts"]) == 9
+        assert action.arguments["allowPurchaseWhenInsufficient"] is False
+    else:
+        assert (
+            action.arguments["distance"],
+            action.arguments["weapon"],
+            action.arguments["posture"],
+        ) in {
+            ("10m", "pistol", "standing"),
+            ("10m", "rifle", "standing"),
+            ("25m", "pistol", "standing"),
+            ("50m", "rifle", "standing"),
+            ("50m", "rifle", "crouching"),
+            ("50m", "rifle", "prone"),
+        }
+        assert 30 <= action.arguments["score"] <= 80
+
+
+def test_dance_activity_requires_explicit_gateway_score_range() -> None:
+    payload = _lease(
+        available_skills=[{"skillName": "dance_auto_schedule", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            }
+        ],
+    )
+    context_without_range = build_gateway_v2_agent_context(_event(lease=payload))
+
+    assert (
+        _gateway_v2_activity_skill_action(
+            context_without_range,
+            "dance_auto_schedule",
+            "v1",
+            reason="dance",
+        )
+        is None
+    )
+
+    score_field = payload["decisionContext"]["skillArgumentHints"][0]["allowedArgs"][0]
+    score_field.update({"minimum": 10, "maximum": 25})
+    context_with_range = build_gateway_v2_agent_context(_event(lease=payload))
+    action = _gateway_v2_activity_skill_action(
+        context_with_range,
+        "dance_auto_schedule",
+        "v1",
+        reason="dance",
+    )
+
+    assert action is not None
+    assert set(action.arguments) == {"score"}
+    assert 10 <= action.arguments["score"] <= 25
+
+
+def test_selector_skips_dance_without_range_and_uses_next_permitted_skill() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "jump", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            },
+            {
+                "skillName": "jump",
+                "schemaVersion": "v1",
+                "allowedArgs": [],
+                "missingArgs": [],
+            },
+        ],
+    )
+    context = build_gateway_v2_agent_context(_event(lease=payload))
+
+    selected = select_gateway_v2_action(
+        context,
+        [
+            GatewayV2CallSkillAction(
+                action="call_skill",
+                skillName="dance_auto_schedule",
+                schemaVersion="v1",
+                arguments={},
+            ),
+            GatewayV2CallSkillAction(
+                action="call_skill",
+                skillName="jump",
+                schemaVersion="v1",
+                arguments={},
+            ),
+        ],
+    )
+
+    assert isinstance(selected, GatewayV2CallSkillAction)
+    assert selected.skill_name == "jump"
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "allowed_args", "bad_arguments"),
+    [
+        (
+            "darts_auto_schedule",
+            ["score", "darts", "allowPurchaseWhenInsufficient"],
+            {"score": 120},
+        ),
+        (
+            "shooting_auto_schedule",
+            ["distance", "weapon", "posture", "score"],
+            {"distance": "10m", "weapon": "pistol", "posture": "standing", "score": 86},
+        ),
+    ],
+)
+def test_freeze_applies_final_competitive_activity_outbound_fallback(
+    skill_name: str,
+    allowed_args: list[str],
+    bad_arguments: dict[str, Any],
+) -> None:
+    payload = _lease(
+        available_skills=[{"skillName": skill_name, "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": skill_name,
+                "schemaVersion": "v1",
+                "allowedArgs": allowed_args,
+                "missingArgs": allowed_args,
+            }
+        ],
+    )
+    context = build_gateway_v2_agent_context(_event(lease=payload))
+    action = GatewayV2CallSkillAction(
+        action="call_skill",
+        skillName=skill_name,
+        schemaVersion="v1",
+        arguments=bad_arguments,
+    )
+
+    frozen = freeze_gateway_v2_decision("decision-fallback", "trace-fallback", context, action)
+
+    assert frozen.body_json["action"] == "call_skill"
+    assert frozen.body_json["arguments"] != bad_arguments
+
+
+def test_freeze_converts_dance_without_gateway_range_to_wait() -> None:
+    payload = _lease(
+        available_skills=[{"skillName": "dance_auto_schedule", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            }
+        ],
+    )
+    context = build_gateway_v2_agent_context(_event(lease=payload))
+    action = GatewayV2CallSkillAction(
+        action="call_skill",
+        skillName="dance_auto_schedule",
+        schemaVersion="v1",
+        arguments={},
+    )
+
+    frozen = freeze_gateway_v2_decision("decision-dance", "trace-dance", context, action)
+
+    assert frozen.body_json["action"] == "wait"
+    assert frozen.body_json["waitMs"] == 1_000
+    assert "skillName" not in frozen.body_json
 
 
 def test_selector_rejects_skill_when_required_argument_is_missing() -> None:
@@ -1062,7 +1325,7 @@ async def test_hung_agent_is_cancelled_at_the_configured_timeout() -> None:
         ),
         (
             GatewayV2WaitAction(reason="wait", waitMs=2_500, ttlMs=9_000),
-            {"action": "wait", "ttlMs": 9_000},
+            {"action": "wait", "waitMs": 2_500, "ttlMs": 9_000},
         ),
         (
             GatewayV2NoOpAction(reason="nothing", ttlMs=8_000),
@@ -1169,6 +1432,38 @@ class _ActivityCoordinator:
         del event, context
         self.calls += 1
         return self.context
+
+
+def _move_activity_context(target_id: str) -> ActivityPlanContext:
+    plan = materialize_activity_plan(
+        ActivityPlanProposal.model_validate(
+            {
+                "goalId": "plaza_wander",
+                "goalSummary": "Walk around the plaza before continuing activities",
+                "steps": [
+                    {
+                        "stepId": f"wander-{index}",
+                        "phase": "movement",
+                        "skillName": "move_to",
+                        "schemaVersion": "v1",
+                        "sceneTargetId": target_id,
+                        "intent": "Walk to an indexed scene point",
+                    }
+                    for index in range(1, 4)
+                ],
+            }
+        ),
+        plan_id="plan-wander",
+        version=1,
+        available_skills={("move_to", "v1")},
+        lobby=False,
+    )
+    return ActivityPlanContext(
+        plan=plan,
+        binding=ActivityPlanBinding("plan-wander", 1, "wander-1", "movement"),
+        recent_actions=(),
+        recent_failures=(),
+    )
 
 
 @dataclass
@@ -1439,13 +1734,16 @@ async def test_planner_executes_current_activity_step_without_second_model_call(
     payload = _lease(
         available_skills=[{"skillName": "dance_auto_schedule", "schemaVersion": "v1"}],
         hints=[
-            {
-                "skillName": "dance_auto_schedule",
-                "schemaVersion": "v1",
-                "allowedArgs": [],
-                "missingArgs": [],
-            }
-        ],
+                {
+                    "skillName": "dance_auto_schedule",
+                    "schemaVersion": "v1",
+                    "allowedArgs": ["score"],
+                    "missingArgs": ["score"],
+                }
+            ],
+        )
+    payload["decisionContext"]["skillArgumentHints"][0]["allowedArgs"][0].update(
+        {"minimum": 1, "maximum": 50}
     )
     event = _event(lease=payload)
     plan = record_step_terminal(
@@ -1475,6 +1773,241 @@ async def test_planner_executes_current_activity_step_without_second_model_call(
     assert repository.stored is not None
     assert repository.stored.request_body_json["skillName"] == "dance_auto_schedule"
     assert repository.activity_bindings == [activity_context.binding]
+
+
+async def test_planner_resolves_scene_target_to_trusted_move_coordinates() -> None:
+    payload = _lease(
+        available_skills=[{"skillName": "move_to", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "allowedArgs": ["target.x", "target.y", "target.z"],
+                "missingArgs": ["target.x", "target.y", "target.z"],
+            }
+        ],
+    )
+    payload["decisionContext"]["session"].update(
+        {"SceneId": 7, "SceneName": "CJ_guangchang"}
+    )
+    event = _event(lease=payload)
+    activity_context = _move_activity_context(
+        "scene:7:activity:wish_board:458"
+    )
+    scene_catalog = SceneCatalog(
+        [
+            SceneTarget(
+                target_id="scene:7:activity:wish_board:458",
+                scene_id=7,
+                scene_name="CJ_guangchang",
+                kind="activity",
+                activity="wish_board",
+                point_key="458",
+                coordinates=SceneCoordinates(100.519966, 1.15435553, -25.9959488),
+                source_path="wish-board-458",
+            )
+        ]
+    )
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        activity_coordinator=_ActivityCoordinator(activity_context),
+        scene_catalog=scene_catalog,
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["skillName"] == "move_to"
+    assert repository.stored.request_body_json["arguments"] == {
+        "target": {"x": 100.519966, "y": 1.15435553, "z": -25.9959488}
+    }
+    assert "sceneTargetId" not in repository.stored.request_body_json
+
+
+async def test_planner_rejects_non_walkable_shooting_table_as_move_target() -> None:
+    payload = _lease(
+        available_skills=[{"skillName": "move_to", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "allowedArgs": ["target.x", "target.y", "target.z"],
+                "missingArgs": ["target.x", "target.y", "target.z"],
+            }
+        ],
+    )
+    payload["decisionContext"]["session"].update(
+        {"SceneId": 8, "SceneName": "CJ_JiuBa_Zhong_suo"}
+    )
+    event = _event(lease=payload)
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        activity_coordinator=_ActivityCoordinator(
+            _move_activity_context("scene:8:shooting:10")
+        ),
+        scene_catalog=SceneCatalog(
+            [
+                SceneTarget(
+                    target_id="scene:8:shooting:10",
+                    scene_id=8,
+                    scene_name="CJ_JiuBa_Zhong_suo",
+                    kind="shooting",
+                    activity="shooting",
+                    point_key="10",
+                    coordinates=SceneCoordinates(-13.004, 0.011, 42.287),
+                    source_path="shooting-table-10",
+                )
+            ]
+        ),
+    )
+
+    result = await planner(
+        _claimed_for_planner(event),
+        build_gateway_v2_agent_context(event),
+    )
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert repository.stored.request_body_json["waitMs"] == 1_000
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "scene_name", "expected_unique_targets"),
+    [
+        (7, "CJ_guangchang", 10),
+        (8, "CJ_JiuBa_Zhong_suo", 10),
+        (9, "CJ_JiuBa_Ce_suo", 10),
+    ],
+)
+async def test_ten_roles_emit_diverse_trusted_move_coordinates_from_packaged_scenes(
+    scene_id: int,
+    scene_name: str,
+    expected_unique_targets: int,
+) -> None:
+    scene_catalog = load_default_scene_catalog()
+    wire_targets: list[tuple[float, float, float]] = []
+
+    for index in range(10):
+        role_id = f"role-{index}"
+        target = scene_catalog.select_candidates(
+            scene_id=scene_id,
+            role_identity=role_id,
+            plan_version=1,
+            limit=1,
+        )[0]
+        payload = _lease(
+            available_skills=[{"skillName": "move_to", "schemaVersion": "v1"}],
+            hints=[
+                {
+                    "skillName": "move_to",
+                    "schemaVersion": "v1",
+                    "allowedArgs": ["target.x", "target.y", "target.z"],
+                    "missingArgs": ["target.x", "target.y", "target.z"],
+                }
+            ],
+        )
+        payload["decisionContext"]["session"].update(
+            {
+                "AccountId": role_id,
+                "RoleId": role_id,
+                "SceneId": scene_id,
+                "SceneName": scene_name,
+            }
+        )
+        event = _event(lease=payload)
+        repository = _PlanningRepository()
+        runner = _Runner(result={"errors": ["must not run"]})
+        planner = GatewayV2DecisionPlanner(
+            decision_service=GatewayV2DecisionService(runner=runner),
+            repository=repository,
+            activity_coordinator=_ActivityCoordinator(
+                _move_activity_context(target.target_id)
+            ),
+            scene_catalog=scene_catalog,
+        )
+
+        result = await planner(
+            _claimed_for_planner(event),
+            build_gateway_v2_agent_context(event),
+        )
+
+        assert result == EventProcessResult("succeeded")
+        assert runner.calls == 0
+        assert repository.stored is not None
+        body = repository.stored.request_body_json
+        assert body["action"] == "call_skill"
+        assert body["skillName"] == "move_to"
+        assert body["schemaVersion"] == "v1"
+        assert body["arguments"] == {
+            "target": target.coordinates.as_arguments()
+        }
+        assert "sceneTargetId" not in body
+        coordinates = body["arguments"]["target"]
+        wire_targets.append(
+            (coordinates["x"], coordinates["y"], coordinates["z"])
+        )
+
+    assert len(set(wire_targets)) == expected_unique_targets
+
+
+async def test_planner_never_asks_model_to_invent_missing_scene_coordinates() -> None:
+    payload = _lease(
+        available_skills=[{"skillName": "move_to", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "allowedArgs": ["target.x", "target.y", "target.z"],
+                "missingArgs": ["target.x", "target.y", "target.z"],
+            }
+        ],
+    )
+    payload["decisionContext"]["session"].update(
+        {"SceneId": 7, "SceneName": "CJ_guangchang"}
+    )
+    event = _event(lease=payload)
+    runner = _Runner(
+        result={
+            "errors": [],
+            "selected_action": GatewayV2CallSkillAction(
+                action="call_skill",
+                skillName="move_to",
+                schemaVersion="v1",
+                arguments={"target": {"x": 999, "y": 999, "z": 999}},
+                reason="invented coordinates",
+            ).model_dump(mode="json", by_alias=True),
+        }
+    )
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        activity_coordinator=_ActivityCoordinator(
+            _move_activity_context("scene:7:activity:wish_board:missing")
+        ),
+        scene_catalog=SceneCatalog([]),
+    )
+
+    result = await planner(
+        _claimed_for_planner(event),
+        build_gateway_v2_agent_context(event),
+    )
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert "arguments" not in repository.stored.request_body_json
 
 
 async def test_lobby_session_started_bootstraps_scene_tornado_without_agent_call() -> None:
@@ -1762,6 +2295,7 @@ async def test_agent_timeout_plans_v2_wait_when_lease_allows_wait() -> None:
         "controlGeneration": 3,
         "ttlMs": 30_000,
         "action": "wait",
+        "waitMs": 1_000,
     }
 
 

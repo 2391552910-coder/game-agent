@@ -1,0 +1,16 @@
+[
+  {
+    "GatewayId": "local-smoke-gateway",
+    "ControlAddress": "http://localhost:19091/",
+    "AppId": "robot-gateway-smoke",
+    "AppSecret": "robot-gateway-smoke-secret",
+    "TimestampWindowMs": 300000,
+    "AuditRoot": "",
+    "RuntimeLogRoot": "",
+    "DefaultTickIntervalMs": 1000,
+    "DefaultMaxReconnectCount": 1,
+    "DefaultCircuitBreakerFailureThreshold": 3,
+    "DefaultAllowedSkills": "observe_state,move_to,stop_move,jump,play_action,switch_scene,stop_hosting",
+    "DefaultScriptPayload": ""
+  }
+]

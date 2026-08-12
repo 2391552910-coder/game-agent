@@ -1,0 +1,479 @@
+{
+  "version": 1,
+  "sceneId": 8,
+  "sceneName": "CJ_JiuBa_Zhong_suo",
+  "points": [
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "dance",
+      "pointKey": "default",
+      "sourceType": "config_fallback",
+      "sourceId": 0,
+      "sourcePath": "ActivityMenuPanelSystem.GetDanceFindingPoint",
+      "target": {
+        "x": -47.7608223,
+        "y": 0.0300049782,
+        "z": 69.0356903
+      },
+      "standTransform": {
+        "X": -47.7608223,
+        "Y": 0.0300049782,
+        "Z": 69.0356903,
+        "RotX": 0.0,
+        "RotY": 0.0,
+        "RotZ": 0.0,
+        "RotW": 1.0
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "28",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 28,
+      "sourcePath": "DartsSeatConfig/28",
+      "target": {
+        "x": -51.0,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -51.0,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -51.0,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "32",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 32,
+      "sourcePath": "DartsSeatConfig/32",
+      "target": {
+        "x": -52.8,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -52.8,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -52.8,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "40",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 40,
+      "sourcePath": "DartsSeatConfig/40",
+      "target": {
+        "x": -54.5,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -54.5,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -54.5,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "36",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 36,
+      "sourcePath": "DartsSeatConfig/36",
+      "target": {
+        "x": -56.2,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -56.2,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -56.2,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "29",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 29,
+      "sourcePath": "DartsSeatConfig/29",
+      "target": {
+        "x": -58.06,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -58.06,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -58.06,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "33",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 33,
+      "sourcePath": "DartsSeatConfig/33",
+      "target": {
+        "x": -59.85,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -59.85,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -59.85,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "41",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 41,
+      "sourcePath": "DartsSeatConfig/41",
+      "target": {
+        "x": -61.5,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -61.5,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -61.5,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "37",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 37,
+      "sourcePath": "DartsSeatConfig/37",
+      "target": {
+        "x": -63.25,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -63.25,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -63.25,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "38",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 38,
+      "sourcePath": "DartsSeatConfig/38",
+      "target": {
+        "x": -65.0,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -65.0,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -65.0,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "30",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 30,
+      "sourcePath": "DartsSeatConfig/30",
+      "target": {
+        "x": -66.55,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -66.55,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -66.55,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "31",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 31,
+      "sourcePath": "DartsSeatConfig/31",
+      "target": {
+        "x": -68.41,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -68.41,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -68.41,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "35",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 35,
+      "sourcePath": "DartsSeatConfig/35",
+      "target": {
+        "x": -70.2,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -70.2,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -70.2,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "43",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 43,
+      "sourcePath": "DartsSeatConfig/43",
+      "target": {
+        "x": -72.0,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -72.0,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -72.0,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "34",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 34,
+      "sourcePath": "DartsSeatConfig/34",
+      "target": {
+        "x": -73.74,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -73.74,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -73.74,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "42",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 42,
+      "sourcePath": "DartsSeatConfig/42",
+      "target": {
+        "x": -75.43,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -75.43,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -75.43,
+        "y": 0.5,
+        "z": 33.578
+      }
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "activityName": "darts",
+      "pointKey": "39",
+      "sourceType": "dartsseatconfig",
+      "sourceId": 39,
+      "sourcePath": "DartsSeatConfig/39",
+      "target": {
+        "x": -77.22,
+        "y": 0.5,
+        "z": 34.778
+      },
+      "standTransform": {
+        "X": -77.22,
+        "Y": 0.5,
+        "Z": 34.778,
+        "RotX": 0.0,
+        "RotY": 0.999048233,
+        "RotZ": 0.0,
+        "RotW": 0.0436194539
+      },
+      "exitPosition": {
+        "x": -77.22,
+        "y": 0.5,
+        "z": 33.578
+      }
+    }
+  ]
+}

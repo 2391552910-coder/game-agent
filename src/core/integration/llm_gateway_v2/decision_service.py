@@ -32,6 +32,12 @@ from src.core.integration.llm_gateway_v2.auto_chat import (
     ConversationContext,
 )
 from src.core.integration.llm_gateway_v2.canonical import canonical_json_bytes
+from src.core.integration.llm_gateway_v2.competitive_activity import (
+    build_dance_arguments,
+    build_darts_arguments,
+    build_shooting_arguments,
+    competitive_activity_seed,
+)
 from src.core.integration.llm_gateway_v2.contracts import (
     GatewayV2Decision,
     GatewayV2Event,
@@ -47,8 +53,25 @@ from src.core.integration.llm_gateway_v2.outbox_repository import (
     DecisionPlanUnavailableError,
     PlannedDecision,
 )
+from src.core.integration.llm_gateway_v2.paper_plane import (
+    build_paper_plane_arguments,
+    paper_plane_arguments_seed,
+)
+from src.core.integration.llm_gateway_v2.scene_catalog import (
+    SceneCatalog,
+    scene_id_from_snapshot,
+)
 
 logger = logging.getLogger(__name__)
+
+_SPECIALIZED_ARGUMENT_SKILLS = frozenset(
+    {
+        "paper_plane_auto_schedule",
+        "darts_auto_schedule",
+        "shooting_auto_schedule",
+        "dance_auto_schedule",
+    }
+)
 
 
 class GatewayV2DecisionSelectionError(Exception):
@@ -90,9 +113,12 @@ def build_gateway_v2_agent_context(event: GatewayV2Event) -> GatewayV2AgentConte
     terminal_result: Mapping[str, Any] | None = None
     if isinstance(event, (SessionStartedEvent, ObservationUpdatedEvent)):
         lease = event.payload.lease
-        terminal_result = event.payload.decision_context.last_skill_result
+        decision_context = event.payload.decision_context
+        terminal_result = decision_context.last_skill_result
     elif isinstance(event, SkillFinishedEvent) and event.payload.lease is not None:
         lease = event.payload.lease
+        assert event.payload.decision_context is not None
+        decision_context = event.payload.decision_context
         terminal_result = event.payload.terminal.model_dump(mode="json", by_alias=True)
     else:
         raise ValueError("event does not carry a decision lease")
@@ -109,9 +135,9 @@ def build_gateway_v2_agent_context(event: GatewayV2Event) -> GatewayV2AgentConte
         parent_skill_name=lease.parent_skill_name,
         allowed_skill_name=lease.allowed_skill_name,
         allowed_skill_names=lease.allowed_skill_names,
-        session_snapshot=event.payload.decision_context.session,
-        available_skills=event.payload.decision_context.available_skills,
-        skill_argument_hints=event.payload.decision_context.skill_argument_hints,
+        session_snapshot=decision_context.session,
+        available_skills=decision_context.available_skills,
+        skill_argument_hints=decision_context.skill_argument_hints,
         terminal_result=terminal_result,
     )
 
@@ -137,6 +163,124 @@ def _contains_path(paths: set[str], required: str) -> bool:
     return required in paths or any(path.startswith(f"{required}.") for path in paths)
 
 
+def _paper_plane_arguments_for_context(context: GatewayV2AgentContext) -> dict[str, Any]:
+    snapshot = context.session_snapshot
+    account_id = snapshot.get("AccountId", snapshot.get("accountId"))
+    return build_paper_plane_arguments(
+        seed=paper_plane_arguments_seed(
+            session_id=context.session_id,
+            event_id=context.event_id,
+            account_id=account_id if isinstance(account_id, str) else None,
+            control_generation=context.control_generation,
+            event_sequence=context.event_sequence,
+            decision_lease_id=context.decision_lease_id,
+            state_version=context.state_version,
+        )
+    )
+
+
+def _competitive_activity_seed_for_context(
+    context: GatewayV2AgentContext,
+    skill_name: str,
+) -> str:
+    snapshot = context.session_snapshot
+    account_id = snapshot.get("AccountId", snapshot.get("accountId"))
+    return competitive_activity_seed(
+        skill_name=skill_name,
+        session_id=context.session_id,
+        event_id=context.event_id,
+        account_id=account_id if isinstance(account_id, str) else None,
+        control_generation=context.control_generation,
+        event_sequence=context.event_sequence,
+        decision_lease_id=context.decision_lease_id,
+        state_version=context.state_version,
+    )
+
+
+def _skill_argument_hint(
+    context: GatewayV2AgentContext,
+    skill_name: str,
+    schema_version: str,
+):
+    return next(
+        (
+            hint
+            for hint in context.skill_argument_hints
+            if hint.skill_name == skill_name and hint.schema_version == schema_version
+        ),
+        None,
+    )
+
+
+def _dance_score_range(context: GatewayV2AgentContext, schema_version: str) -> tuple[int, int] | None:
+    hint = _skill_argument_hint(context, "dance_auto_schedule", schema_version)
+    if hint is None:
+        return None
+    score_field = next((field for field in hint.allowed_args if field.path == "score"), None)
+    if score_field is None or score_field.minimum is None or score_field.maximum is None:
+        return None
+    return score_field.minimum, score_field.maximum
+
+
+def _specialized_arguments_for_context(
+    context: GatewayV2AgentContext,
+    skill_name: str,
+    schema_version: str,
+) -> dict[str, Any] | None:
+    if schema_version != "v1":
+        return None
+    if skill_name == "paper_plane_auto_schedule":
+        return _paper_plane_arguments_for_context(context)
+    seed = _competitive_activity_seed_for_context(context, skill_name)
+    if skill_name == "darts_auto_schedule":
+        return build_darts_arguments(seed=seed)
+    if skill_name == "shooting_auto_schedule":
+        return build_shooting_arguments(seed=seed)
+    if skill_name == "dance_auto_schedule":
+        score_range = _dance_score_range(context, schema_version)
+        if score_range is None:
+            return None
+        return build_dance_arguments(
+            seed=seed,
+            minimum=score_range[0],
+            maximum=score_range[1],
+        )
+    return None
+
+
+def _safe_unavailable_skill_action(context: GatewayV2AgentContext) -> GatewayV2AgentAction:
+    reason = "Gateway did not provide complete constraints for the selected skill"
+    if "wait" in context.allowed_decision_actions:
+        return GatewayV2WaitAction(reason=reason, waitMs=1_000)
+    if "no_op" in context.allowed_decision_actions:
+        return GatewayV2NoOpAction(reason=reason)
+    if "stop_hosting" in context.allowed_decision_actions:
+        return GatewayV2StopHostingAction(reason=reason)
+    raise GatewayV2DecisionSelectionError
+
+
+def _normalize_gateway_v2_action(
+    context: GatewayV2AgentContext,
+    action: GatewayV2AgentAction,
+) -> GatewayV2AgentAction:
+    if not isinstance(action, GatewayV2CallSkillAction):
+        return action
+    if action.skill_name not in _SPECIALIZED_ARGUMENT_SKILLS:
+        return action
+    if action.schema_version != "v1":
+        return action
+    arguments = _specialized_arguments_for_context(
+        context,
+        action.skill_name,
+        action.schema_version,
+    )
+    if arguments is None:
+        return action
+    normalized = action.model_dump(mode="json", by_alias=True)
+    normalized["arguments"] = arguments
+    return GatewayV2CallSkillAction.model_validate(normalized)
+
+
 def _lease_pairing_is_permitted(
     context: GatewayV2AgentContext,
     candidate: GatewayV2CallSkillAction,
@@ -154,11 +298,15 @@ def _lease_pairing_is_permitted(
         return candidate.skill_name != "stop_move" or context.parent_skill_name == "move_to"
 
     if context.lease_kind == "vehicle_cancel_window":
-        return paired_exits.get(context.parent_skill_name) == candidate.skill_name
+        return (
+            context.parent_skill_name is not None
+            and paired_exits.get(context.parent_skill_name) == candidate.skill_name
+        )
 
     if context.lease_kind == "vehicle_recovery":
         return candidate.skill_name == "observe_state" or (
-            paired_exits.get(context.parent_skill_name) == candidate.skill_name
+            context.parent_skill_name is not None
+            and paired_exits.get(context.parent_skill_name) == candidate.skill_name
         )
 
     if context.lease_kind == "conversation":
@@ -198,6 +346,15 @@ def _skill_is_permitted(
 
     hints = {(hint.skill_name, hint.schema_version): hint for hint in context.skill_argument_hints}
     hint = hints.get(identity)
+    if candidate.skill_name in _SPECIALIZED_ARGUMENT_SKILLS:
+        specialized_arguments = _specialized_arguments_for_context(
+            context,
+            candidate.skill_name,
+            candidate.schema_version,
+        )
+        serialized_arguments = candidate.model_dump(mode="json", by_alias=True)["arguments"]
+        if specialized_arguments is None or serialized_arguments != specialized_arguments:
+            return False
     try:
         argument_paths = _argument_leaf_paths(candidate.arguments)
     except ValueError:
@@ -219,7 +376,12 @@ def select_gateway_v2_action(
     allowed_actions = set(context.allowed_decision_actions)
     for candidate in candidates:
         if isinstance(candidate, GatewayV2CallSkillAction):
-            if _skill_is_permitted(context, candidate):
+            candidate = _normalize_gateway_v2_action(context, candidate)
+            if isinstance(candidate, GatewayV2CallSkillAction):
+                if _skill_is_permitted(context, candidate):
+                    return candidate
+                continue
+            if candidate.action in allowed_actions:
                 return candidate
             continue
         if candidate.action in allowed_actions:
@@ -286,6 +448,8 @@ def _initial_room_transition_action(
 def _planned_activity_action(
     context: GatewayV2AgentContext,
     activity_context: ActivityPlanContext,
+    *,
+    scene_catalog: SceneCatalog | None = None,
 ) -> GatewayV2AgentAction | None:
     step = activity_context.plan.current_step()
     if step.skill_name is None:
@@ -306,7 +470,22 @@ def _planned_activity_action(
         step.skill_name,
         step.schema_version,
         reason=step.intent,
+        scene_catalog=scene_catalog,
+        scene_target_id=step.scene_target_id,
     )
+
+
+def _defer_unresolvable_activity_step(
+    context: GatewayV2AgentContext,
+) -> GatewayV2AgentAction | None:
+    reason = "Current activity step cannot be resolved from trusted scene data"
+    if "wait" in context.allowed_decision_actions:
+        return GatewayV2WaitAction(reason=reason, waitMs=1_000)
+    if "no_op" in context.allowed_decision_actions:
+        return GatewayV2NoOpAction(reason=reason)
+    if "stop_hosting" in context.allowed_decision_actions:
+        return GatewayV2StopHostingAction(reason=reason)
+    return None
 
 
 def _gateway_v2_activity_skill_action(
@@ -315,17 +494,33 @@ def _gateway_v2_activity_skill_action(
     schema_version: str,
     *,
     reason: str,
+    scene_catalog: SceneCatalog | None = None,
+    scene_target_id: str | None = None,
+    arguments_override: Mapping[str, Any] | None = None,
 ) -> GatewayV2CallSkillAction | None:
-    identity = (skill_name, schema_version)
-    hint = next(
-        (
-            item
-            for item in context.skill_argument_hints
-            if (item.skill_name, item.schema_version) == identity
-        ),
-        None,
-    )
-    arguments: Mapping[str, Any] = {} if hint is None else hint.suggested_args
+    hint = _skill_argument_hint(context, skill_name, schema_version)
+    arguments: Mapping[str, Any]
+    if arguments_override is not None:
+        arguments = arguments_override
+    elif skill_name == "move_to" and scene_catalog is not None:
+        if scene_target_id is None:
+            return None
+        target = scene_catalog.get_movement_target(scene_target_id)
+        scene_id = scene_id_from_snapshot(context.session_snapshot)
+        if target is None or scene_id is None or target.scene_id != scene_id:
+            return None
+        arguments = {"target": target.coordinates.as_arguments()}
+    else:
+        arguments = {} if hint is None else hint.suggested_args
+    if skill_name in _SPECIALIZED_ARGUMENT_SKILLS:
+        specialized_arguments = _specialized_arguments_for_context(
+            context,
+            skill_name,
+            schema_version,
+        )
+        if specialized_arguments is None:
+            return None
+        arguments = specialized_arguments
     try:
         candidate = GatewayV2CallSkillAction(
             action="call_skill",
@@ -344,12 +539,18 @@ def gateway_v2_activity_skill_is_permitted(
     skill_name: str,
     schema_version: str,
 ) -> bool:
+    arguments_override = (
+        {"target": {"x": 0.0, "y": 0.0, "z": 0.0}}
+        if skill_name == "move_to"
+        else None
+    )
     return (
         _gateway_v2_activity_skill_action(
             context,
             skill_name,
             schema_version,
             reason="Validate the current activity step against the Gateway lease",
+            arguments_override=arguments_override,
         )
         is not None
     )
@@ -541,7 +742,10 @@ class GatewayV2DecisionService:
         if selected is None:
             raise GatewayV2AgentExecutionError("empty_output")
         try:
-            return parse_gateway_v2_agent_action(selected)
+            return _normalize_gateway_v2_action(
+                context,
+                parse_gateway_v2_agent_action(selected),
+            )
         except Exception:
             raise GatewayV2AgentExecutionError("invalid_output") from None
 
@@ -564,6 +768,13 @@ def freeze_gateway_v2_decision(
     context: GatewayV2AgentContext,
     action: GatewayV2AgentAction,
 ) -> FrozenGatewayV2Decision:
+    action = _normalize_gateway_v2_action(context, action)
+    if (
+        isinstance(action, GatewayV2CallSkillAction)
+        and action.skill_name in _SPECIALIZED_ARGUMENT_SKILLS
+        and not _skill_is_permitted(context, action)
+    ):
+        action = _safe_unavailable_skill_action(context)
     payload: dict[str, Any] = {
         "traceId": trace_id,
         "contractVersion": "llm-gateway-http-v2",
@@ -583,6 +794,8 @@ def freeze_gateway_v2_decision(
                 "arguments": action.model_dump(mode="json", by_alias=True)["arguments"],
             }
         )
+    elif isinstance(action, GatewayV2WaitAction):
+        payload["waitMs"] = action.wait_ms
 
     decision = parse_gateway_v2_decision(payload)
     body_json = decision.model_dump(mode="json", by_alias=True)
@@ -613,6 +826,7 @@ class GatewayV2DecisionPlanner:
     repository: _DecisionPlanRepository
     conversation_service: GatewayV2ConversationDecisionService | None = None
     activity_coordinator: ActivityPlanCoordinator | None = None
+    scene_catalog: SceneCatalog | None = None
 
     async def __call__(
         self,
@@ -640,11 +854,23 @@ class GatewayV2DecisionPlanner:
             activity_context = None
             if self.activity_coordinator is not None:
                 activity_context = await self.activity_coordinator.prepare(event, context)
-            action = _initial_room_transition_action(context)
+            action: GatewayV2AgentAction | None = _initial_room_transition_action(
+                context
+            )
             if activity_context is not None:
-                planned_action = _planned_activity_action(context, activity_context)
+                planned_action = _planned_activity_action(
+                    context,
+                    activity_context,
+                    scene_catalog=self.scene_catalog,
+                )
                 if planned_action is not None:
                     action = planned_action
+                elif activity_context.plan.current_step().skill_name is not None:
+                    action = _defer_unresolvable_activity_step(context)
+                    if action is None:
+                        raise GatewayV2AgentExecutionError(
+                            "activity_step_unresolvable"
+                        )
             if action is None:
                 try:
                     action = await self.decision_service.decide(
@@ -697,6 +923,9 @@ class GatewayV2DecisionPlanner:
                         action = GatewayV2NoOpAction(
                             reason="Current activity step is not authorized by this lease"
                         )
+            if action is None:
+                raise GatewayV2AgentExecutionError("empty_output")
+            action = _normalize_gateway_v2_action(context, action)
             if activity_context is None:
                 await self.repository.plan_decision(event, context, action)
             else:

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "sceneId": 7,
+  "sceneName": "CJ_guangchang",
+  "triggers": [
+    {
+      "sceneId": 7,
+      "triggerId": 175,
+      "triggerConfigId": 9,
+      "sourcePath": "CJ_XiaChenGuangChang_fix/BigJumpTrigger",
+      "triggerPosition": {
+        "x": 64.25477,
+        "y": -1.628946,
+        "z": 178.587932
+      },
+      "shape": {
+        "shapeType": "box",
+        "centerX": 64.170676,
+        "centerY": -1.628946,
+        "centerZ": 178.508927,
+        "radius": 0,
+        "halfExtentX": 1.202924,
+        "halfExtentY": 0.47348,
+        "halfExtentZ": 1.113666
+      },
+      "enterActions": [
+        {
+          "actionConfigId": 25,
+          "actionType": 12,
+          "robotActionKind": "big_jump",
+          "argsJson": "{}"
+        }
+      ],
+      "exitActions": []
+    }
+  ]
+}

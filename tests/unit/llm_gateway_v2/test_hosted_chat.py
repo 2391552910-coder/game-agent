@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from src.core.integration.llm_gateway_v2.auto_chat import (
+    AutoChatClient,
     AutoChatMessage,
     AutoChatPermanentError,
     AutoChatRetryableError,
@@ -52,11 +53,16 @@ def _message(conversation: ConversationContext, content: str = "收到") -> Auto
 
 @pytest.mark.asyncio
 async def test_service_calls_auto_chat_and_forwards_returned_content_unchanged() -> None:
-    conversations: list[ConversationContext] = []
+    generation_requests: list[tuple[ConversationContext, str | None]] = []
 
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
-            conversations.append(conversation)
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None,
+        ) -> AutoChatMessage:
+            generation_requests.append((conversation, latest_message))
             return AutoChatMessage(
                 speakerRoleId=conversation.speaker_role_id,
                 targetRoleId=conversation.target_role_id,
@@ -87,7 +93,7 @@ async def test_service_calls_auto_chat_and_forwards_returned_content_unchanged()
 
     await service.handle_nearby_friend_request("gateway-1", event)
 
-    assert conversations == [conversation]
+    assert generation_requests == [(conversation, None)]
     assert len(sender.requests) == 1
     assert sender.requests[0].content == "对话端生成的原始内容"
 
@@ -97,7 +103,12 @@ async def test_simple_route_forwards_deepseek_content_without_calling_auto_chat(
     class ConversationClient:
         calls = 0
 
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
             self.calls += 1
             raise AssertionError("simple chat must not call Auto Chat")
 
@@ -140,16 +151,23 @@ async def test_simple_route_forwards_deepseek_content_without_calling_auto_chat(
 
 @pytest.mark.asyncio
 async def test_complex_route_calls_auto_chat_after_deepseek_classification() -> None:
-    class ConversationClient:
-        calls = 0
+    incoming_text = "  请分析并规划接下来的步骤\n"
 
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
-            self.calls += 1
+    class ConversationClient:
+        calls: list[tuple[ConversationContext, str | None]] = []
+
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None,
+        ) -> AutoChatMessage:
+            self.calls.append((conversation, latest_message))
             return _message(conversation, "这是复杂问题的回答")
 
     class Router:
         async def route(self, text: str) -> SimpleChatRoute:
-            assert text == "请分析并规划接下来的步骤"
+            assert text == incoming_text
             return SimpleChatRoute(route="complex", content="")
 
     class Sender:
@@ -166,21 +184,22 @@ async def test_complex_route_calls_auto_chat_after_deepseek_classification() -> 
         simple_router=Router(),
         sender=sender,
     )
+    conversation = _conversation()
     event = SimpleNamespace(
         event_id="complex-1",
         session_id="session-1",
         payload=SimpleNamespace(
             supported=True,
-            text="请分析并规划接下来的步骤",
+            text=incoming_text,
             sender=SimpleNamespace(avatar_id="100", role_id="200"),
             chat_type="friend",
-            conversation=_conversation(),
+            conversation=conversation,
         ),
     )
 
     await service.handle_chat_received("gateway-1", event)
 
-    assert conversation_client.calls == 1
+    assert conversation_client.calls == [(conversation, incoming_text)]
     assert sender.requests[0].content == "这是复杂问题的回答"
 
 
@@ -197,10 +216,15 @@ async def test_three_gateway_questions_route_and_forward_as_expected() -> None:
             return routes[text]
 
     class ConversationClient:
-        calls: list[str] = []
+        calls: list[tuple[str, str | None]] = []
 
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
-            self.calls.append(conversation.conversation_id)
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None,
+        ) -> AutoChatMessage:
+            self.calls.append((conversation.conversation_id, latest_message))
             return _message(conversation, "对话端生成的复杂问题回答")
 
     class Sender:
@@ -237,7 +261,169 @@ async def test_three_gateway_questions_route_and_forward_as_expected() -> None:
         "对话端生成的复杂问题回答",
         "对话端生成的复杂问题回答",
     ]
-    assert len(conversation_client.calls) == 2
+    assert conversation_client.calls == [
+        ("conv-2", "你最近参加了什么活动？"),
+        ("conv-3", "你的名字叫什么"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_complex_route_uses_real_auto_chat_http_contract() -> None:
+    auto_chat_requests: list[httpx.Request] = []
+
+    async def auto_chat_handler(request: httpx.Request) -> httpx.Response:
+        auto_chat_requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "speakerRoleId": 100,
+                "targetRoleId": 200,
+                "pairKey": "100:200",
+                "content": "我最近参加了夏日庆典。",
+                "summaryVersion": 1,
+                "summaryUpdatedAt": None,
+            },
+        )
+
+    class Router:
+        async def route(self, text: str) -> SimpleChatRoute:
+            return SimpleChatRoute(route="complex", content="")
+
+    class Sender:
+        requests: list[HostedChatSendRequest] = []
+
+        async def send(
+            self,
+            request: HostedChatSendRequest,
+            *,
+            request_id: str | None = None,
+        ) -> HostedChatSendReceipt:
+            self.requests.append(request)
+            return HostedChatSendReceipt(request_id or "request-1", "message-1")
+
+    conversation = _conversation(
+        historyRounds=[
+            {
+                "askRoleId": 100,
+                "askContent": "你好",
+                "answerRoleId": 200,
+                "answerContent": "你好呀",
+            }
+        ],
+        completedRounds=1,
+    )
+    sender = Sender()
+    service = HostedChatService(
+        conversation_client=AutoChatClient(
+            base_url="http://auto-chat.local",
+            transport=httpx.MockTransport(auto_chat_handler),
+        ),
+        simple_router=Router(),
+        sender=sender,
+    )
+    event = SimpleNamespace(
+        event_id="complex-http-1",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            supported=True,
+            text="你最近参加了什么活动？",
+            sender=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="friend",
+            conversation=conversation,
+        ),
+    )
+
+    await service.handle_chat_received("gateway-1", event)
+
+    assert len(auto_chat_requests) == 1
+    assert auto_chat_requests[0].read().decode("utf-8") == (
+        '{"conversation":{"conversationId":"conv-100-200-1",'
+        '"pairKey":"100:200","speakerRoleId":100,"targetRoleId":200,'
+        '"brainUsername":"conv-100","historyRounds":[{"askRoleId":100,'
+        '"askContent":"你好","answerRoleId":200,"answerContent":"你好呀"}],'
+        '"completedRounds":1,"maxRounds":6,"expiresAtMs":9999999999999},'
+        '"latestMessage":"你最近参加了什么活动？","forceRefreshSummary":false}'
+    )
+    assert [request.content for request in sender.requests] == ["我最近参加了夏日庆典。"]
+
+
+@pytest.mark.asyncio
+async def test_hosted_chat_logs_status_without_conversation_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ConversationClient:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None,
+        ) -> AutoChatMessage:
+            return _message(conversation, "generated-secret")
+
+    class Router:
+        async def route(self, text: str) -> SimpleChatRoute:
+            return SimpleChatRoute(route="complex", content="")
+
+    class Sender:
+        async def send(
+            self,
+            request: HostedChatSendRequest,
+            *,
+            request_id: str | None = None,
+        ) -> HostedChatSendReceipt:
+            return HostedChatSendReceipt(request_id or "request-1", "message-1")
+
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        simple_router=Router(),
+        sender=Sender(),
+    )
+    conversation = _conversation(
+        historyRounds=[
+            {
+                "askRoleId": 100,
+                "askContent": "history-question-secret",
+                "answerRoleId": 200,
+                "answerContent": "history-answer-secret",
+            }
+        ],
+        completedRounds=1,
+    )
+    received = SimpleNamespace(
+        event_id="logging-chat-1",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            supported=True,
+            text="incoming-secret",
+            sender=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="friend",
+            conversation=conversation,
+        ),
+    )
+    result = SimpleNamespace(
+        event_id="logging-result-1",
+        payload=SimpleNamespace(
+            chat_message_id="message-1",
+            session_id="session-1",
+            target=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="friend",
+            status="sent",
+            reason=None,
+        ),
+    )
+
+    with caplog.at_level("INFO", logger="src.core.integration.llm_gateway_v2.hosted_chat"):
+        await service.handle_chat_received("gateway-1", received)
+        await service.handle_send_result("gateway-1", result)
+
+    assert "Hosted chat send result received" in caplog.text
+    for sensitive_text in (
+        "incoming-secret",
+        "generated-secret",
+        "history-question-secret",
+        "history-answer-secret",
+    ):
+        assert sensitive_text not in caplog.text
 
 
 def test_send_request_validates_chat_contract() -> None:
@@ -334,7 +520,12 @@ async def test_hosted_chat_service_ignores_unsupported_and_deduplicates_event() 
     generated: list[ConversationContext] = []
 
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
             generated.append(conversation)
             return _message(conversation)
 
@@ -379,7 +570,12 @@ async def test_auto_chat_permanent_error_does_not_send_or_regenerate_on_same_eve
     calls = 0
 
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
             nonlocal calls
             calls += 1
             raise AutoChatPermanentError("deadline_exhausted")
@@ -416,7 +612,12 @@ async def test_auto_chat_retryable_error_releases_event_for_retry() -> None:
     calls = 0
 
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -457,7 +658,12 @@ async def test_sender_retry_reuses_generated_content_and_request_id() -> None:
     generator_calls = 0
 
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
             nonlocal generator_calls
             generator_calls += 1
             return _message(conversation, "只生成一次")
@@ -506,7 +712,12 @@ async def test_sender_retry_reuses_generated_content_and_request_id() -> None:
 @pytest.mark.asyncio
 async def test_result_before_202_is_reconciled_without_resend() -> None:
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
             return _message(conversation)
 
     class Sender:
@@ -550,7 +761,12 @@ async def test_result_before_202_is_reconciled_without_resend() -> None:
 @pytest.mark.asyncio
 async def test_send_result_rejects_mismatched_target_identity() -> None:
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
             return _message(conversation)
 
     class Sender:
@@ -587,12 +803,17 @@ async def test_send_result_rejects_mismatched_target_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_nearby_opening_then_received_reply_uses_gateway_conversations() -> None:
-    conversations: list[ConversationContext] = []
+    generation_requests: list[tuple[ConversationContext, str | None]] = []
 
     class ConversationClient:
-        async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
-            conversations.append(conversation)
-            content = "开场白" if len(conversations) == 1 else "回复内容"
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None,
+        ) -> AutoChatMessage:
+            generation_requests.append((conversation, latest_message))
+            content = "开场白" if len(generation_requests) == 1 else "回复内容"
             return _message(conversation, content)
 
     class Sender:
@@ -653,5 +874,8 @@ async def test_nearby_opening_then_received_reply_uses_gateway_conversations() -
 
     assert [request.content for request in sender.requests] == ["开场白", "回复内容"]
     assert {request.target_role_id for request in sender.requests} == {"200"}
-    assert conversations == [opening_conversation, reply_conversation]
-    assert conversations[1].history_rounds[0].ask_content == "开场白"
+    assert generation_requests == [
+        (opening_conversation, None),
+        (reply_conversation, "你好"),
+    ]
+    assert generation_requests[1][0].history_rounds[0].ask_content == "开场白"

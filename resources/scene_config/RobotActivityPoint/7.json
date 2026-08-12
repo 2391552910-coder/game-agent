@@ -1,0 +1,199 @@
+{
+  "version": 1,
+  "sceneId": 7,
+  "sceneName": "CJ_guangchang",
+  "points": [
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "wish_board",
+      "pointKey": "default",
+      "sourceType": "scene_trigger",
+      "sourceId": 457,
+      "sourcePath": "aiqingdao/CJ_Qiyuanpai/pengzhuang/Cube (4)",
+      "target": {
+        "x": 93.14836,
+        "y": 1.15435553,
+        "z": -20.22453
+      },
+      "standTransform": {
+        "X": 93.14836,
+        "Y": 1.15435553,
+        "Z": -20.22453,
+        "RotX": 0.0,
+        "RotY": -0.456201255,
+        "RotZ": 0.0,
+        "RotW": -0.889876664
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "wish_board",
+      "pointKey": "458",
+      "sourceType": "scene_trigger",
+      "sourceId": 458,
+      "sourcePath": "aiqingdao/CJ_Qiyuanpai (1)/pengzhuang/Cube (4)",
+      "target": {
+        "x": 100.519966,
+        "y": 1.15435553,
+        "z": -25.9959488
+      },
+      "standTransform": {
+        "X": 100.519966,
+        "Y": 1.15435553,
+        "Z": -25.9959488,
+        "RotX": 0.0,
+        "RotY": -0.217475757,
+        "RotZ": 0.0,
+        "RotW": -0.976065755
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "wish_board",
+      "pointKey": "459",
+      "sourceType": "scene_trigger",
+      "sourceId": 459,
+      "sourcePath": "aiqingdao/CJ_Qiyuanpai (2)/pengzhuang/Cube (4)",
+      "target": {
+        "x": 111.41523,
+        "y": 1.15435553,
+        "z": -26.2437973
+      },
+      "standTransform": {
+        "X": 111.41523,
+        "Y": 1.15435553,
+        "Z": -26.2437973,
+        "RotX": 0.0,
+        "RotY": 0.0528368242,
+        "RotZ": 0.0,
+        "RotW": -0.998603165
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "wish_board",
+      "pointKey": "460",
+      "sourceType": "scene_trigger",
+      "sourceId": 460,
+      "sourcePath": "aiqingdao/CJ_Qiyuanpai (3)/pengzhuang/Cube (4)",
+      "target": {
+        "x": 118.822266,
+        "y": 1.15435553,
+        "z": -22.48312
+      },
+      "standTransform": {
+        "X": 118.822266,
+        "Y": 1.15435553,
+        "Z": -22.48312,
+        "RotX": 0.0,
+        "RotY": 0.2682384,
+        "RotZ": 0.0,
+        "RotW": -0.9633526
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "draw_lots",
+      "pointKey": "default",
+      "sourceType": "scene_trigger",
+      "sourceId": 456,
+      "sourcePath": "DJ_xuyuantai/Trigger",
+      "target": {
+        "x": 104.483,
+        "y": -1.46,
+        "z": -30.9
+      },
+      "standTransform": {
+        "X": 104.483,
+        "Y": -1.46,
+        "Z": -30.9,
+        "RotX": 0.0,
+        "RotY": 0.0,
+        "RotZ": 0.0,
+        "RotW": 1.0
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "wish_board",
+      "pointKey": "502",
+      "sourceType": "scene_trigger",
+      "sourceId": 502,
+      "sourcePath": "Act_Xuyuanpai_Pian",
+      "target": {
+        "x": 92.697,
+        "y": -0.136,
+        "z": -24.864
+      },
+      "standTransform": {
+        "X": 92.697,
+        "Y": -0.136,
+        "Z": -24.864,
+        "RotX": 0.0,
+        "RotY": 0.0,
+        "RotZ": 0.0,
+        "RotW": 1.0
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "tarot",
+      "pointKey": "default",
+      "sourceType": "scene_trigger",
+      "sourceId": 508,
+      "sourcePath": "DJ_TaLuoPai_paiyi_NPC/Trigger",
+      "target": {
+        "x": -76.4534,
+        "y": -2.40784574,
+        "z": 81.45539
+      },
+      "standTransform": {
+        "X": -76.4534,
+        "Y": -2.40784574,
+        "Z": 81.45539,
+        "RotX": -6.217249E-15,
+        "RotY": 0.985654056,
+        "RotZ": -3.55271368E-14,
+        "RotW": -0.16877833
+      },
+      "exitPosition": null
+    },
+    {
+      "sceneId": 7,
+      "sceneName": "CJ_guangchang",
+      "activityName": "tarot",
+      "pointKey": "509",
+      "sourceType": "scene_trigger",
+      "sourceId": 509,
+      "sourcePath": "DJ_TaLuoPai_paiyi_Player/Trigger",
+      "target": {
+        "x": -77.8575745,
+        "y": -2.23,
+        "z": 77.87796
+      },
+      "standTransform": {
+        "X": -77.8575745,
+        "Y": -2.23,
+        "Z": 77.87796,
+        "RotX": 1.37985623E-10,
+        "RotY": 0.165988639,
+        "RotZ": 9.454086E-10,
+        "RotW": 0.986127734
+      },
+      "exitPosition": null
+    }
+  ]
+}

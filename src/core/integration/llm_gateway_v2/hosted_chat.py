@@ -97,7 +97,12 @@ class HostedChatSender(Protocol):
 
 
 class HostedChatConversationClient(Protocol):
-    async def generate(self, conversation: ConversationContext) -> AutoChatMessage: ...
+    async def generate(
+        self,
+        conversation: ConversationContext,
+        *,
+        latest_message: str | None = None,
+    ) -> AutoChatMessage: ...
 
 
 class HostedChatSimpleRouter(Protocol):
@@ -470,7 +475,10 @@ class HostedChatService:
                 )
 
         try:
-            message = await self._conversation_client.generate(conversation)
+            message = await self._conversation_client.generate(
+                conversation,
+                latest_message=incoming_text,
+            )
         except AutoChatRetryableError as error:
             raise HostedChatRetryableError(error.category) from None
         except AutoChatPermanentError as error:

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "sceneId": 8,
+  "sceneName": "CJ_JiuBa_Zhong_suo",
+  "sourceNavmesh": "RecastDot/CJ_JiuBa_Zhong_suo",
+  "sourceNavmeshSha256": "b78bbee674d875aecca7ff338a22eb4103109c5bb026b7914e0b7dc997ef89bc",
+  "validation": {
+    "method": "DotRecast FindNearestPoly and complete FindPath from scene anchor",
+    "anchor": {"x": -0.215, "y": 1.348, "z": 75.927},
+    "queryExtents": {"x": 3.0, "y": 5.0, "z": 3.0}
+  },
+  "points": [
+    {"pointKey": "wander-001", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-001", "target": {"x": -15.078, "y": 0.038, "z": 71.026}},
+    {"pointKey": "wander-002", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-002", "target": {"x": -15.078, "y": 0.549, "z": 76.026}},
+    {"pointKey": "wander-003", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-003", "target": {"x": -15.069, "y": 0.761, "z": 81.23}},
+    {"pointKey": "wander-004", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-004", "target": {"x": -15.078, "y": 1.332, "z": 86.026}},
+    {"pointKey": "wander-005", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-005", "target": {"x": -14.91, "y": 1.352, "z": 90.978}},
+    {"pointKey": "wander-006", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-006", "target": {"x": -10.078, "y": 0.331, "z": 71.026}},
+    {"pointKey": "wander-007", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-007", "target": {"x": -10.078, "y": 0.761, "z": 76.026}},
+    {"pointKey": "wander-008", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-008", "target": {"x": -10.078, "y": 1.063, "z": 81.026}},
+    {"pointKey": "wander-009", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-009", "target": {"x": -10.116, "y": 1.884, "z": 86.015}},
+    {"pointKey": "wander-010", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-010", "target": {"x": -10.199, "y": 1.883, "z": 91.047}},
+    {"pointKey": "wander-011", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-011", "target": {"x": -5.078, "y": 0.624, "z": 71.026}},
+    {"pointKey": "wander-012", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-012", "target": {"x": -5.078, "y": 1.556, "z": 76.026}},
+    {"pointKey": "wander-013", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-013", "target": {"x": -5.274, "y": 1.884, "z": 80.695}},
+    {"pointKey": "wander-014", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-014", "target": {"x": -0.078, "y": 0.713, "z": 71.026}},
+    {"pointKey": "wander-015", "sourcePath": "recast:CJ_JiuBa_Zhong_suo#wander-015", "target": {"x": -0.215, "y": 1.348, "z": 75.927}}
+  ]
+}

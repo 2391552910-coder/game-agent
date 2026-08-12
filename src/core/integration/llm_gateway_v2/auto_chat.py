@@ -90,25 +90,23 @@ class ConversationContext(_AutoChatModel):
 
 
 class AutoChatMessageRequest(_AutoChatModel):
-    speaker_role_id: PositiveRoleId = Field(alias="speakerRoleId")
-    target_role_id: PositiveRoleId = Field(alias="targetRoleId")
-    brain_username: str = Field(alias="brainUsername", min_length=1, max_length=255)
-    history_rounds: tuple[ConversationHistoryRound, ...] = Field(
-        alias="historyRounds",
-        max_length=5,
-    )
+    conversation: ConversationContext
+    latest_message: str | None = Field(default=None, alias="latestMessage")
     force_refresh_summary: Literal[False] = Field(
         default=False,
         alias="forceRefreshSummary",
     )
 
     @classmethod
-    def from_conversation(cls, conversation: ConversationContext) -> AutoChatMessageRequest:
+    def from_conversation(
+        cls,
+        conversation: ConversationContext,
+        *,
+        latest_message: str | None,
+    ) -> AutoChatMessageRequest:
         return cls(
-            speakerRoleId=conversation.speaker_role_id,
-            targetRoleId=conversation.target_role_id,
-            brainUsername=conversation.brain_username,
-            historyRounds=conversation.history_rounds,
+            conversation=conversation,
+            latestMessage=latest_message,
             forceRefreshSummary=False,
         )
 
@@ -169,7 +167,12 @@ class AutoChatClient:
         self._transport = transport
         self._now_ms = now_ms or (lambda: int(time.time() * 1_000))
 
-    async def generate(self, conversation: ConversationContext) -> AutoChatMessage:
+    async def generate(
+        self,
+        conversation: ConversationContext,
+        *,
+        latest_message: str | None = None,
+    ) -> AutoChatMessage:
         remaining_seconds = (conversation.expires_at_ms - self._now_ms()) / 1_000
         request_timeout = min(
             self._timeout_seconds,
@@ -178,7 +181,10 @@ class AutoChatClient:
         if request_timeout <= 0:
             raise AutoChatPermanentError("deadline_exhausted")
 
-        request = AutoChatMessageRequest.from_conversation(conversation)
+        request = AutoChatMessageRequest.from_conversation(
+            conversation,
+            latest_message=latest_message,
+        )
         try:
             async with httpx.AsyncClient(
                 timeout=request_timeout,

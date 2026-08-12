@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from src.logging_config import configure_logging
@@ -57,6 +57,9 @@ from src.core.integration.llm_gateway_v2.outbox_repository import OutboxReposito
 from src.core.integration.llm_gateway_v2.readiness import (  # noqa: E402
     ReadinessService,
     build_readiness_service,
+)
+from src.core.integration.llm_gateway_v2.scene_catalog import (  # noqa: E402
+    load_default_scene_catalog,
 )
 from src.core.integration.llm_gateway_v2.simple_chat import SimpleChatRouter  # noqa: E402
 from src.core.integration.llm_gateway_v2.terminal_repository import TerminalRepository  # noqa: E402
@@ -178,9 +181,15 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
     control_app_id = getattr(settings, "llm_gateway_control_app_id", None)
     control_secret = getattr(settings, "llm_gateway_control_app_secret", None)
     auto_chat_base_url = getattr(settings, "auto_chat_base_url", None)
-    if all(
-        isinstance(value, str) and value.strip()
-        for value in (control_url, control_app_id, control_secret, auto_chat_base_url)
+    if (
+        isinstance(control_url, str)
+        and control_url.strip()
+        and isinstance(control_app_id, str)
+        and control_app_id.strip()
+        and isinstance(control_secret, str)
+        and control_secret.strip()
+        and isinstance(auto_chat_base_url, str)
+        and auto_chat_base_url.strip()
     ):
         simple_chat_timeout = getattr(settings, "llm_gateway_simple_chat_timeout_seconds", 3.0)
         if not isinstance(simple_chat_timeout, (int, float)):
@@ -192,11 +201,14 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
                 deadline_safety_seconds=getattr(settings, "auto_chat_deadline_safety_seconds", 10.0),
             ),
             simple_router=SimpleChatRouter(
-                model_factory=lambda: get_env_llm(
-                    model_type="fast",
-                    temperature=0.1,
-                    timeout_seconds=simple_chat_timeout,
-                    max_retries=0,
+                model_factory=lambda: cast(
+                    Any,
+                    get_env_llm(
+                        model_type="fast",
+                        temperature=0.1,
+                        timeout_seconds=simple_chat_timeout,
+                        max_retries=0,
+                    ),
                 ),
                 timeout_seconds=simple_chat_timeout,
             ),
@@ -211,6 +223,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             state_ttl_seconds=getattr(settings, "llm_gateway_hosted_chat_state_ttl_seconds", 300),
             max_state_entries=getattr(settings, "llm_gateway_hosted_chat_max_state_entries", 10_000),
         )
+    scene_catalog = load_default_scene_catalog()
     decision_planner = GatewayV2DecisionPlanner(
         decision_service=GatewayV2DecisionService(
             timeout_seconds=settings.llm_gateway_v2_agent_timeout_seconds,
@@ -218,9 +231,11 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
         repository=outbox_repository,
         activity_coordinator=ActivityPlanCoordinator(
             repository=activity_repository,
-            generator=GatewayV2ActivityPlanGenerator(),
+            generator=GatewayV2ActivityPlanGenerator(scene_catalog=scene_catalog),
             step_authorizer=gateway_v2_activity_skill_is_permitted,
+            scene_catalog=scene_catalog,
         ),
+        scene_catalog=scene_catalog,
     )
     event_dispatcher = GatewayV2EventDispatcher(
         context_repository=inbox_repository,

@@ -54,6 +54,11 @@ class ActivityPlanStep(_ActivityModel):
     phase: NonEmptyString = Field(max_length=64)
     skill_name: NonEmptyString | None = Field(default=None, alias="skillName", max_length=128)
     schema_version: NonEmptyString | None = Field(default=None, alias="schemaVersion", max_length=128)
+    scene_target_id: NonEmptyString | None = Field(
+        default=None,
+        alias="sceneTargetId",
+        max_length=256,
+    )
     intent: NonEmptyString
     max_attempts: int = Field(default=2, alias="maxAttempts", ge=1, le=2)
     status: StepStatus = "pending"
@@ -65,6 +70,8 @@ class ActivityPlanStep(_ActivityModel):
             raise ValueError("skillName and schemaVersion must be supplied together")
         if self.skill_name == "nearby_chat_send":
             raise ValueError("direct chat skill is not an activity plan step")
+        if self.scene_target_id is not None and self.skill_name != "move_to":
+            raise ValueError("sceneTargetId is only valid for move_to")
         if self.skill_name is not None and self.skill_name not in CANONICAL_NON_CHAT_SKILLS:
             raise ValueError("skillName is not in the canonical non-chat catalog")
         if self.skill_name is not None and self.schema_version != "v1":
@@ -81,6 +88,11 @@ class ActivityPlanProposalStep(_ActivityModel):
     phase: NonEmptyString = Field(max_length=64)
     skill_name: NonEmptyString | None = Field(default=None, alias="skillName", max_length=128)
     schema_version: NonEmptyString | None = Field(default=None, alias="schemaVersion", max_length=128)
+    scene_target_id: NonEmptyString | None = Field(
+        default=None,
+        alias="sceneTargetId",
+        max_length=256,
+    )
     intent: NonEmptyString
 
     @model_validator(mode="after")
@@ -89,6 +101,8 @@ class ActivityPlanProposalStep(_ActivityModel):
             raise ValueError("skillName and schemaVersion must be supplied together")
         if self.skill_name == "nearby_chat_send":
             raise ValueError("direct chat skill is not an activity plan step")
+        if self.scene_target_id is not None and self.skill_name != "move_to":
+            raise ValueError("sceneTargetId is only valid for move_to")
         if self.skill_name is not None and self.skill_name not in CANONICAL_NON_CHAT_SKILLS:
             raise ValueError("skillName is not in the canonical non-chat catalog")
         if self.skill_name is not None and self.schema_version != "v1":
@@ -96,6 +110,18 @@ class ActivityPlanProposalStep(_ActivityModel):
         if self.skill_name is None and self.phase != "social":
             raise ValueError("only a social opportunity step may omit skillName")
         return self
+
+
+def _validate_social_opportunity_layout(
+    steps: tuple[ActivityPlanProposalStep | ActivityPlanStep, ...],
+) -> None:
+    social_indexes = [
+        index for index, step in enumerate(steps) if step.skill_name is None
+    ]
+    if len(social_indexes) > 1:
+        raise ValueError("activity plan may contain at most one social opportunity step")
+    if social_indexes and social_indexes[0] != len(steps) - 1:
+        raise ValueError("social opportunity step must be the final plan step")
 
 
 class ActivityPlanProposal(_ActivityModel):
@@ -108,6 +134,7 @@ class ActivityPlanProposal(_ActivityModel):
         step_ids = [step.step_id for step in self.steps]
         if len(step_ids) != len(set(step_ids)):
             raise ValueError("stepId values must be unique")
+        _validate_social_opportunity_layout(self.steps)
         executable_count = sum(step.skill_name is not None for step in self.steps)
         if executable_count < 3:
             raise ValueError("activity plan requires at least three executable steps")
@@ -133,6 +160,7 @@ class ActivityPlan(_ActivityModel):
         step_ids = [step.step_id for step in self.steps]
         if len(step_ids) != len(set(step_ids)):
             raise ValueError("stepId values must be unique")
+        _validate_social_opportunity_layout(self.steps)
         executable_count = sum(step.skill_name is not None for step in self.steps)
         if executable_count < 3:
             raise ValueError("activity plan requires at least three executable steps")
@@ -310,6 +338,7 @@ def record_step_terminal(
     *,
     succeeded: bool,
     retryable: bool = False,
+    corrected_decision_allowed: bool = False,
 ) -> ActivityPlan:
     current = plan.current_step()
     if current.step_id != step_id or current.skill_name is None:
@@ -318,7 +347,7 @@ def record_step_terminal(
     if succeeded:
         completed = current.model_copy(update={"status": "succeeded", "attempt_count": attempts})
         return _advance_after_terminal(plan, completed)
-    if retryable and attempts < current.max_attempts:
+    if (retryable or corrected_decision_allowed) and attempts < current.max_attempts:
         pending = current.model_copy(update={"status": "pending", "attempt_count": attempts})
         return plan.model_copy(update={"steps": _replace_step(plan, pending)})
     skipped = current.model_copy(update={"status": "skipped", "attempt_count": attempts})

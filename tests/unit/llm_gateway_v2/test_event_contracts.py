@@ -370,6 +370,54 @@ def test_skill_argument_hint_uses_object_argument_fields() -> None:
         SkillArgumentHint.model_validate(invalid)
 
 
+def test_skill_argument_hint_preserves_explicit_integer_range() -> None:
+    payload = argument_hint("dance_auto_schedule", "v1")
+    payload["allowedArgs"] = [
+        {
+            "path": "score",
+            "type": "integer",
+            "status": "allowed",
+            "source": "contract",
+            "statePath": None,
+            "reason": None,
+            "nextStep": None,
+            "minimum": 1,
+            "maximum": 50,
+        }
+    ]
+    payload["missingArgs"] = [{"path": "score"}]
+
+    hint = SkillArgumentHint.model_validate(payload)
+
+    assert hint.allowed_args[0].minimum == 1
+    assert hint.allowed_args[0].maximum == 50
+    serialized = hint.model_dump(mode="json", by_alias=True)
+    assert serialized["allowedArgs"] == payload["allowedArgs"]
+    assert "minimum" not in serialized["missingArgs"][0]
+    assert "maximum" not in serialized["missingArgs"][0]
+
+
+@pytest.mark.parametrize(
+    "range_fields",
+    [
+        {"minimum": 1},
+        {"maximum": 50},
+        {"minimum": 51, "maximum": 50},
+        {"minimum": True, "maximum": 50},
+        {"minimum": 1, "maximum": 50.0},
+    ],
+)
+def test_skill_argument_hint_rejects_incomplete_or_invalid_integer_range(
+    range_fields: dict[str, object],
+) -> None:
+    payload = argument_hint("dance_auto_schedule", "v1")
+    payload["allowedArgs"] = [{"path": "score", **range_fields}]
+    payload["missingArgs"] = [{"path": "score"}]
+
+    with pytest.raises(ValidationError):
+        SkillArgumentHint.model_validate(payload)
+
+
 @pytest.mark.parametrize("field", ["allowedArgs", "missingArgs"])
 def test_skill_argument_hint_rejects_duplicate_paths(field: str) -> None:
     payload = argument_hint()

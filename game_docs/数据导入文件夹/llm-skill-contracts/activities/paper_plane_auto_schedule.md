@@ -21,8 +21,8 @@ last_reviewed: 2026-06-28
   "skillName": "paper_plane_auto_schedule",
   "schemaVersion": "v1",
   "arguments": {
-    "planeName": "纸飞机A",
-    "useTimeMs": 12000,
+    "planeName": "初级",
+    "useTimeMs": 150000,
     "isComplete": true
   }
 }
@@ -32,8 +32,8 @@ last_reviewed: 2026-06-28
 
 | 字段 | 类型 | 必填 | 规则 |
 |---|---|---|---|
-| `planeName` | `string` | 是 | 纸飞机名称，精确匹配。 |
-| `useTimeMs` | `integer` | 是 | 使用时长，必须落在 Gateway 允许范围内。超范围直接 reject，不做 clamp。 |
+| `planeName` | `string` | 是 | 只能是 `初级`、`中级` 或 `高级`，精确匹配。 |
+| `useTimeMs` | `integer` | 是 | 毫秒。初级 `100000–200000`、中级 `90000–180000`、高级 `70000–130000`。超范围直接 reject，不做 clamp。 |
 | `isComplete` | `boolean` | 是 | 是否按完整流程执行。 |
 
 ## 执行语义
@@ -68,6 +68,7 @@ last_reviewed: 2026-06-28
 
 - 首批不开放 `paper_plane_synthesis`。
 - `planeName` 采用精确匹配，不支持别名。
+- `planeName` 三种等级可以随机选择；`useTimeMs` 必须使用毫秒，并落在对应等级的区间内。
 - 对外不暴露 `configId`、`itemId`、`shopId`、购买数量或等待表现细节。
 - 参数取值说明见 [../parameter-tables/paper_plane_auto_schedule.md](../parameter-tables/paper_plane_auto_schedule.md)。
 - 通用规则见 [../common-rules.md](../common-rules.md)。

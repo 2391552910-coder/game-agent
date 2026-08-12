@@ -208,6 +208,16 @@ class _ActivityRepository:
         self.operations.append("activity_chat")
         return True
 
+    async def record_observation(self, event) -> bool:
+        del event
+        self.operations.append("activity_observation")
+        return True
+
+    async def complete_passive_step(self, event) -> bool:
+        del event
+        self.operations.append("activity_passive")
+        return True
+
     async def close(self, event) -> bool:
         del event
         self.operations.append("activity_closed")
@@ -264,6 +274,16 @@ async def test_lease_events_persist_context_before_agent(event_type: str) -> Non
     assert planner.events == [event_type]
 
 
+async def test_observation_advances_passive_activity_before_next_decision() -> None:
+    operations: list[str] = []
+    dispatcher, _ = _dispatcher(operations, with_activity=True)
+
+    result = await dispatcher(_claimed("observation_updated"))
+
+    assert result == EventProcessResult("succeeded")
+    assert operations == ["activity_observation", "context", "agent"]
+
+
 async def test_skill_started_only_upserts_started_call() -> None:
     operations: list[str] = []
     dispatcher, _ = _dispatcher(operations)
@@ -303,7 +323,13 @@ async def test_skill_finished_advances_activity_before_next_decision() -> None:
     result = await dispatcher(_claimed("skill_finished", with_lease=True))
 
     assert result == EventProcessResult("succeeded")
-    assert operations == ["terminal", "activity_terminal", "context", "agent"]
+    assert operations == [
+        "terminal",
+        "activity_terminal",
+        "activity_passive",
+        "context",
+        "agent",
+    ]
 
 
 async def test_historical_skill_finished_never_reactivates_agent_cycle() -> None:

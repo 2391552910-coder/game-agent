@@ -7,6 +7,7 @@ import pytest
 
 from src.core.integration.llm_gateway_v2 import decision_service as decision_service_module
 from src.core.integration.llm_gateway_v2.activity_plan import (
+    ActivityPlan,
     ActivityPlanProposal,
     create_plaza_social_plan,
     record_step_terminal,
@@ -17,6 +18,12 @@ from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanSnapshot,
 )
 from src.core.integration.llm_gateway_v2.activity_planner import ActivityPlanCoordinator
+from src.core.integration.llm_gateway_v2.scene_catalog import (
+    SceneCatalog,
+    SceneCoordinates,
+    SceneTarget,
+    load_default_scene_catalog,
+)
 
 
 @dataclass
@@ -312,12 +319,349 @@ async def test_active_step_outside_current_lease_is_replanned_with_authorized_fi
     assert result.plan.current_step_id == "jump"
 
 
+@pytest.mark.asyncio
+async def test_ten_roles_use_scene_targets_and_stable_role_rotation() -> None:
+    scene_catalog = load_default_scene_catalog()
+
+    plans = []
+    wire_decisions: list[dict[str, Any]] = []
+    for index in range(10):
+        repository = _Repository(ActivityPlanSnapshot(None, (), ()))
+        coordinator = ActivityPlanCoordinator(
+            repository=repository,
+            generator=_Generator(_proposal()),
+            plan_id_factory=lambda index=index: f"plan-role-{index}",
+            scene_catalog=scene_catalog,
+            step_authorizer=lambda context, skill_name, schema_version: True,
+        )
+        context = _context(
+            skills=[
+                "dance_auto_schedule",
+                "hot_air_balloon_auto_schedule",
+                "coffee_auto_schedule",
+                "darts_auto_schedule",
+                "shooting_auto_schedule",
+                "paper_plane_auto_schedule",
+                "draw_lots_auto_schedule",
+                "wish_board_auto_schedule",
+                "helicopter_auto_schedule",
+                "elevator_auto_schedule",
+                "move_to",
+            ],
+            lobby=False,
+            account_id=f"role-{index}",
+            scene_id=7,
+        )
+        result = await coordinator.prepare(object(), context)
+        assert result is not None
+        plans.append(result.plan)
+        action = decision_service_module._planned_activity_action(
+            context,
+            result,
+            scene_catalog=scene_catalog,
+        )
+        assert action is not None
+        wire_decisions.append(
+            decision_service_module.freeze_gateway_v2_decision(
+                f"decision-role-{index}",
+                f"trace-role-{index}",
+                context,
+                action,
+            ).body_json
+        )
+
+    executable_orders = [
+        tuple(step.skill_name for step in plan.steps if step.skill_name is not None)
+        for plan in plans
+    ]
+    move_steps = [
+        step
+        for plan in plans
+        for step in plan.steps
+        if step.skill_name == "move_to"
+    ]
+
+    assert len(set(executable_orders)) == 10
+    assert all(step.scene_target_id is not None for step in move_steps)
+    assert len({step.scene_target_id for step in move_steps}) == 10
+    assert len({body["skillName"] for body in wire_decisions}) == 10
+
+
+@pytest.mark.asyncio
+async def test_new_non_lobby_plan_avoids_most_recent_successful_skill() -> None:
+    recent_skill = "hot_air_balloon_auto_schedule"
+    recent_actions = (
+        {
+            "action": "call_skill",
+            "request_body_json": {
+                "action": "call_skill",
+                "skillName": recent_skill,
+            },
+            "skill_name": recent_skill,
+            "skill_status": "succeeded",
+        },
+    )
+    repository = _Repository(ActivityPlanSnapshot(None, recent_actions, (), version=1))
+    coordinator = ActivityPlanCoordinator(
+        repository=repository,
+        generator=_Generator(_non_lobby_proposal()),
+        plan_id_factory=lambda: "plan-after-balloon",
+        scene_catalog=load_default_scene_catalog(),
+        step_authorizer=lambda context, skill_name, schema_version: True,
+    )
+
+    result = await coordinator.prepare(
+        object(),
+        _context(
+            skills=[
+                "dance_auto_schedule",
+                "hot_air_balloon_auto_schedule",
+                "coffee_auto_schedule",
+            ],
+            lobby=False,
+            account_id="role-0",
+            scene_id=7,
+        ),
+    )
+
+    assert result is not None
+    executable = [step.skill_name for step in result.plan.steps if step.skill_name is not None]
+    assert executable[0] != recent_skill
+    assert set(executable) == {
+        "dance_auto_schedule",
+        "hot_air_balloon_auto_schedule",
+        "coffee_auto_schedule",
+    }
+
+
+@pytest.mark.asyncio
+async def test_lobby_arrival_remains_first_after_recent_scene_tornado() -> None:
+    recent_actions = (
+        {
+            "action": "call_skill",
+            "request_body_json": {
+                "action": "call_skill",
+                "skillName": "scene_tornado",
+            },
+            "skill_name": "scene_tornado",
+            "skill_status": "succeeded",
+        },
+    )
+    repository = _Repository(ActivityPlanSnapshot(None, recent_actions, ()))
+    coordinator = ActivityPlanCoordinator(
+        repository=repository,
+        generator=_Generator(_proposal()),
+        plan_id_factory=lambda: "plan-lobby-arrival",
+        scene_catalog=load_default_scene_catalog(),
+        step_authorizer=lambda context, skill_name, schema_version: True,
+    )
+
+    result = await coordinator.prepare(
+        object(),
+        _context(
+            skills=[
+                "scene_tornado",
+                "dance_auto_schedule",
+                "hot_air_balloon_auto_schedule",
+                "coffee_auto_schedule",
+            ],
+            lobby=True,
+            account_id="role-0",
+            scene_id=1,
+        ),
+    )
+
+    assert result is not None
+    assert result.plan.current_step().skill_name == "scene_tornado"
+
+
+@pytest.mark.asyncio
+async def test_scene_change_replans_targetless_move_step_with_current_scene_target() -> None:
+    existing = ActivityPlan.model_validate(
+        {
+            "planId": "plan-created-in-lobby",
+            "goalId": "plaza_social",
+            "goalSummary": "Continue the plan after entering the plaza",
+            "phase": "movement",
+            "status": "active",
+            "version": 1,
+            "currentStepId": "wander-after-arrival",
+            "steps": [
+                {
+                    "stepId": "wander-after-arrival",
+                    "phase": "movement",
+                    "skillName": "move_to",
+                    "schemaVersion": "v1",
+                    "intent": "Walk to a plaza point",
+                },
+                {
+                    "stepId": "dance",
+                    "phase": "activity",
+                    "skillName": "dance_auto_schedule",
+                    "schemaVersion": "v1",
+                    "intent": "dance",
+                },
+                {
+                    "stepId": "coffee",
+                    "phase": "activity",
+                    "skillName": "coffee_auto_schedule",
+                    "schemaVersion": "v1",
+                    "intent": "have coffee",
+                },
+            ],
+        }
+    )
+    repository = _Repository(ActivityPlanSnapshot(existing, (), (), version=1))
+    generator = _Generator(_non_lobby_proposal())
+    scene_catalog = SceneCatalog(
+        [
+            SceneTarget(
+                target_id="scene:7:activity:wish_board:458",
+                scene_id=7,
+                scene_name="CJ_guangchang",
+                kind="activity",
+                activity="wish_board",
+                point_key="458",
+                coordinates=SceneCoordinates(100.519966, 1.15435553, -25.9959488),
+                source_path="wish-board-458",
+            )
+        ]
+    )
+    coordinator = ActivityPlanCoordinator(
+        repository=repository,
+        generator=generator,
+        plan_id_factory=lambda: "plan-replanned-in-plaza",
+        scene_catalog=scene_catalog,
+        step_authorizer=lambda context, skill_name, schema_version: True,
+    )
+
+    result = await coordinator.prepare(
+        object(),
+        _context(
+            skills=[
+                "move_to",
+                "dance_auto_schedule",
+                "hot_air_balloon_auto_schedule",
+                "coffee_auto_schedule",
+            ],
+            lobby=False,
+            account_id="role-7",
+            scene_id=7,
+        ),
+    )
+
+    assert result is not None
+    assert generator.calls == 1
+    assert result.plan.plan_id == "plan-replanned-in-plaza"
+    assert result.plan.version == 2
+    move_steps = [step for step in result.plan.steps if step.skill_name == "move_to"]
+    assert move_steps
+    assert {step.scene_target_id for step in move_steps} == {
+        "scene:7:activity:wish_board:458"
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generator_result", [_non_lobby_proposal(), TimeoutError()])
+async def test_scene_without_trusted_targets_omits_move_to_without_deferring_plan(
+    generator_result: ActivityPlanProposal | Exception,
+) -> None:
+    repository = _Repository(ActivityPlanSnapshot(None, (), ()))
+    scene_catalog = SceneCatalog(
+        [
+            SceneTarget(
+                target_id="scene:7:activity:wish_board:458",
+                scene_id=7,
+                scene_name="CJ_guangchang",
+                kind="activity",
+                activity="wish_board",
+                point_key="458",
+                coordinates=SceneCoordinates(100.519966, 1.15435553, -25.9959488),
+                source_path="wish-board-458",
+            )
+        ]
+    )
+    coordinator = ActivityPlanCoordinator(
+        repository=repository,
+        generator=_Generator(generator_result),
+        plan_id_factory=lambda: "plan-scene-without-targets",
+        scene_catalog=scene_catalog,
+        step_authorizer=lambda context, skill_name, schema_version: True,
+    )
+
+    result = await coordinator.prepare(
+        object(),
+        _context(
+            skills=[
+                "dance_auto_schedule",
+                "hot_air_balloon_auto_schedule",
+                "coffee_auto_schedule",
+                "darts_auto_schedule",
+                "move_to",
+            ],
+            lobby=False,
+            account_id="role-42",
+            scene_id=42,
+        ),
+    )
+
+    assert result is not None
+    executable = [step.skill_name for step in result.plan.steps if step.skill_name is not None]
+    assert len(executable) >= 3
+    assert "move_to" not in executable
+
+
+@pytest.mark.asyncio
+async def test_non_lobby_plan_does_not_repeat_scene_tornado() -> None:
+    repository = _Repository(ActivityPlanSnapshot(None, (), ()))
+    scene_catalog = SceneCatalog(
+        [
+            SceneTarget(
+                target_id="scene:7:activity:wish_board:458",
+                scene_id=7,
+                scene_name="CJ_guangchang",
+                kind="activity",
+                activity="wish_board",
+                point_key="458",
+                coordinates=SceneCoordinates(100.519966, 1.15435553, -25.9959488),
+                source_path="wish-board-458",
+            )
+        ]
+    )
+    coordinator = ActivityPlanCoordinator(
+        repository=repository,
+        generator=_Generator(_proposal()),
+        plan_id_factory=lambda: "plan-plaza",
+        scene_catalog=scene_catalog,
+        step_authorizer=lambda context, skill_name, schema_version: True,
+    )
+
+    result = await coordinator.prepare(
+        object(),
+        _context(
+            skills=[
+                "scene_tornado",
+                "dance_auto_schedule",
+                "hot_air_balloon_auto_schedule",
+                "coffee_auto_schedule",
+            ],
+            lobby=False,
+            scene_id=7,
+        ),
+    )
+
+    assert result is not None
+    assert all(step.skill_name != "scene_tornado" for step in result.plan.steps)
+
+
 def _context(
     *,
     skills: list[str] | None = None,
     lobby: bool = True,
     lease_kind: str = "observation",
     allowed_skill_names: list[str] | None = None,
+    account_id: str = "account-1",
+    scene_id: int | None = None,
 ):
     from src.core.integration.llm_gateway_v2.contracts import parse_gateway_v2_event
     from src.core.integration.llm_gateway_v2.decision_service import build_gateway_v2_agent_context
@@ -352,8 +696,8 @@ def _context(
                 },
                 "decisionContext": {
                     "session": {
-                        "AccountId": "account-1",
-                        "SceneId": 1 if lobby else 2,
+                        "AccountId": account_id,
+                        "SceneId": (1 if lobby else 2) if scene_id is None else scene_id,
                         "SceneName": "Lobby" if lobby else "Plaza",
                         "NavigationAvailable": not lobby,
                     },
@@ -372,8 +716,66 @@ def _context(
                             "schemaVersion": "v1",
                             "argumentStatus": "ready",
                             "suggestedArgs": {},
-                            "allowedArgs": [],
-                            "missingArgs": [],
+                            "allowedArgs": (
+                                [
+                                    {"path": "target.x"},
+                                    {"path": "target.y"},
+                                    {"path": "target.z"},
+                                ]
+                                if skill == "move_to"
+                                else [
+                                    {"path": "planeName"},
+                                    {"path": "useTimeMs"},
+                                    {"path": "isComplete"},
+                                ]
+                                if skill == "paper_plane_auto_schedule"
+                                else [
+                                    {"path": "score"},
+                                    {"path": "darts"},
+                                    {"path": "allowPurchaseWhenInsufficient"},
+                                ]
+                                if skill == "darts_auto_schedule"
+                                else [
+                                    {"path": "distance"},
+                                    {"path": "weapon"},
+                                    {"path": "posture"},
+                                    {"path": "score"},
+                                ]
+                                if skill == "shooting_auto_schedule"
+                                else [{"path": "score", "minimum": 1, "maximum": 50}]
+                                if skill == "dance_auto_schedule"
+                                else []
+                            ),
+                            "missingArgs": (
+                                [
+                                    {"path": "target.x"},
+                                    {"path": "target.y"},
+                                    {"path": "target.z"},
+                                ]
+                                if skill == "move_to"
+                                else [
+                                    {"path": "planeName"},
+                                    {"path": "useTimeMs"},
+                                    {"path": "isComplete"},
+                                ]
+                                if skill == "paper_plane_auto_schedule"
+                                else [
+                                    {"path": "score"},
+                                    {"path": "darts"},
+                                    {"path": "allowPurchaseWhenInsufficient"},
+                                ]
+                                if skill == "darts_auto_schedule"
+                                else [
+                                    {"path": "distance"},
+                                    {"path": "weapon"},
+                                    {"path": "posture"},
+                                    {"path": "score"},
+                                ]
+                                if skill == "shooting_auto_schedule"
+                                else [{"path": "score"}]
+                                if skill == "dance_auto_schedule"
+                                else []
+                            ),
                             "warnings": [],
                             "nextSteps": [],
                         }

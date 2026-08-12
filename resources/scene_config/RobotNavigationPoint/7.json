@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "sceneId": 7,
+  "sceneName": "CJ_guangchang",
+  "sourceNavmesh": "RecastDot/CJ_guangchang",
+  "sourceNavmeshSha256": "611204766f922c553db682909fea865a6c5107ae0f8ca0e7adc2751d126b2c78",
+  "validation": {
+    "method": "DotRecast FindNearestPoly and complete FindPath from scene anchor",
+    "anchor": {"x": 65.551, "y": -2.62, "z": 185.0},
+    "queryExtents": {"x": 3.0, "y": 5.0, "z": 3.0}
+  },
+  "points": [
+    {"pointKey": "wander-001", "sourcePath": "recast:CJ_guangchang#wander-001", "target": {"x": 50.551, "y": -0.8, "z": 170.0}},
+    {"pointKey": "wander-002", "sourcePath": "recast:CJ_guangchang#wander-002", "target": {"x": 50.551, "y": -1.398, "z": 180.0}},
+    {"pointKey": "wander-003", "sourcePath": "recast:CJ_guangchang#wander-003", "target": {"x": 50.551, "y": -0.254, "z": 190.0}},
+    {"pointKey": "wander-004", "sourcePath": "recast:CJ_guangchang#wander-004", "target": {"x": 50.551, "y": 0.711, "z": 200.0}},
+    {"pointKey": "wander-005", "sourcePath": "recast:CJ_guangchang#wander-005", "target": {"x": 55.551, "y": -2.307, "z": 175.0}},
+    {"pointKey": "wander-006", "sourcePath": "recast:CJ_guangchang#wander-006", "target": {"x": 55.551, "y": -1.653, "z": 185.0}},
+    {"pointKey": "wander-007", "sourcePath": "recast:CJ_guangchang#wander-007", "target": {"x": 55.551, "y": 0.071, "z": 195.0}},
+    {"pointKey": "wander-008", "sourcePath": "recast:CJ_guangchang#wander-008", "target": {"x": 60.551, "y": -3.073, "z": 170.0}},
+    {"pointKey": "wander-009", "sourcePath": "recast:CJ_guangchang#wander-009", "target": {"x": 60.551, "y": -2.696, "z": 180.0}},
+    {"pointKey": "wander-010", "sourcePath": "recast:CJ_guangchang#wander-010", "target": {"x": 60.551, "y": -1.916, "z": 190.0}},
+    {"pointKey": "wander-011", "sourcePath": "recast:CJ_guangchang#wander-011", "target": {"x": 60.551, "y": 0.694, "z": 200.0}},
+    {"pointKey": "wander-012", "sourcePath": "recast:CJ_guangchang#wander-012", "target": {"x": 65.551, "y": -2.788, "z": 175.0}},
+    {"pointKey": "wander-013", "sourcePath": "recast:CJ_guangchang#wander-013", "target": {"x": 65.551, "y": -2.62, "z": 185.0}},
+    {"pointKey": "wander-014", "sourcePath": "recast:CJ_guangchang#wander-014", "target": {"x": 65.551, "y": -0.887, "z": 195.0}},
+    {"pointKey": "wander-015", "sourcePath": "recast:CJ_guangchang#wander-015", "target": {"x": 70.551, "y": -2.11, "z": 170.0}},
+    {"pointKey": "wander-016", "sourcePath": "recast:CJ_guangchang#wander-016", "target": {"x": 70.551, "y": -1.761, "z": 180.0}},
+    {"pointKey": "wander-017", "sourcePath": "recast:CJ_guangchang#wander-017", "target": {"x": 70.551, "y": -1.618, "z": 190.0}},
+    {"pointKey": "wander-018", "sourcePath": "recast:CJ_guangchang#wander-018", "target": {"x": 70.551, "y": 0.783, "z": 200.0}},
+    {"pointKey": "wander-019", "sourcePath": "recast:CJ_guangchang#wander-019", "target": {"x": 75.551, "y": -1.591, "z": 175.0}},
+    {"pointKey": "wander-020", "sourcePath": "recast:CJ_guangchang#wander-020", "target": {"x": 75.551, "y": -1.158, "z": 185.0}}
+  ]
+}

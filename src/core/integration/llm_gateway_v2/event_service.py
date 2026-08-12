@@ -98,6 +98,8 @@ class _HostedChatService(Protocol):
 
 
 class _ActivityPlanRepository(Protocol):
+    async def record_observation(self, event: ClaimedGatewayEvent) -> bool: ...
+
     async def record_skill_started(self, event: ClaimedGatewayEvent) -> bool: ...
 
     async def record_skill_finished(self, event: ClaimedGatewayEvent) -> bool: ...
@@ -105,6 +107,8 @@ class _ActivityPlanRepository(Protocol):
     async def record_decision_rejected(self, event: ClaimedGatewayEvent) -> bool: ...
 
     async def record_chat_opportunity(self, event: ClaimedGatewayEvent) -> bool: ...
+
+    async def complete_passive_step(self, event: ClaimedGatewayEvent) -> bool: ...
 
     async def close(self, event: ClaimedGatewayEvent) -> bool: ...
 
@@ -144,7 +148,11 @@ class GatewayV2EventDispatcher:
                     return EventProcessResult("manual", error_stage="chat", error_category="chat_not_configured")
                 await self.hosted_chat_service.handle_send_result(claimed.gateway_id, event)
                 return EventProcessResult("succeeded")
-            if isinstance(event, (SessionStartedEvent, ObservationUpdatedEvent)):
+            if isinstance(event, SessionStartedEvent):
+                return await self._process_lease_event(claimed)
+            if isinstance(event, ObservationUpdatedEvent):
+                if self.activity_repository is not None and not claimed.historical_recovery:
+                    await self.activity_repository.record_observation(claimed)
                 return await self._process_lease_event(claimed)
             if isinstance(event, SkillStartedEvent):
                 mutation = await self.terminal_repository.record_skill_started(claimed)
@@ -165,6 +173,7 @@ class GatewayV2EventDispatcher:
                     and not claimed.historical_recovery
                 ):
                     await self.activity_repository.record_skill_finished(claimed)
+                    await self.activity_repository.complete_passive_step(claimed)
                 if (
                     outcome.outcome != "succeeded"
                     or event.payload.lease is None

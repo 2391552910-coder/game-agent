@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -48,7 +50,7 @@ def _client(
     )
 
 
-async def test_client_sends_exact_game_side_request_without_user_prompt() -> None:
+async def test_client_sends_full_conversation_and_latest_message_without_auth() -> None:
     requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -65,7 +67,10 @@ async def test_client_sends_exact_game_side_request_without_user_prompt() -> Non
             },
         )
 
-    result = await _client(httpx.MockTransport(handler)).generate(_conversation())
+    result = await _client(httpx.MockTransport(handler)).generate(
+        _conversation(),
+        latest_message="你最近参加了什么活动？",
+    )
 
     assert result.content == "我已经上线了，等你一起走。"
     assert len(requests) == 1
@@ -73,13 +78,49 @@ async def test_client_sends_exact_game_side_request_without_user_prompt() -> Non
     assert requests[0].headers["content-type"] == "application/json"
     assert requests[0].read().decode("utf-8")
     assert requests[0].content.decode("utf-8") == (
-        '{"speakerRoleId":10001,"targetRoleId":10002,'
-        '"brainUsername":"conv-10001","historyRounds":'
-        '[{"askRoleId":10001,"askContent":"你今天上线吗？",'
+        '{"conversation":{"conversationId":"conv-10001-10002-1",'
+        '"pairKey":"10001:10002","speakerRoleId":10001,'
+        '"targetRoleId":10002,"brainUsername":"conv-10001",'
+        '"historyRounds":[{"askRoleId":10001,"askContent":"你今天上线吗？",'
         '"answerRoleId":10002,"answerContent":"已经上线了。"}],'
+        '"completedRounds":1,"maxRounds":6,"expiresAtMs":1060000},'
+        '"latestMessage":"你最近参加了什么活动？",'
         '"forceRefreshSummary":false}'
     )
     assert b"userPrompt" not in requests[0].content
+    assert {
+        "authorization",
+        "x-api-key",
+        "x-appid",
+        "x-signature",
+        "x-timestampms",
+        "x-requestid",
+    }.isdisjoint(requests[0].headers)
+
+
+async def test_client_sends_null_latest_message_for_opening_request() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "speakerRoleId": 10001,
+                "targetRoleId": 10002,
+                "pairKey": "10001:10002",
+                "content": "你好，今天准备去哪里？",
+                "summaryVersion": 0,
+                "summaryUpdatedAt": None,
+            },
+        )
+
+    await _client(httpx.MockTransport(handler)).generate(
+        _conversation(),
+        latest_message=None,
+    )
+
+    assert json.loads(requests[0].read())["latestMessage"] is None
 
 
 async def test_client_caps_timeout_to_conversation_deadline_minus_safety_margin() -> None:
@@ -132,6 +173,7 @@ async def test_client_rejects_request_when_deadline_has_no_safety_window() -> No
         ({"pairKey": "10001:99999"}, "response_identity_mismatch"),
         ({"content": "   "}, "response_schema_invalid"),
         ({"content": "长" * 81}, "response_schema_invalid"),
+        ({"summaryVersion": -1}, "response_schema_invalid"),
     ],
 )
 async def test_client_rejects_invalid_auto_chat_response(
@@ -156,7 +198,17 @@ async def test_client_rejects_invalid_auto_chat_response(
     assert raised.value.category == category
 
 
-@pytest.mark.parametrize("status_code", [500, 502, 503])
+async def test_client_rejects_non_json_response_as_permanent_contract_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not-json")
+
+    with pytest.raises(AutoChatPermanentError) as raised:
+        await _client(httpx.MockTransport(handler)).generate(_conversation())
+
+    assert raised.value.category == "response_not_json"
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 502, 503])
 async def test_client_classifies_server_failures_as_retryable(status_code: int) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code, json={"detail": "unavailable"})
@@ -187,6 +239,16 @@ async def test_client_classifies_timeout_without_leaking_external_error() -> Non
 
     assert raised.value.category == "timeout"
     assert str(raised.value) == "auto chat request failed"
+
+
+async def test_client_classifies_network_error_as_retryable() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection failed", request=request)
+
+    with pytest.raises(AutoChatRetryableError) as raised:
+        await _client(httpx.MockTransport(handler)).generate(_conversation())
+
+    assert raised.value.category == "request_failed"
 
 
 def test_conversation_context_rejects_more_than_five_history_rounds() -> None:

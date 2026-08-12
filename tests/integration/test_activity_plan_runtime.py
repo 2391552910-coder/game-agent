@@ -106,19 +106,39 @@ def _available_skills() -> list[dict[str, object]]:
 
 
 def _skill_hints() -> list[dict[str, object]]:
-    return [
-        {
+    hints: list[dict[str, object]] = []
+    for skill in SKILLS:
+        allowed_args: list[dict[str, object]] = []
+        if skill == "dance_auto_schedule":
+            allowed_args = [{"path": "score", "minimum": 1, "maximum": 50}]
+        elif skill == "darts_auto_schedule":
+            allowed_args = [
+                {"path": "score"},
+                {"path": "darts"},
+                {"path": "allowPurchaseWhenInsufficient"},
+            ]
+        elif skill == "paper_plane_auto_schedule":
+            allowed_args = [
+                {"path": "planeName"},
+                {"path": "useTimeMs"},
+                {"path": "isComplete"},
+            ]
+        hints.append(
+            {
             "skillName": skill,
             "schemaVersion": "v1",
             "argumentStatus": "ready",
             "suggestedArgs": {},
-            "allowedArgs": [],
-            "missingArgs": [],
+            "allowedArgs": allowed_args,
+            "missingArgs": [
+                {"path": str(field["path"])}
+                for field in allowed_args
+            ],
             "warnings": [],
             "nextSteps": [],
-        }
-        for skill in SKILLS
-    ]
+            }
+        )
+    return hints
 
 
 def _lease(sequence: int, lease_id: str) -> dict[str, object]:
@@ -161,6 +181,10 @@ def _event(
     skill_name: str | None = None,
     skill_call_id: str | None = None,
     lease: bool = True,
+    terminal_status: str = "success",
+    terminal_reason: str = "completed",
+    terminal_failure_category: str | None = None,
+    terminal_retryable: bool = False,
 ) -> object:
     occurred_at_ms = 1_800_000_000_000 + sequence
     lease_id = f"lease-{sequence}"
@@ -190,10 +214,10 @@ def _event(
             "decisionId": decision_id,
             "skillName": skill_name,
             "skillCallId": skill_call_id,
-            "status": "success",
-            "reason": "completed",
-            "failureCategory": None,
-            "retryable": False,
+            "status": terminal_status,
+            "reason": terminal_reason,
+            "failureCategory": terminal_failure_category,
+            "retryable": terminal_retryable,
             "startedAtMs": occurred_at_ms - 1,
             "finishedAtMs": occurred_at_ms,
         }
@@ -201,7 +225,13 @@ def _event(
             payload["lease"] = _lease(sequence, lease_id)
             payload["decisionContext"] = _decision_context(
                 lobby=False,
-                terminal={"status": "success", "skillName": skill_name, "skillCallId": skill_call_id},
+                terminal={
+                    "status": terminal_status,
+                    "reason": terminal_reason,
+                    "retryable": terminal_retryable,
+                    "skillName": skill_name,
+                    "skillCallId": skill_call_id,
+                },
             )
     elif event_type == "nearby_friend_chat_requested":
         payload = {
@@ -503,24 +533,23 @@ async def test_activity_plan_survives_runtime_restart_and_advances_through_socia
         ),
     )
     decisions = await _decisions(session_factory)
-    assert decisions[-1]["activity_step_id"] == "social-opportunity"
-    assert decisions[-1]["action"] == "wait"
+    assert decisions[-1]["activity_step_id"] == "coffee"
+    assert decisions[-1]["action"] == "call_skill"
 
     await _dispatch(runtime, _event("nearby_friend_chat_requested", 8, lease=False))
     await _dispatch(runtime, _event("chat_send_result", 9, lease=False))
-    await _dispatch(runtime, _event("observation_updated", 10))
     decisions = await _decisions(session_factory)
 
     assert runtime.chat.calls == ["nearby", "result"]
     assert generator.calls == 2
-    assert len(decisions) == 5
+    assert len(decisions) == 4
     assert [row["activity_step_id"] for row in decisions] == [
         "arrival",
         "dance",
         "balloon",
-        "social-opportunity",
         "coffee",
     ]
+    assert all(row["action"] != "wait" for row in decisions)
     assert sum(row["request_body_json"].get("skillName") == "scene_tornado" for row in decisions) == 1
     assert all(not any(key.startswith("activity") for key in row["request_body_json"]) for row in decisions)
     async with session_factory() as session:
@@ -538,3 +567,122 @@ async def test_activity_plan_survives_runtime_restart_and_advances_through_socia
         "activity_phase": "activity",
         "activity_current_step_id": "coffee",
     }
+
+
+async def test_non_retryable_parameter_failure_uses_new_lease_for_corrected_decision(
+    session_factory,
+) -> None:
+    generator = _PlanGenerator()
+    decision_number = 0
+
+    def next_decision_id() -> str:
+        nonlocal decision_number
+        decision_number += 1
+        return f"correction-decision-{decision_number}"
+
+    runtime = _runtime(session_factory, generator, next_decision_id)
+    await _dispatch(runtime, _event("session_started", 1))
+    decisions = await _decisions(session_factory)
+    arrival = decisions[-1]
+    await _dispatch(
+        runtime,
+        _event(
+            "skill_started",
+            2,
+            decision_id=str(arrival["decision_id"]),
+            skill_name="scene_tornado",
+            skill_call_id="correction-arrival-call",
+            lease=False,
+        ),
+    )
+    await _dispatch(
+        runtime,
+        _event(
+            "skill_finished",
+            3,
+            decision_id=str(arrival["decision_id"]),
+            skill_name="scene_tornado",
+            skill_call_id="correction-arrival-call",
+        ),
+    )
+    decisions = await _decisions(session_factory)
+    first_dance = decisions[-1]
+    assert first_dance["activity_step_id"] == "dance"
+    assert first_dance["request_body_json"]["skillName"] == "dance_auto_schedule"
+
+    await _dispatch(
+        runtime,
+        _event(
+            "skill_started",
+            4,
+            decision_id=str(first_dance["decision_id"]),
+            skill_name="dance_auto_schedule",
+            skill_call_id="correction-dance-call-1",
+            lease=False,
+        ),
+    )
+    await _dispatch(
+        runtime,
+        _event(
+            "skill_finished",
+            5,
+            decision_id=str(first_dance["decision_id"]),
+            skill_name="dance_auto_schedule",
+            skill_call_id="correction-dance-call-1",
+            terminal_status="failed",
+            terminal_reason="dance_score_invalid",
+            terminal_failure_category="business_rejected",
+            terminal_retryable=False,
+        ),
+    )
+    decisions = await _decisions(session_factory)
+    corrected_dance = decisions[-1]
+    assert corrected_dance["decision_id"] != first_dance["decision_id"]
+    assert corrected_dance["activity_step_id"] == "dance"
+    assert corrected_dance["request_body_json"]["skillName"] == "dance_auto_schedule"
+    assert 1 <= corrected_dance["request_body_json"]["arguments"]["score"] <= 50
+
+    await _dispatch(
+        runtime,
+        _event(
+            "skill_started",
+            6,
+            decision_id=str(corrected_dance["decision_id"]),
+            skill_name="dance_auto_schedule",
+            skill_call_id="correction-dance-call-2",
+            lease=False,
+        ),
+    )
+    await _dispatch(
+        runtime,
+        _event(
+            "skill_finished",
+            7,
+            decision_id=str(corrected_dance["decision_id"]),
+            skill_name="dance_auto_schedule",
+            skill_call_id="correction-dance-call-2",
+        ),
+    )
+
+    async with session_factory() as session:
+        cycle = (
+            await session.execute(
+                sa.text(
+                    "SELECT activity_current_step_id, activity_phase, activity_plan "
+                    "FROM llm_gateway_control_cycles"
+                )
+            )
+        ).mappings().one()
+        terminals = (
+            await session.execute(
+                sa.text(
+                    "SELECT status, reason, retryable FROM llm_gateway_skill_calls "
+                    "WHERE skill_name='dance_auto_schedule' ORDER BY created_at"
+                )
+            )
+        ).mappings().all()
+    assert cycle["activity_current_step_id"] == "balloon"
+    assert cycle["activity_phase"] == "transport"
+    assert [row["status"] for row in terminals] == ["failed", "succeeded"]
+    assert terminals[0]["reason"] == "dance_score_invalid"
+    assert terminals[0]["retryable"] is False

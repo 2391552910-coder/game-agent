@@ -705,6 +705,7 @@ async def test_planned_decision_reuses_exact_persisted_body_for_source_event(ses
     assert first.body_hash == second.body_hash
     assert first.request_body_json["controlGeneration"] == source.control_generation
     assert first.request_body_json["action"] == "wait"
+    assert first.request_body_json["waitMs"] == 1_500
 
 
 async def test_plan_transaction_rejects_changed_lease_context_without_writing(session_factory) -> None:

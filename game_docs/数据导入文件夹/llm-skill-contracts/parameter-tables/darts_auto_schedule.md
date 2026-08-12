@@ -17,9 +17,7 @@ last_reviewed: 2026-06-28
   "skillName": "darts_auto_schedule",
   "schemaVersion": "v1",
   "arguments": {
-    "score": 120,
-    "dartPos": 2,
-    "allowSwitchWhenOccupied": true,
+    "score": 25,
     "darts": [
       {
         "dartItem": "general",
@@ -43,13 +41,11 @@ last_reviewed: 2026-06-28
 
 | 字段 | 类型 | 必填 | 规则 |
 |---|---|---|---|
-| `score` | `integer` | 是 | 大于等于 `0`，且不能超过 Gateway 当前飞镖分数上限。 |
-| `dartPos` | `integer` | 否 | 正整数。具体可用镖盘由当前场景决定；不传表示 Gateway 自动选台。 |
-| `allowSwitchWhenOccupied` | `boolean` | 否 | `true` 表示指定镖盘被占用时允许 Gateway 自动换盘。 |
+| `score` | `integer` | 是 | 固定为 `1..50`。 |
 | `darts` | `array` | 是 | 飞镖方案数组。 |
 | `darts[].dartItem` | `string` | 是 | 固定枚举，见下表。 |
 | `darts[].count` | `integer` | 是 | `0..9`。 |
-| `allowPurchaseWhenInsufficient` | `boolean` | 否 | 飞镖数量不足时，是否允许 Gateway 自动补当前局缺口。默认 `false`。 |
+| `allowPurchaseWhenInsufficient` | `boolean` | 是 | 固定为 `false`，MyAgent 不触发 Gateway 补购。 |
 
 ## dartItem 枚举
 
@@ -72,7 +68,7 @@ last_reviewed: 2026-06-28
 
 ```json
 {
-  "score": 90,
+  "score": 25,
   "darts": [
     {
       "dartItem": "general",
@@ -94,8 +90,7 @@ last_reviewed: 2026-06-28
 
 ```json
 {
-  "dartPos": 2,
-  "score": 120,
+  "score": 40,
   "darts": [
     {
       "dartItem": "general",
@@ -116,6 +111,8 @@ last_reviewed: 2026-06-28
 ## 不合法示例
 
 - `darts` 总数不是 `9`
+- `score` 不在 `1..50`
+- `allowPurchaseWhenInsufficient` 不是 `false`
 - 同一个 `dartItem` 出现两次
 - 缺少某个固定 `dartItem`
 - 出现未定义的 `dartItem`
@@ -124,6 +121,5 @@ last_reviewed: 2026-06-28
 
 ## 语义补充
 
-- Gateway 只会补当前局缺口，不会额外囤货。
-- 补购和消费保护完全由 Gateway 决定。
+- MyAgent 固定关闭补购；库存不足时由 Gateway 返回业务失败，不自动消费。
 - 对外不开放内部道具配置 id。

@@ -24,10 +24,7 @@ last_reviewed: 2026-06-28
     "distance": "10m",
     "weapon": "pistol",
     "posture": "standing",
-    "gameMode": "practice",
-    "score": 86,
-    "tableNum": 3,
-    "allowSwitchWhenOccupied": true
+    "score": 60
   }
 }
 ```
@@ -39,17 +36,14 @@ last_reviewed: 2026-06-28
 | `distance` | `string` | 是 | 固定业务枚举，当前按客户端现有靶距枚举。 |
 | `weapon` | `string` | 是 | 固定业务枚举，当前按客户端现有枪型枚举。 |
 | `posture` | `string` | 是 | 固定业务枚举，当前按客户端现有姿势枚举。 |
-| `gameMode` | `string` | 否 | `practice`、`match`、`points`。默认 `practice`。 |
-| `score` | `integer` | 是 | LLM 期望命中的分数。 |
-| `tableNum` | `integer` | 否 | 优先指定的台位编号；不传表示 Gateway 自动选台。 |
-| `allowSwitchWhenOccupied` | `boolean` | 否 | 指定台位被占用时，是否允许 Gateway 自动换台。默认 `true`。 |
+| `score` | `integer` | 是 | LLM 期望命中的分数，固定为 `30..80`。 |
 
 ## 执行语义
 
 - Gateway 负责自动到活动点、检查台位、开始射击、提交成绩。
 - 子弹不足时，Gateway 先判断免费次数与库存，再决定是否补购当前枪型所需子弹。
 - 补购只受 Gateway 自身消费保护控制，LLM 不传预算字段。
-- 指定 `tableNum` 时，Gateway 优先尝试该台位；若被占用且 `allowSwitchWhenOccupied=true`，继续换其它候选台位。
+- MyAgent 只选择参数表列出的合法 `distance + weapon + posture` 组合。
 
 ## 并发 / 打断规则
 

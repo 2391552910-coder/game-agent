@@ -17,10 +17,12 @@ from src.core.infrastructure.db import async_session_factory
 from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlan,
     ActivityPlanValidationError,
+    complete_social_opportunity,
     record_step_started,
     record_step_terminal,
     validate_activity_plan,
 )
+from src.core.integration.llm_gateway_v2.competitive_activity import is_correctable_skill_failure
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent
 
 
@@ -91,6 +93,7 @@ _SELECT_ACTIVITY_HISTORY = sa.text(
     SELECT
         d.decision_id,
         d.action,
+        d.request_body_json,
         d.activity_plan_id,
         d.activity_plan_version,
         d.activity_step_id,
@@ -130,8 +133,12 @@ _UPDATE_ACTIVITY_STATE = sa.text(
         updated_at = clock_timestamp()
     WHERE id = :cycle_id
       AND status IN ('pending', 'active')
-      AND (:last_event_sequence IS NULL OR activity_last_event_sequence IS NULL
-           OR activity_last_event_sequence < :last_event_sequence)
+       AND (:last_event_sequence IS NULL OR activity_last_event_sequence IS NULL
+           OR activity_last_event_sequence < :last_event_sequence
+           OR (
+               activity_last_event_sequence = :last_event_sequence
+               AND activity_last_event_id = :activity_last_event_id
+           ))
     RETURNING id
     """
 ).bindparams(
@@ -277,18 +284,43 @@ class ActivityPlanRepository:
         status = getattr(payload, "status", None)
         succeeded = status == "success"
         retryable = bool(getattr(payload, "retryable", False))
-        return await self._record_terminal_event(event, succeeded=succeeded, retryable=retryable)
+        corrected_decision_allowed = (
+            not succeeded
+            and getattr(payload, "lease", None) is not None
+            and is_correctable_skill_failure(
+                str(getattr(payload, "skill_name", "")),
+                str(getattr(payload, "reason", "")),
+            )
+        )
+        return await self._record_terminal_event(
+            event,
+            succeeded=succeeded,
+            retryable=retryable,
+            corrected_decision_allowed=corrected_decision_allowed,
+        )
 
     async def record_decision_rejected(self, event: ClaimedGatewayEvent) -> bool:
         payload = event.event.payload
+        decision_id = str(getattr(payload, "decision_id", ""))
+        if not decision_id:
+            return True
         return await self._record_terminal_event(
             event,
             succeeded=False,
             retryable=False,
-            decision_id=str(payload.decision_id),
+            decision_id=decision_id,
         )
 
+    async def record_observation(self, event: ClaimedGatewayEvent) -> bool:
+        return await self._complete_passive_step(event)
+
     async def record_chat_opportunity(self, event: ClaimedGatewayEvent) -> bool:
+        return await self._complete_passive_step(event)
+
+    async def complete_passive_step(self, event: ClaimedGatewayEvent) -> bool:
+        return await self._complete_passive_step(event)
+
+    async def _complete_passive_step(self, event: ClaimedGatewayEvent) -> bool:
         try:
             async with self._session_factory() as session, session.begin():
                 row = await self._lock_cycle(session, event)
@@ -299,8 +331,6 @@ class ActivityPlanRepository:
                 current = plan.current_step()
                 if current.phase != "social" or current.skill_name is not None:
                     return True
-                from src.core.integration.llm_gateway_v2.activity_plan import complete_social_opportunity
-
                 updated = complete_social_opportunity(plan)
                 await self._write_state(session, event, updated)
                 return True
@@ -327,6 +357,7 @@ class ActivityPlanRepository:
         *,
         succeeded: bool | None,
         retryable: bool,
+        corrected_decision_allowed: bool = False,
         decision_id: str | None = None,
     ) -> bool:
         try:
@@ -356,6 +387,7 @@ class ActivityPlanRepository:
                         step_id,
                         succeeded=succeeded,
                         retryable=retryable,
+                        corrected_decision_allowed=corrected_decision_allowed,
                     )
                 await self._write_state(session, event, updated)
                 return True

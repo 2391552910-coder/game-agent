@@ -1,0 +1,1111 @@
+{
+  "version": 1,
+  "sceneId": 8,
+  "sceneName": "CJ_JiuBa_Zhong_suo",
+  "tables": [
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 1,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (3)/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.052,
+        "Z": 31.0400047,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.052,
+        "z": 31.0400047
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.052,
+        "z": 31.0400047
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 5,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (20)/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.052,
+        "Z": 36.8600044,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.052,
+        "z": 36.8600044
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.052,
+        "z": 36.8600044
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 12,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (4)/ShootingTable",
+      "standTransform": {
+        "X": -13.01,
+        "Y": 0.0490000024,
+        "Z": 47.3,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -13.01,
+        "y": 0.0490000024,
+        "z": 47.3
+      },
+      "exitPosition": {
+        "x": -16.01,
+        "y": 0.0490000024,
+        "z": 47.3
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 16,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (8)/ShootingTable",
+      "standTransform": {
+        "X": -13.01,
+        "Y": 0.0490000024,
+        "Z": 53.3,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -13.01,
+        "y": 0.0490000024,
+        "z": 53.3
+      },
+      "exitPosition": {
+        "x": -16.01,
+        "y": 0.0490000024,
+        "z": 53.3
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 11,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (5)/ShootingTable",
+      "standTransform": {
+        "X": -13.01,
+        "Y": 0.0490000024,
+        "Z": 45.78,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -13.01,
+        "y": 0.0490000024,
+        "z": 45.78
+      },
+      "exitPosition": {
+        "x": -16.01,
+        "y": 0.0490000024,
+        "z": 45.78
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 15,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (17)/ShootingTable",
+      "standTransform": {
+        "X": -13.01,
+        "Y": 0.0490000024,
+        "Z": 51.77,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -13.01,
+        "y": 0.0490000024,
+        "z": 51.77
+      },
+      "exitPosition": {
+        "x": -16.01,
+        "y": 0.0490000024,
+        "z": 51.77
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 10,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (6)/ShootingTable",
+      "standTransform": {
+        "X": -13.01,
+        "Y": 0.0490000024,
+        "Z": 44.29,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -13.01,
+        "y": 0.0490000024,
+        "z": 44.29
+      },
+      "exitPosition": {
+        "x": -16.01,
+        "y": 0.0490000024,
+        "z": 44.29
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 14,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (18)/ShootingTable",
+      "standTransform": {
+        "X": -13.01,
+        "Y": 0.0490000024,
+        "Z": 50.26,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -13.01,
+        "y": 0.0490000024,
+        "z": 50.26
+      },
+      "exitPosition": {
+        "x": -16.01,
+        "y": 0.0490000024,
+        "z": 50.26
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 9,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (7)/ShootingTable",
+      "standTransform": {
+        "X": -12.99,
+        "Y": 0.0490000024,
+        "Z": 42.86,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -12.99,
+        "y": 0.0490000024,
+        "z": 42.86
+      },
+      "exitPosition": {
+        "x": -15.99,
+        "y": 0.0490000024,
+        "z": 42.86
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 13,
+      "gameDistance": 2,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (19)/ShootingTable",
+      "standTransform": {
+        "X": -12.99,
+        "Y": 0.0490000024,
+        "Z": 48.79,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -12.99,
+        "y": 0.0490000024,
+        "z": 48.79
+      },
+      "exitPosition": {
+        "x": -15.99,
+        "y": 0.0490000024,
+        "z": 48.79
+      },
+      "projects": [
+        {
+          "actionConfigId": 94,
+          "gameDistance": 2,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 19,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (9)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 57.7300034,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 57.7300034
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 57.7300034
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 20,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (12)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 59.11,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 59.11
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 59.11
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 21,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (13)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 60.5300026,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 60.5300026
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 60.5300026
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 22,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (14)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 62.0,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 62.0
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 62.0
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 23,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (15)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 63.5,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 63.5
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 63.5
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 24,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (16)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 64.86,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 64.86
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 64.86
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 18,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (10)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 56.2800026,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 56.2800026
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 56.2800026
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 17,
+      "gameDistance": 3,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (11)/ShootingTable",
+      "standTransform": {
+        "X": -17.59,
+        "Y": 0.0490000024,
+        "Z": 54.8000031,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -17.59,
+        "y": 0.0490000024,
+        "z": 54.8000031
+      },
+      "exitPosition": {
+        "x": -20.59,
+        "y": 0.0490000024,
+        "z": 54.8000031
+      },
+      "projects": [
+        {
+          "actionConfigId": 95,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 96,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 2,
+          "shootPoseType": 3,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 97,
+          "gameDistance": 3,
+          "gunType": 2,
+          "posType": 3,
+          "shootPoseType": 4,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 2,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (2)/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.0490000024,
+        "Z": 32.5200043,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.0490000024,
+        "z": 32.5200043
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.0490000024,
+        "z": 32.5200043
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 6,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (21)/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.0490000024,
+        "Z": 38.3200035,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.0490000024,
+        "z": 38.3200035
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.0490000024,
+        "z": 38.3200035
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 3,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (1)/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.0490000024,
+        "Z": 33.9800034,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.0490000024,
+        "z": 33.9800034
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.0490000024,
+        "z": 33.9800034
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 7,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (22)/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.0490000024,
+        "Z": 39.8000031,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.0490000024,
+        "z": 39.8000031
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.0490000024,
+        "z": 39.8000031
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 4,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.0490000024,
+        "Z": 35.4400024,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.0490000024,
+        "z": 35.4400024
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.0490000024,
+        "z": 35.4400024
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    },
+    {
+      "sceneId": 8,
+      "sceneName": "CJ_JiuBa_Zhong_suo",
+      "tableNum": 8,
+      "gameDistance": 1,
+      "sourcePath": "Jiuba/bisai/shejiqu/CJ_SheJi_XiangZi (23)/ShootingTable",
+      "standTransform": {
+        "X": -8.261,
+        "Y": 0.0490000024,
+        "Z": 41.24,
+        "RotX": 0.0,
+        "RotY": 0.707106769,
+        "RotZ": 0.0,
+        "RotW": 0.707106769
+      },
+      "targetPosition": {
+        "x": -8.261,
+        "y": 0.0490000024,
+        "z": 41.24
+      },
+      "exitPosition": {
+        "x": -11.261,
+        "y": 0.0490000024,
+        "z": 41.24
+      },
+      "projects": [
+        {
+          "actionConfigId": 92,
+          "gameDistance": 1,
+          "gunType": 1,
+          "posType": 1,
+          "shootPoseType": 1,
+          "itemConfigId": 210056,
+          "shortcutItemConfigId": 0
+        },
+        {
+          "actionConfigId": 93,
+          "gameDistance": 1,
+          "gunType": 2,
+          "posType": 1,
+          "shootPoseType": 2,
+          "itemConfigId": 210057,
+          "shortcutItemConfigId": 0
+        }
+      ]
+    }
+  ]
+}

@@ -3,7 +3,7 @@ doc_type: dev-guide
 slug: airobot-gateway-llm-skill-dance-auto-schedule
 component: robotgateway-llm-skill-contracts
 status: current
-summary: dance_auto_schedule 对外 LLM skill 契约，定义跳舞活动自动编排的空参数高层入口。
+summary: dance_auto_schedule 对外 LLM skill 契约，定义带 Gateway 实时分数范围的自动编排入口。
 tags: [airobot-gateway, llm, skill, dance]
 last_reviewed: 2026-06-28
 ---
@@ -20,13 +20,17 @@ last_reviewed: 2026-06-28
 {
   "skillName": "dance_auto_schedule",
   "schemaVersion": "v1",
-  "arguments": {}
+  "arguments": {
+    "score": 25
+  }
 }
 ```
 
 ## arguments 字段
 
-无字段。
+| 字段 | 类型 | 必填 | 规则 |
+|---|---|---|---|
+| `score` | `integer` | 是 | 使用 Gateway 当前 hint 明确提供的 `minimum..maximum`，不得从文档猜测。 |
 
 ## 执行语义
 
@@ -35,7 +39,8 @@ last_reviewed: 2026-06-28
   - 自动报名
   - 次数不足时自动补购
   - 自动执行整场流程
-  - 在每次可提交窗口内按内部默认规则提交成绩
+  - 在每次可提交窗口内按合法 `score` 提交成绩
+- Gateway 未同时提供 `score.minimum` 和 `score.maximum` 时，MyAgent 不调用本 skill。
 - 不对外暴露 `stepCount`、`stepIntervalMs`、`startWaitMs`、`endWaitMs`、`danceStepId`、`speedPermille` 等内部参数。
 
 ## 并发 / 打断规则
@@ -45,7 +50,8 @@ last_reviewed: 2026-06-28
 
 ## reject reasons
 
-无专属 reject。
+- `dance_score_invalid`
+- `dance_score_exceeds_limit`
 
 ## failed reasons
 
@@ -59,6 +65,6 @@ last_reviewed: 2026-06-28
 
 ## 备注
 
-- 当前对 LLM 暴露的是“安排自动跳一场”，不是节拍控制器。
+- 当前对 LLM 暴露的是“以合法分数安排自动跳一场”，不是节拍控制器。
 - 参数取值说明见 [../parameter-tables/dance_auto_schedule.md](../parameter-tables/dance_auto_schedule.md)。
 - 通用规则见 [../common-rules.md](../common-rules.md)。

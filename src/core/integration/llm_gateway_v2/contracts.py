@@ -283,6 +283,24 @@ class SkillArgumentField(_WireModel):
         validation_alias="nextStep",
         serialization_alias="nextStep",
     )
+    minimum: Annotated[int, Strict()] | None = None
+    maximum: Annotated[int, Strict()] | None = None
+
+    @model_validator(mode="after")
+    def validate_numeric_range(self) -> "SkillArgumentField":
+        if (self.minimum is None) != (self.maximum is None):
+            raise ValueError("minimum and maximum must be supplied together")
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("minimum must not exceed maximum")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_numeric_range(self, handler: Any) -> dict[str, Any]:
+        serialized: dict[str, Any] = handler(self)
+        if self.minimum is None:
+            serialized.pop("minimum", None)
+            serialized.pop("maximum", None)
+        return serialized
 
 
 class SkillArgumentNextStep(_WireModel):
@@ -1116,6 +1134,11 @@ class GatewayV2CallSkillDecision(_GatewayV2DecisionBase):
 
 class GatewayV2WaitDecision(_GatewayV2DecisionBase):
     action: Literal["wait"]
+    wait_ms: StrictPositiveInt = Field(
+        default=10_000,
+        validation_alias="waitMs",
+        serialization_alias="waitMs",
+    )
 
 
 class GatewayV2NoOpDecision(_GatewayV2DecisionBase):

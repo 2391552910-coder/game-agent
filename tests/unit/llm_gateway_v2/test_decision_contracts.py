@@ -42,6 +42,8 @@ def decision_payload(decision_action: str, **overrides: Any) -> dict[str, Any]:
                 },
             }
         )
+    elif decision_action == "wait":
+        payload["waitMs"] = 10_000
     payload.update(overrides)
     return payload
 
@@ -240,10 +242,21 @@ def test_call_skill_arguments_are_deeply_frozen_and_input_detached() -> None:
         decision.arguments["nested"]["items"].append(2)
 
 
-def test_wait_forbids_wait_ms() -> None:
-    assert parse_gateway_v2_decision(decision_payload("wait")).action == "wait"
+def test_wait_accepts_and_serializes_wait_ms() -> None:
+    omitted_wait_ms_payload = decision_payload("wait")
+    omitted_wait_ms_payload.pop("waitMs")
+    default_decision = parse_gateway_v2_decision(omitted_wait_ms_payload)
+    assert default_decision.action == "wait"
+    assert default_decision.model_dump(by_alias=True)["waitMs"] == 10_000
+
+    decision = parse_gateway_v2_decision(decision_payload("wait", waitMs=1_000))
+    assert decision.model_dump(by_alias=True)["waitMs"] == 1_000
+
+
+@pytest.mark.parametrize("wait_ms", [0, -1, True, 1.5, "1000", None])
+def test_wait_requires_a_strictly_positive_integer_wait_ms(wait_ms: Any) -> None:
     with pytest.raises(ValidationError):
-        parse_gateway_v2_decision(decision_payload("wait", waitMs=1_000))
+        parse_gateway_v2_decision(decision_payload("wait", waitMs=wait_ms))
 
 
 @pytest.mark.parametrize(

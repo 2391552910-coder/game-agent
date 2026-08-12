@@ -5,6 +5,10 @@ from src.core.integration.llm_gateway_v2.decision_service import (
     freeze_gateway_v2_decision,
     select_gateway_v2_action,
 )
+from src.core.integration.llm_gateway_v2.paper_plane import (
+    PAPER_PLANE_DURATION_RANGES_MS,
+    PAPER_PLANE_NAMES,
+)
 
 NON_CHAT_SKILLS = (
     "observe_state",
@@ -36,6 +40,27 @@ def _arguments(skill_name: str) -> dict:
         return {"target": {"x": 1, "y": 2, "z": 3}}
     if skill_name == "play_action":
         return {"actionId": "wave"}
+    if skill_name == "paper_plane_auto_schedule":
+        return {"planeName": "初级", "useTimeMs": 150_000, "isComplete": True}
+    if skill_name == "darts_auto_schedule":
+        return {
+            "score": 25,
+            "darts": [
+                {"dartItem": "general", "count": 3},
+                {"dartItem": "elementary", "count": 3},
+                {"dartItem": "advanced", "count": 3},
+            ],
+            "allowPurchaseWhenInsufficient": False,
+        }
+    if skill_name == "shooting_auto_schedule":
+        return {
+            "distance": "10m",
+            "weapon": "pistol",
+            "posture": "standing",
+            "score": 50,
+        }
+    if skill_name == "dance_auto_schedule":
+        return {"score": 25}
     return {}
 
 
@@ -44,6 +69,14 @@ def _argument_paths(skill_name: str) -> list[str]:
         return ["target.x", "target.y", "target.z"]
     if skill_name == "play_action":
         return ["actionId"]
+    if skill_name == "paper_plane_auto_schedule":
+        return ["planeName", "useTimeMs", "isComplete"]
+    if skill_name == "darts_auto_schedule":
+        return ["score", "darts", "allowPurchaseWhenInsufficient"]
+    if skill_name == "shooting_auto_schedule":
+        return ["distance", "weapon", "posture", "score"]
+    if skill_name == "dance_auto_schedule":
+        return ["score"]
     return []
 
 
@@ -89,7 +122,14 @@ def _context(
                     "argumentStatus": "ready",
                     "suggestedArgs": {},
                     "allowedArgs": [
-                        {"path": path}
+                        {
+                            "path": path,
+                            **(
+                                {"minimum": 1, "maximum": 50}
+                                if name == "dance_auto_schedule" and path == "score"
+                                else {}
+                            ),
+                        }
                         for path in _argument_paths(name)
                     ],
                     "missingArgs": [
@@ -162,7 +202,28 @@ def test_each_gateway_non_chat_skill_builds_a_v2_call_skill_decision(
 
     assert frozen.body_json["skillName"] == skill_name
     assert frozen.body_json["schemaVersion"] == "v1"
-    assert frozen.body_json["arguments"] == _arguments(skill_name)
+    if skill_name in {
+        "paper_plane_auto_schedule",
+        "darts_auto_schedule",
+        "shooting_auto_schedule",
+        "dance_auto_schedule",
+    }:
+        arguments = frozen.body_json["arguments"]
+        if skill_name == "paper_plane_auto_schedule":
+            assert arguments["planeName"] in PAPER_PLANE_NAMES
+            minimum, maximum = PAPER_PLANE_DURATION_RANGES_MS[arguments["planeName"]]
+            assert minimum <= arguments["useTimeMs"] <= maximum
+            assert arguments["isComplete"] is True
+        elif skill_name == "darts_auto_schedule":
+            assert 1 <= arguments["score"] <= 50
+            assert sum(item["count"] for item in arguments["darts"]) == 9
+            assert arguments["allowPurchaseWhenInsufficient"] is False
+        elif skill_name == "shooting_auto_schedule":
+            assert 30 <= arguments["score"] <= 80
+        else:
+            assert 1 <= arguments["score"] <= 50
+    else:
+        assert frozen.body_json["arguments"] == _arguments(skill_name)
 
 
 @pytest.mark.parametrize("lease_kind", ["vehicle_cancel_window", "vehicle_recovery"])
