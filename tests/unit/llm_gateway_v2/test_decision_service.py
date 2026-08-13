@@ -648,7 +648,7 @@ def test_competitive_activity_replaces_invalid_gateway_suggestions(
         assert 30 <= action.arguments["score"] <= 80
 
 
-def test_dance_activity_requires_explicit_gateway_score_range() -> None:
+def test_dance_activity_uses_fixed_product_score_range_without_gateway_score_range() -> None:
     payload = _lease(
         available_skills=[{"skillName": "dance_auto_schedule", "schemaVersion": "v1"}],
         hints=[
@@ -662,21 +662,8 @@ def test_dance_activity_requires_explicit_gateway_score_range() -> None:
     )
     context_without_range = build_gateway_v2_agent_context(_event(lease=payload))
 
-    assert (
-        _gateway_v2_activity_skill_action(
-            context_without_range,
-            "dance_auto_schedule",
-            "v1",
-            reason="dance",
-        )
-        is None
-    )
-
-    score_field = payload["decisionContext"]["skillArgumentHints"][0]["allowedArgs"][0]
-    score_field.update({"minimum": 10, "maximum": 25})
-    context_with_range = build_gateway_v2_agent_context(_event(lease=payload))
     action = _gateway_v2_activity_skill_action(
-        context_with_range,
+        context_without_range,
         "dance_auto_schedule",
         "v1",
         reason="dance",
@@ -684,10 +671,10 @@ def test_dance_activity_requires_explicit_gateway_score_range() -> None:
 
     assert action is not None
     assert set(action.arguments) == {"score"}
-    assert 10 <= action.arguments["score"] <= 25
+    assert 70 <= action.arguments["score"] <= 120
 
 
-def test_selector_skips_dance_without_range_and_uses_next_permitted_skill() -> None:
+def test_selector_accepts_dance_without_external_score_range() -> None:
     payload = _lease(
         available_skills=[
             {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
@@ -719,17 +706,12 @@ def test_selector_skips_dance_without_range_and_uses_next_permitted_skill() -> N
                 schemaVersion="v1",
                 arguments={},
             ),
-            GatewayV2CallSkillAction(
-                action="call_skill",
-                skillName="jump",
-                schemaVersion="v1",
-                arguments={},
-            ),
         ],
     )
 
     assert isinstance(selected, GatewayV2CallSkillAction)
-    assert selected.skill_name == "jump"
+    assert selected.skill_name == "dance_auto_schedule"
+    assert 70 <= selected.arguments["score"] <= 120
 
 
 @pytest.mark.parametrize(
@@ -777,7 +759,7 @@ def test_freeze_applies_final_competitive_activity_outbound_fallback(
     assert frozen.body_json["arguments"] != bad_arguments
 
 
-def test_freeze_converts_dance_without_gateway_range_to_wait() -> None:
+def test_freeze_keeps_dance_with_fixed_score_without_gateway_range() -> None:
     payload = _lease(
         available_skills=[{"skillName": "dance_auto_schedule", "schemaVersion": "v1"}],
         hints=[
@@ -799,9 +781,9 @@ def test_freeze_converts_dance_without_gateway_range_to_wait() -> None:
 
     frozen = freeze_gateway_v2_decision("decision-dance", "trace-dance", context, action)
 
-    assert frozen.body_json["action"] == "wait"
-    assert frozen.body_json["waitMs"] == 1_000
-    assert "skillName" not in frozen.body_json
+    assert frozen.body_json["action"] == "call_skill"
+    assert frozen.body_json["skillName"] == "dance_auto_schedule"
+    assert 70 <= frozen.body_json["arguments"]["score"] <= 120
 
 
 def test_selector_rejects_skill_when_required_argument_is_missing() -> None:
@@ -1742,9 +1724,6 @@ async def test_planner_executes_current_activity_step_without_second_model_call(
                 }
             ],
         )
-    payload["decisionContext"]["skillArgumentHints"][0]["allowedArgs"][0].update(
-        {"minimum": 1, "maximum": 50}
-    )
     event = _event(lease=payload)
     plan = record_step_terminal(
         create_plaza_social_plan("plan-dance"),

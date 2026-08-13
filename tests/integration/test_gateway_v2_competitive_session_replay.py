@@ -27,7 +27,6 @@ class ReplayCase:
     skill_name: str
     allowed_args: tuple[str, ...]
     validator: Callable[[Mapping[str, Any]], bool]
-    dance_range: tuple[int, int] | None = None
 
 
 REAL_SESSION_REPLAYS = (
@@ -41,8 +40,7 @@ REAL_SESSION_REPLAYS = (
         "3585060191824248832",
         "dance_auto_schedule",
         ("score",),
-        lambda arguments: is_valid_dance_arguments(arguments, minimum=1, maximum=50),
-        (1, 50),
+        is_valid_dance_arguments,
     ),
     ReplayCase(
         "3585063352920178688",
@@ -63,8 +61,6 @@ def _session_event(case: ReplayCase):
     allowed_args = []
     for path in case.allowed_args:
         field: dict[str, Any] = {"path": path, "type": "contract"}
-        if path == "score" and case.dance_range is not None:
-            field.update({"minimum": case.dance_range[0], "maximum": case.dance_range[1]})
         allowed_args.append(field)
     return parse_gateway_v2_event(
         {
@@ -187,12 +183,12 @@ def test_real_gateway_session_replay_requires_skill_finished_success(case: Repla
     assert terminal.payload.decision_id == frozen.body_json["decisionId"]
 
 
-def test_historical_dance_replay_without_score_range_does_not_emit_invalid_call() -> None:
+def test_historical_dance_replay_without_score_range_emits_fixed_score_call() -> None:
     case = ReplayCase(
         "3585060191824248832",
         "dance_auto_schedule",
         ("score",),
-        lambda arguments: False,
+        is_valid_dance_arguments,
     )
     context = build_gateway_v2_agent_context(_session_event(case))
 
@@ -203,4 +199,6 @@ def test_historical_dance_replay_without_score_range_does_not_emit_invalid_call(
         reason="historical Gateway fixture without score bounds",
     )
 
-    assert action is None
+    assert isinstance(action, GatewayV2CallSkillAction)
+    assert action.arguments.keys() == {"score"}
+    assert 70 <= action.arguments["score"] <= 120

@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from typing import Any
 
 DART_ITEMS: tuple[str, ...] = ("general", "elementary", "advanced")
+DANCE_SCORE_MIN = 70
+DANCE_SCORE_MAX = 120
 SHOOTING_PROJECTS: tuple[tuple[str, str, str], ...] = (
     ("10m", "pistol", "standing"),
     ("10m", "rifle", "standing"),
@@ -118,17 +120,13 @@ def build_shooting_arguments(*, seed: str) -> dict[str, Any]:
 def build_dance_arguments(
     *,
     seed: str,
-    minimum: object,
-    maximum: object,
 ) -> dict[str, Any]:
-    if type(minimum) is not int or type(maximum) is not int or minimum > maximum:
-        raise ValueError("invalid Gateway dance score range")
     return {
         "score": _stable_int(
             _digest(seed),
             offset=0,
-            minimum=minimum,
-            maximum=maximum,
+            minimum=DANCE_SCORE_MIN,
+            maximum=DANCE_SCORE_MAX,
         )
     }
 
@@ -165,16 +163,11 @@ def is_valid_shooting_arguments(value: Mapping[str, Any]) -> bool:
 
 def is_valid_dance_arguments(
     value: Mapping[str, Any],
-    *,
-    minimum: object,
-    maximum: object,
 ) -> bool:
-    if type(minimum) is not int or type(maximum) is not int or minimum > maximum:
-        return False
     if set(value) != {"score"}:
         return False
     score = value["score"]
-    return type(score) is int and minimum <= score <= maximum
+    return type(score) is int and DANCE_SCORE_MIN <= score <= DANCE_SCORE_MAX
 
 
 def is_correctable_skill_failure(skill_name: str, reason: str) -> bool:

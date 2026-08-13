@@ -3,7 +3,7 @@ doc_type: dev-guide
 slug: airobot-gateway-llm-skill-dance-auto-schedule
 component: robotgateway-llm-skill-contracts
 status: current
-summary: dance_auto_schedule 对外 LLM skill 契约，定义带 Gateway 实时分数范围的自动编排入口。
+summary: dance_auto_schedule 对外 LLM skill 契约，定义固定分数范围的自动编排入口。
 tags: [airobot-gateway, llm, skill, dance]
 last_reviewed: 2026-06-28
 ---
@@ -21,7 +21,7 @@ last_reviewed: 2026-06-28
   "skillName": "dance_auto_schedule",
   "schemaVersion": "v1",
   "arguments": {
-    "score": 25
+    "score": 95
   }
 }
 ```
@@ -30,7 +30,7 @@ last_reviewed: 2026-06-28
 
 | 字段 | 类型 | 必填 | 规则 |
 |---|---|---|---|
-| `score` | `integer` | 是 | 使用 Gateway 当前 hint 明确提供的 `minimum..maximum`，不得从文档猜测。 |
+| `score` | `integer` | 是 | 一局跳舞的最终总分，固定为 `70..120`，包含边界。 |
 
 ## 执行语义
 
@@ -40,7 +40,7 @@ last_reviewed: 2026-06-28
   - 次数不足时自动补购
   - 自动执行整场流程
   - 在每次可提交窗口内按合法 `score` 提交成绩
-- Gateway 未同时提供 `score.minimum` 和 `score.maximum` 时，MyAgent 不调用本 skill。
+- MyAgent2 直接按固定产品范围 `70..120` 生成 `score`，不依赖 Gateway 运行时提供 `minimum` 和 `maximum`。
 - 不对外暴露 `stepCount`、`stepIntervalMs`、`startWaitMs`、`endWaitMs`、`danceStepId`、`speedPermille` 等内部参数。
 
 ## 并发 / 打断规则

@@ -102,33 +102,20 @@ def test_shooting_validator_rejects_invalid_or_noncanonical_arguments(
     assert not is_valid_shooting_arguments(arguments)
 
 
-def test_dance_arguments_require_and_obey_gateway_supplied_score_range() -> None:
-    arguments = build_dance_arguments(seed="dance:session-1:event-1:lease-1", minimum=12, maximum=27)
+def test_dance_arguments_use_fixed_product_score_range() -> None:
+    arguments = build_dance_arguments(seed="dance:session-1:event-1:lease-1")
 
-    assert arguments == build_dance_arguments(
-        seed="dance:session-1:event-1:lease-1",
-        minimum=12,
-        maximum=27,
-    )
+    assert arguments == build_dance_arguments(seed="dance:session-1:event-1:lease-1")
     assert set(arguments) == {"score"}
-    assert 12 <= arguments["score"] <= 27
-    assert is_valid_dance_arguments(arguments, minimum=12, maximum=27)
+    assert 70 <= arguments["score"] <= 120
+    assert is_valid_dance_arguments(arguments)
 
 
-@pytest.mark.parametrize(
-    ("minimum", "maximum"),
-    [(None, 50), (1, None), (50, 1), (True, 50), (1.5, 50)],
-)
-def test_dance_arguments_reject_missing_or_invalid_gateway_range(
-    minimum: object,
-    maximum: object,
-) -> None:
-    with pytest.raises(ValueError, match="score range"):
-        build_dance_arguments(
-            seed="dance:session-1:event-1:lease-1",
-            minimum=minimum,
-            maximum=maximum,
-        )
+def test_dance_arguments_always_include_integer_score_without_gateway_range() -> None:
+    arguments = build_dance_arguments(seed="dance:session-1:event-2:lease-1")
+
+    assert type(arguments["score"]) is int
+    assert is_valid_dance_arguments(arguments)
 
 
 @pytest.mark.parametrize(

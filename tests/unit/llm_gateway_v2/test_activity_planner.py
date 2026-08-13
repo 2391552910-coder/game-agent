@@ -742,7 +742,7 @@ def _context(
                                     {"path": "score"},
                                 ]
                                 if skill == "shooting_auto_schedule"
-                                else [{"path": "score", "minimum": 1, "maximum": 50}]
+                                else [{"path": "score"}]
                                 if skill == "dance_auto_schedule"
                                 else []
                             ),

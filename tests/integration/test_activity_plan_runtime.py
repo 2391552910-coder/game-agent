@@ -110,7 +110,7 @@ def _skill_hints() -> list[dict[str, object]]:
     for skill in SKILLS:
         allowed_args: list[dict[str, object]] = []
         if skill == "dance_auto_schedule":
-            allowed_args = [{"path": "score", "minimum": 1, "maximum": 50}]
+            allowed_args = [{"path": "score"}]
         elif skill == "darts_auto_schedule":
             allowed_args = [
                 {"path": "score"},
@@ -640,7 +640,7 @@ async def test_non_retryable_parameter_failure_uses_new_lease_for_corrected_deci
     assert corrected_dance["decision_id"] != first_dance["decision_id"]
     assert corrected_dance["activity_step_id"] == "dance"
     assert corrected_dance["request_body_json"]["skillName"] == "dance_auto_schedule"
-    assert 1 <= corrected_dance["request_body_json"]["arguments"]["score"] <= 50
+    assert 70 <= corrected_dance["request_body_json"]["arguments"]["score"] <= 120
 
     await _dispatch(
         runtime,

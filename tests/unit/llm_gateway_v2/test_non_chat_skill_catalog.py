@@ -60,7 +60,7 @@ def _arguments(skill_name: str) -> dict:
             "score": 50,
         }
     if skill_name == "dance_auto_schedule":
-        return {"score": 25}
+        return {"score": 95}
     return {}
 
 
@@ -124,11 +124,7 @@ def _context(
                     "allowedArgs": [
                         {
                             "path": path,
-                            **(
-                                {"minimum": 1, "maximum": 50}
-                                if name == "dance_auto_schedule" and path == "score"
-                                else {}
-                            ),
+                            **{},
                         }
                         for path in _argument_paths(name)
                     ],
@@ -221,7 +217,7 @@ def test_each_gateway_non_chat_skill_builds_a_v2_call_skill_decision(
         elif skill_name == "shooting_auto_schedule":
             assert 30 <= arguments["score"] <= 80
         else:
-            assert 1 <= arguments["score"] <= 50
+            assert 70 <= arguments["score"] <= 120
     else:
         assert frozen.body_json["arguments"] == _arguments(skill_name)
 

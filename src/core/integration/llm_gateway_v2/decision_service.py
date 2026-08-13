@@ -212,16 +212,6 @@ def _skill_argument_hint(
     )
 
 
-def _dance_score_range(context: GatewayV2AgentContext, schema_version: str) -> tuple[int, int] | None:
-    hint = _skill_argument_hint(context, "dance_auto_schedule", schema_version)
-    if hint is None:
-        return None
-    score_field = next((field for field in hint.allowed_args if field.path == "score"), None)
-    if score_field is None or score_field.minimum is None or score_field.maximum is None:
-        return None
-    return score_field.minimum, score_field.maximum
-
-
 def _specialized_arguments_for_context(
     context: GatewayV2AgentContext,
     skill_name: str,
@@ -237,14 +227,7 @@ def _specialized_arguments_for_context(
     if skill_name == "shooting_auto_schedule":
         return build_shooting_arguments(seed=seed)
     if skill_name == "dance_auto_schedule":
-        score_range = _dance_score_range(context, schema_version)
-        if score_range is None:
-            return None
-        return build_dance_arguments(
-            seed=seed,
-            minimum=score_range[0],
-            maximum=score_range[1],
-        )
+        return build_dance_arguments(seed=seed)
     return None
 
 
