@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     llm_gateway_hosted_chat_queue_size: int = Field(default=100, ge=1, le=10_000)
     llm_gateway_hosted_chat_state_ttl_seconds: int = Field(default=300, ge=30, le=86_400)
     llm_gateway_hosted_chat_max_state_entries: int = Field(default=10_000, ge=1, le=1_000_000)
+    # Gateway 流程联调时使用；配置后被动聊天直接发送固定正文，不调用模型或对话端。
+    llm_gateway_hosted_chat_fixed_reply: str | None = Field(default=None, max_length=1000)
     llm_gateway_event_worker_enabled: bool = Field(default=True)
     llm_gateway_event_stream_key: str = Field(default="llm-gateway:events")
     llm_gateway_event_consumer_group: str = Field(default="myagent2")

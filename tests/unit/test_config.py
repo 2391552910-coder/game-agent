@@ -196,6 +196,7 @@ def test_production_missing_required_setting_fails(tmp_path: Path, missing_name:
 
 def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_GATEWAY_V1_ENABLED", raising=False)
+    monkeypatch.delenv("LLM_GATEWAY_HOSTED_CHAT_FIXED_REPLY", raising=False)
     config = Settings(_env_file=None, **REQUIRED_SETTINGS)
 
     assert config.llm_gateway_v1_enabled is False
@@ -219,6 +220,7 @@ def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyP
     assert config.auto_chat_timeout_seconds == 45.0
     assert config.auto_chat_deadline_safety_seconds == 10.0
     assert config.llm_gateway_simple_chat_timeout_seconds == 3.0
+    assert config.llm_gateway_hosted_chat_fixed_reply is None
 
 
 def test_v2_force_skills_accepts_comma_separated_env_value() -> None:
@@ -264,6 +266,16 @@ def test_auto_chat_configuration_accepts_internal_service_url() -> None:
     assert config.auto_chat_timeout_seconds == 40
     assert config.auto_chat_deadline_safety_seconds == 8
     assert config.llm_gateway_simple_chat_timeout_seconds == 2.5
+
+
+def test_hosted_chat_fixed_reply_configuration_is_available() -> None:
+    config = Settings(
+        _env_file=None,
+        **REQUIRED_SETTINGS,
+        llm_gateway_hosted_chat_fixed_reply="Gateway 固定回复",
+    )
+
+    assert config.llm_gateway_hosted_chat_fixed_reply == "Gateway 固定回复"
 
 
 @pytest.mark.parametrize(

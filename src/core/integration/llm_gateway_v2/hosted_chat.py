@@ -128,7 +128,7 @@ class HostedChatControlClient:
             raise ValueError("timeout_seconds must be positive")
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
-        self._url = f"{base_url.rstrip('/')}/api/v1/hosting/llm/chat/send"
+        self._url = _derive_chat_send_url(base_url)
         self._app_id = app_id
         self._app_secret = app_secret
         self._timeout_seconds = timeout_seconds
@@ -181,6 +181,19 @@ class HostedChatControlClient:
         raise last_error
 
 
+def _derive_chat_send_url(decision_url: str) -> str:
+    """Derive chat/send from a Gateway base URL or its decision endpoint."""
+    parsed = httpx.URL(decision_url)
+    path = parsed.path.rstrip("/")
+    decision_suffix = "/api/v1/hosting/llm/decision"
+    if path.endswith(decision_suffix):
+        path = path[: -len(decision_suffix)]
+    elif path not in {"", "/"}:
+        raise ValueError("base_url must be a Gateway base URL or decision endpoint")
+    chat_path = f"{path}/api/v1/hosting/llm/chat/send" if path else "/api/v1/hosting/llm/chat/send"
+    return str(parsed.copy_with(path=chat_path, query=None, fragment=None))
+
+
 @dataclass(frozen=True)
 class HostedChatSendResult:
     chat_message_id: str
@@ -216,9 +229,10 @@ class HostedChatService:
     def __init__(
         self,
         *,
-        conversation_client: HostedChatConversationClient,
+        conversation_client: HostedChatConversationClient | None,
         sender: HostedChatSender,
         simple_router: HostedChatSimpleRouter | None = None,
+        fixed_reply: str | None = None,
         max_queue_size: int = 100,
         state_ttl_seconds: float = 300.0,
         max_state_entries: int = 10_000,
@@ -230,9 +244,16 @@ class HostedChatService:
             or max_state_entries <= 0
         ):
             raise ValueError("hosted chat limits must be positive")
+        if fixed_reply is not None:
+            fixed_reply = fixed_reply.strip()
+            if not fixed_reply:
+                raise ValueError("fixed_reply must not be blank")
+            if len(fixed_reply.encode("utf-16-le")) // 2 > 1000:
+                raise ValueError("fixed_reply exceeds UTF-16 limit")
         self._conversation_client = conversation_client
         self._sender = sender
         self._simple_router = simple_router
+        self._fixed_reply = fixed_reply
         self._semaphore = asyncio.Semaphore(max_queue_size)
         self._max_queue_size = max_queue_size
         self._queued_count = 0
@@ -276,6 +297,8 @@ class HostedChatService:
     async def handle_nearby_friend_request(self, gateway_id: str, event: object) -> None:
         event_id = str(event.event_id)
         if not await self._claim_event(gateway_id, event_id):
+            return
+        if self._fixed_reply is not None:
             return
         payload = event.payload
         target = payload.target
@@ -458,6 +481,14 @@ class HostedChatService:
         conversation: ConversationContext,
         incoming_text: str | None,
     ) -> HostedChatSendRequest:
+        if incoming_text is not None and self._fixed_reply is not None:
+            return HostedChatSendRequest(
+                sessionId=session_id,
+                targetAvatarId=target_avatar_id,
+                targetRoleId=target_role_id,
+                chatType=chat_type,
+                content=self._fixed_reply,
+            )
         if self._simple_router is not None and incoming_text is not None:
             try:
                 route = await self._simple_router.route(incoming_text)
@@ -474,6 +505,8 @@ class HostedChatService:
                     content=route.content,
                 )
 
+        if self._conversation_client is None:
+            raise HostedChatPermanentError("conversation_client_not_configured")
         try:
             message = await self._conversation_client.generate(
                 conversation,

@@ -178,47 +178,49 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
     terminal_repository = TerminalRepository()
     activity_repository = ActivityPlanRepository()
     hosted_chat_service = None
-    control_url = getattr(settings, "llm_gateway_control_url", None)
-    control_app_id = getattr(settings, "llm_gateway_control_app_id", None)
-    control_secret = getattr(settings, "llm_gateway_control_app_secret", None)
     auto_chat_base_url = getattr(settings, "auto_chat_base_url", None)
-    if (
-        isinstance(control_url, str)
-        and control_url.strip()
-        and isinstance(control_app_id, str)
-        and control_app_id.strip()
-        and isinstance(control_secret, str)
-        and control_secret.strip()
-        and isinstance(auto_chat_base_url, str)
-        and auto_chat_base_url.strip()
-    ):
+    fixed_chat_reply = getattr(settings, "llm_gateway_hosted_chat_fixed_reply", None)
+    fixed_chat_reply = fixed_chat_reply.strip() if isinstance(fixed_chat_reply, str) else None
+    hosted_chat_enabled = bool(fixed_chat_reply) or (
+        isinstance(auto_chat_base_url, str) and bool(auto_chat_base_url.strip())
+    )
+    if hosted_chat_enabled:
         simple_chat_timeout = getattr(settings, "llm_gateway_simple_chat_timeout_seconds", 3.0)
         if not isinstance(simple_chat_timeout, (int, float)):
             simple_chat_timeout = 3.0
         hosted_chat_service = HostedChatService(
-            conversation_client=AutoChatClient(
-                base_url=auto_chat_base_url,
-                timeout_seconds=getattr(settings, "auto_chat_timeout_seconds", 45.0),
-                deadline_safety_seconds=getattr(settings, "auto_chat_deadline_safety_seconds", 10.0),
+            conversation_client=(
+                None
+                if fixed_chat_reply
+                else AutoChatClient(
+                    base_url=auto_chat_base_url,
+                    timeout_seconds=getattr(settings, "auto_chat_timeout_seconds", 45.0),
+                    deadline_safety_seconds=getattr(settings, "auto_chat_deadline_safety_seconds", 10.0),
+                )
             ),
-            simple_router=SimpleChatRouter(
-                model_factory=lambda: cast(
-                    Any,
-                    get_env_llm(
-                        model_type="fast",
-                        temperature=0.1,
-                        timeout_seconds=simple_chat_timeout,
-                        max_retries=0,
+            simple_router=(
+                None
+                if fixed_chat_reply
+                else SimpleChatRouter(
+                    model_factory=lambda: cast(
+                        Any,
+                        get_env_llm(
+                            model_type="fast",
+                            temperature=0.1,
+                            timeout_seconds=simple_chat_timeout,
+                            max_retries=0,
+                        ),
                     ),
-                ),
-                timeout_seconds=simple_chat_timeout,
+                    timeout_seconds=simple_chat_timeout,
+                )
             ),
+            fixed_reply=fixed_chat_reply,
             sender=HostedChatControlClient(
-                base_url=control_url,
-                app_id=control_app_id,
-                app_secret=SecretStr(control_secret),
-                timeout_seconds=getattr(settings, "llm_gateway_control_timeout_seconds", 10.0),
-                max_retries=getattr(settings, "llm_gateway_control_max_retries", 1),
+                base_url=decision_url,
+                app_id=decision_app_id,
+                app_secret=SecretStr(decision_secret),
+                timeout_seconds=getattr(settings, "llm_gateway_decision_timeout_seconds", 10.0),
+                max_retries=getattr(settings, "llm_gateway_decision_max_retries", 1),
             ),
             max_queue_size=getattr(settings, "llm_gateway_hosted_chat_queue_size", 100),
             state_ttl_seconds=getattr(settings, "llm_gateway_hosted_chat_state_ttl_seconds", 300),

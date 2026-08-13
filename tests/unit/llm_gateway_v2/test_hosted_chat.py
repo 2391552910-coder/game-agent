@@ -99,6 +99,68 @@ async def test_service_calls_auto_chat_and_forwards_returned_content_unchanged()
 
 
 @pytest.mark.asyncio
+async def test_fixed_reply_forwards_content_without_calling_any_model() -> None:
+    class ConversationClient:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
+            raise AssertionError("fixed hosted chat must not call a model or auto chat")
+
+    class Router:
+        async def route(self, text: str) -> SimpleChatRoute:
+            raise AssertionError("fixed hosted chat must not classify the message")
+
+    class Sender:
+        requests: list[HostedChatSendRequest] = []
+
+        async def send(
+            self,
+            request: HostedChatSendRequest,
+            *,
+            request_id: str | None = None,
+        ) -> HostedChatSendReceipt:
+            self.requests.append(request)
+            return HostedChatSendReceipt(request_id or "request-fixed", "message-fixed")
+
+    sender = Sender()
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        simple_router=Router(),
+        fixed_reply="  Gateway 流程固定回复  ",
+        sender=sender,
+    )
+    event = SimpleNamespace(
+        event_id="fixed-reply-1",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            supported=True,
+            text="任意问题",
+            sender=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="friend",
+            conversation=_conversation(),
+        ),
+    )
+
+    await service.handle_chat_received("gateway-1", event)
+
+    assert [request.content for request in sender.requests] == ["Gateway 流程固定回复"]
+
+    nearby = SimpleNamespace(
+        event_id="fixed-nearby-1",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            target=SimpleNamespace(avatar_id="100", role_id="200"),
+            conversation=_conversation(),
+        ),
+    )
+    await service.handle_nearby_friend_request("gateway-1", nearby)
+    assert [request.content for request in sender.requests] == ["Gateway 流程固定回复"]
+
+
+@pytest.mark.asyncio
 async def test_simple_route_forwards_deepseek_content_without_calling_auto_chat() -> None:
     class ConversationClient:
         calls = 0
@@ -481,6 +543,35 @@ async def test_control_client_keeps_stable_body_and_request_id_on_transport_retr
     assert attempts == 2
     assert requests[0].content == requests[1].content
     assert requests[0].headers["X-RequestId"] == requests[1].headers["X-RequestId"] == "request-1"
+
+
+@pytest.mark.asyncio
+async def test_control_client_derives_chat_send_path_from_decision_url() -> None:
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(202, json={"accepted": True, "chatMessageId": "message-1"})
+
+    client = HostedChatControlClient(
+        base_url="http://gateway.local/api/v1/hosting/llm/decision",
+        app_id="robot-gateway-smoke",
+        app_secret=SecretStr("robot-gateway-smoke-secret"),
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    )
+
+    await client.send(
+        HostedChatSendRequest(
+            sessionId="session-1",
+            targetAvatarId="100",
+            targetRoleId="200",
+            chatType="friend",
+            content="固定回复",
+        )
+    )
+
+    assert paths == ["/api/v1/hosting/llm/chat/send"]
 
 
 @pytest.mark.asyncio

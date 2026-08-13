@@ -173,7 +173,7 @@ def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
 
     dispatcher = runtime.event_worker._processor
     service = dispatcher.hosted_chat_service
-    expected_enabled = control_enabled and auto_chat_enabled
+    expected_enabled = auto_chat_enabled
     assert isinstance(service, HostedChatService) is expected_enabled
     if expected_enabled:
         assert isinstance(service._conversation_client, AutoChatClient)
@@ -183,6 +183,67 @@ def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
         dispatcher.decision_planner.activity_coordinator._repository
         is dispatcher.activity_repository
     )
+
+
+def test_gateway_v2_runtime_wires_fixed_hosted_chat_without_model_or_auto_chat(
+    _mock_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_settings.llm_gateway_decision_url = "http://gateway.local/api/v1/hosting/llm/decision"
+    _mock_settings.llm_gateway_decision_app_id = "decision-app"
+    _mock_settings.llm_gateway_decision_app_secret = "decision-secret"
+    _mock_settings.llm_gateway_control_url = "http://gateway.local"
+    _mock_settings.llm_gateway_control_app_id = "control-app"
+    _mock_settings.llm_gateway_control_app_secret = "control-secret"
+    _mock_settings.llm_gateway_control_timeout_seconds = 10
+    _mock_settings.llm_gateway_control_max_retries = 1
+    _mock_settings.auto_chat_base_url = None
+    _mock_settings.llm_gateway_hosted_chat_fixed_reply = "Gateway 固定回复"
+    _mock_settings.llm_gateway_hosted_chat_queue_size = 100
+    _mock_settings.llm_gateway_hosted_chat_state_ttl_seconds = 300
+    _mock_settings.llm_gateway_hosted_chat_max_state_entries = 10_000
+    monkeypatch.setattr(main, "settings", _mock_settings)
+
+    runtime = main.build_gateway_v2_runtime()
+
+    service = runtime.event_worker._processor.hosted_chat_service
+    assert isinstance(service, HostedChatService)
+    assert service._conversation_client is None
+    assert service._simple_router is None
+    assert service._fixed_reply == "Gateway 固定回复"
+
+
+def test_gateway_v2_runtime_uses_decision_identity_for_fixed_hosted_chat(
+    _mock_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_settings.llm_gateway_decision_url = (
+        "http://gateway.local/api/v1/hosting/llm/decision"
+    )
+    _mock_settings.llm_gateway_decision_app_id = "decision-app"
+    _mock_settings.llm_gateway_decision_app_secret = "decision-secret"
+    _mock_settings.llm_gateway_decision_timeout_seconds = 7
+    _mock_settings.llm_gateway_decision_max_retries = 2
+    _mock_settings.llm_gateway_control_url = None
+    _mock_settings.llm_gateway_control_app_id = None
+    _mock_settings.llm_gateway_control_app_secret = None
+    _mock_settings.auto_chat_base_url = None
+    _mock_settings.llm_gateway_hosted_chat_fixed_reply = "Gateway 固定回复"
+    _mock_settings.llm_gateway_hosted_chat_queue_size = 100
+    _mock_settings.llm_gateway_hosted_chat_state_ttl_seconds = 300
+    _mock_settings.llm_gateway_hosted_chat_max_state_entries = 10_000
+    monkeypatch.setattr(main, "settings", _mock_settings)
+
+    runtime = main.build_gateway_v2_runtime()
+
+    service = runtime.event_worker._processor.hosted_chat_service
+    assert isinstance(service, HostedChatService)
+    sender = service._sender
+    assert sender._url == "http://gateway.local/api/v1/hosting/llm/chat/send"
+    assert sender._app_id == "decision-app"
+    assert sender._app_secret.get_secret_value() == "decision-secret"
+    assert sender._timeout_seconds == 7
+    assert sender._max_retries == 2
 
 
 async def _post(client, path: str, payload: dict[str, Any]):
