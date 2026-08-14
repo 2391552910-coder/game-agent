@@ -30,7 +30,6 @@ from src.core.agents.gateway_v2_prompts import (
     GATEWAY_V2_ACTION_REASONING_USER,
 )
 from src.core.agents.models import RecommendedAction
-from src.core.integration.llm_gateway_v2 import decision_service as decision_service_module
 from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlanProposal,
     create_plaza_social_plan,
@@ -40,11 +39,6 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
 from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanBinding,
     ActivityPlanContext,
-)
-from src.core.integration.llm_gateway_v2.auto_chat import (
-    AutoChatMessage,
-    AutoChatPermanentError,
-    AutoChatRetryableError,
 )
 from src.core.integration.llm_gateway_v2.contracts import parse_gateway_v2_event
 from src.core.integration.llm_gateway_v2.decision_service import (
@@ -950,18 +944,12 @@ def test_v2_prompt_json_examples_do_not_become_template_variables() -> None:
     )
 
     assert set(prompt.input_variables) == {
-        "behavior_report",
         "activity_plan",
-        "current_phase",
         "current_step",
-        "enriched_context",
         "gateway_context",
-        "goal_evaluation_result",
-        "intent_result",
         "rag_context",
         "recent_action_history",
         "recent_failure_history",
-        "snapshot_text",
     }
 
 
@@ -996,6 +984,22 @@ def test_action_list_defaults_model_omitted_non_wire_metadata() -> None:
     wait = action_list.actions[1]
     assert isinstance(wait, GatewayV2WaitAction)
     assert wait.wait_ms == 1_000
+
+
+def test_action_list_rejects_more_than_five_candidates() -> None:
+    with pytest.raises(ValidationError):
+        GatewayV2ActionList.model_validate(
+            {
+                "actions": [
+                    {
+                        "action": "no_op",
+                        "reason": f"candidate-{index}",
+                        "ttlMs": 30_000,
+                    }
+                    for index in range(6)
+                ]
+            }
+        )
 
 
 def test_prompt_size_fields_log_lengths_without_prompt_content() -> None:
@@ -1246,10 +1250,14 @@ async def test_decision_service_injects_activity_plan_context_into_graph_state()
 
     assert result.action == "wait"
     assert captured["activity_plan"] == plan.model_dump(mode="json", by_alias=True)
-    assert captured["current_phase"] == "arrival"
     assert captured["current_step"] == plan.current_step().model_dump(mode="json", by_alias=True)
     assert captured["recent_action_history"] == [{"decision_id": "decision-1"}]
     assert captured["recent_failure_history"] == [{"decision_id": "decision-failed"}]
+    assert "behavior_report" not in captured
+    assert "enriched_context" not in captured
+    assert "intent_result" not in captured
+    assert "goal_evaluation_result" not in captured
+    assert "current_phase" not in captured
 
 
 async def test_empty_agent_output_is_not_converted_to_successful_wait() -> None:
@@ -1448,26 +1456,6 @@ def _move_activity_context(target_id: str) -> ActivityPlanContext:
     )
 
 
-@dataclass
-class _ConversationService:
-    calls: int = 0
-
-    async def decide(self, context) -> GatewayV2CallSkillAction:
-        self.calls += 1
-        return GatewayV2CallSkillAction(
-            action="call_skill",
-            skillName="nearby_chat_send",
-            schemaVersion="v1",
-            arguments={
-                "conversationId": "conv-10001-10002-1",
-                "targetRoleId": 10002,
-                "content": "我们去前面看看。",
-            },
-            reason="Auto Chat generated a nearby conversation message",
-            ttlMs=10_000,
-        )
-
-
 def _conversation_event():
     payload = _lease(
         lease_kind="conversation",
@@ -1502,12 +1490,10 @@ def _conversation_event():
 
 async def test_conversation_lease_is_not_a_decision_skill() -> None:
     runner = _Runner(result={"errors": ["must not run"]})
-    conversation_service = _ConversationService()
     repository = _PlanningRepository()
     event = _conversation_event()
     planner = GatewayV2DecisionPlanner(
         decision_service=GatewayV2DecisionService(runner=runner),
-        conversation_service=conversation_service,
         repository=repository,
     )
 
@@ -1522,132 +1508,7 @@ async def test_conversation_lease_is_not_a_decision_skill() -> None:
         error_category="conversation_lease_not_supported",
     )
     assert runner.calls == 0
-    assert conversation_service.calls == 0
     assert repository.stored is None
-
-
-@dataclass
-class _AutoChatStub:
-    result: AutoChatMessage | None = None
-    failure: Exception | None = None
-    calls: int = 0
-
-    async def generate(self, conversation) -> AutoChatMessage:
-        self.calls += 1
-        if self.failure is not None:
-            raise self.failure
-        assert self.result is not None
-        return self.result
-
-
-def _auto_chat_message() -> AutoChatMessage:
-    return AutoChatMessage.model_validate(
-        {
-            "speakerRoleId": 10001,
-            "targetRoleId": 10002,
-            "pairKey": "10001:10002",
-            "content": "我们去前面看看。",
-            "summaryVersion": 1,
-            "summaryUpdatedAt": None,
-        }
-    )
-
-
-async def test_auto_chat_decision_service_builds_only_authorized_chat_action() -> None:
-    client = _AutoChatStub(result=_auto_chat_message())
-    service_type = decision_service_module.GatewayV2AutoChatDecisionService
-    service = service_type(
-        client=client,
-        decision_ttl_ms=10_000,
-        now_ms=lambda: 1_799_999_950_000,
-    )
-    context = build_gateway_v2_agent_context(_conversation_event())
-
-    action = await service.decide(context)
-
-    assert client.calls == 1
-    assert action.model_dump(mode="json", by_alias=True) == {
-        "reason": "Auto Chat generated a nearby conversation message",
-        "ttlMs": 10_000,
-        "action": "call_skill",
-        "skillName": "nearby_chat_send",
-        "schemaVersion": "v1",
-        "arguments": {
-            "conversationId": "conv-10001-10002-1",
-            "targetRoleId": 10002,
-            "content": "我们去前面看看。",
-        },
-        "userId": None,
-        "actionType": None,
-        "goalMetric": None,
-        "goalValue": None,
-        "baselineValue": None,
-        "expectedHours": None,
-    }
-
-
-async def test_auto_chat_decision_service_logs_metadata_without_message_content(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    client = _AutoChatStub(result=_auto_chat_message())
-    service = decision_service_module.GatewayV2AutoChatDecisionService(
-        client=client,
-        now_ms=lambda: 1_799_999_950_000,
-    )
-    caplog.set_level(
-        logging.INFO,
-        logger="src.core.integration.llm_gateway_v2.decision_service",
-    )
-
-    await service.decide(build_gateway_v2_agent_context(_conversation_event()))
-
-    record = next(
-        item
-        for item in caplog.records
-        if item.getMessage() == "Auto Chat conversation message generated"
-    )
-    assert record.conversation_id == "conv-10001-10002-1"
-    assert record.speaker_role_id == 10001
-    assert record.target_role_id == 10002
-    assert record.elapsed_ms >= 0
-    assert "我们去前面看看。" not in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("failure", "expected_outcome"),
-    [
-        (
-            AutoChatRetryableError("timeout"),
-            EventProcessResult("manual", error_stage="chat", error_category="conversation_lease_not_supported"),
-        ),
-        (
-            AutoChatPermanentError("response_identity_mismatch"),
-            EventProcessResult("manual", error_stage="chat", error_category="conversation_lease_not_supported"),
-        ),
-    ],
-)
-async def test_planner_preserves_auto_chat_error_retryability(
-    failure: Exception,
-    expected_outcome: EventProcessResult,
-) -> None:
-    client = _AutoChatStub(failure=failure)
-    service = decision_service_module.GatewayV2AutoChatDecisionService(
-        client=client,
-        now_ms=lambda: 1_799_999_950_000,
-    )
-    event = _conversation_event()
-    planner = GatewayV2DecisionPlanner(
-        decision_service=GatewayV2DecisionService(runner=_Runner()),
-        conversation_service=service,
-        repository=_PlanningRepository(),
-    )
-
-    result = await planner(
-        _claimed_for_planner(event),
-        build_gateway_v2_agent_context(event),
-    )
-
-    assert result == expected_outcome
 
 
 async def test_stable_source_event_retry_reuses_persisted_decision_without_agent_rerun() -> None:

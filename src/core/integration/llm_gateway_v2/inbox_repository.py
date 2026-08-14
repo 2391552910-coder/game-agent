@@ -54,6 +54,13 @@ class _PreparedEvent:
     content_hash: str
 
 
+_HOSTED_CHAT_EVENT_TYPES = frozenset(
+    {"chat_received", "nearby_friend_chat_requested", "chat_send_result"}
+)
+_HOSTED_CHAT_STORAGE_SEQUENCE_FLOOR = 2**62
+_BIGINT_MAX = 2**63 - 1
+
+
 _SELECT_EXISTING = sa.text(
     """
     SELECT event_id, content_hash
@@ -94,6 +101,56 @@ _UPSERT_CYCLE = sa.text(
     ON CONFLICT (gateway_id, session_id, control_generation) DO UPDATE
       SET updated_at = now()
     RETURNING id
+    """
+)
+
+_SELECT_HOSTED_CHAT_CYCLE = sa.text(
+    """
+    SELECT c.id, c.control_generation
+    FROM llm_gateway_sessions AS s
+    JOIN llm_gateway_control_cycles AS c ON c.runtime_session_id = s.id
+    WHERE s.gateway_id = :gateway_id
+      AND s.session_id = :session_id
+      AND c.status IN ('pending', 'active')
+    ORDER BY
+        CASE
+            WHEN s.current_generation IS NOT NULL
+             AND c.control_generation = s.current_generation THEN 0
+            WHEN c.status = 'active' THEN 1
+            ELSE 2
+        END,
+        c.control_generation DESC
+    FOR UPDATE OF c
+    LIMIT 1
+    """
+)
+
+_SELECT_HOSTED_ROLE_ID = sa.text(
+    """
+    SELECT c.latest_decision_context -> 'session' ->> 'RoleId'
+    FROM llm_gateway_sessions AS s
+    JOIN llm_gateway_control_cycles AS c ON c.runtime_session_id = s.id
+    WHERE s.gateway_id = :gateway_id
+      AND s.session_id = :session_id
+      AND c.status IN ('pending', 'active')
+    ORDER BY
+        CASE
+            WHEN s.current_generation IS NOT NULL
+             AND c.control_generation = s.current_generation THEN 0
+            WHEN c.status = 'active' THEN 1
+            ELSE 2
+        END,
+        c.control_generation DESC
+    LIMIT 1
+    """
+)
+
+_SELECT_MAX_HOSTED_CHAT_SEQUENCE = sa.text(
+    """
+    SELECT max(event_sequence)
+    FROM llm_gateway_events
+    WHERE cycle_id = :cycle_id
+      AND event_sequence >= :sequence_floor
     """
 )
 
@@ -142,7 +199,10 @@ _LOCK_CLAIM_CANDIDATE = sa.text(
               c.status IN ('pending', 'active', 'superseded')
               AND e.event_sequence = c.next_event_sequence
           )
-          OR e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
+          OR e.event_type IN (
+              'skill_started', 'skill_finished', 'decision_rejected',
+              'chat_received', 'nearby_friend_chat_requested', 'chat_send_result'
+          )
       )
       AND e.attempt_count < :max_attempts
       AND (
@@ -456,6 +516,7 @@ _LOCK_EXHAUSTED_CLAIM = sa.text(
         e.claim_token,
         e.claimed_fence_version,
         c.runtime_session_id,
+        c.status AS cycle_status,
         c.next_event_sequence,
         s.current_generation,
         s.fence_version
@@ -485,6 +546,10 @@ _RENEW_EVENT_CLAIM = sa.text(
       AND e.claimed_fence_version = :claimed_fence_version
       AND e.status = 'processing'
       AND e.lock_until > clock_timestamp()
+      AND (
+          e.event_type NOT IN ('chat_received', 'nearby_friend_chat_requested', 'chat_send_result')
+          OR c.status IN ('pending', 'active')
+      )
       AND (
           (
               s.current_generation = e.control_generation
@@ -575,9 +640,46 @@ def _prepare_batch(gateway_id: str, events: Sequence[GatewayV2Event]) -> tuple[_
     return tuple(prepared_by_id.values())
 
 
+def _is_hosted_chat_event(event: GatewayV2Event) -> bool:
+    return event.event_type in _HOSTED_CHAT_EVENT_TYPES
+
+
+def _order_prepared_events_for_insertion(
+    prepared: Sequence[_PreparedEvent],
+) -> tuple[_PreparedEvent, ...]:
+    sequenced = [item for item in prepared if not _is_hosted_chat_event(item.event)]
+    hosted_chat = [item for item in prepared if _is_hosted_chat_event(item.event)]
+    return tuple((*sequenced, *hosted_chat))
+
+
+def _next_hosted_chat_storage_sequence(maximum: object | None) -> int:
+    if maximum is None:
+        return _HOSTED_CHAT_STORAGE_SEQUENCE_FLOOR
+    sequence = int(maximum) + 1
+    if sequence > _BIGINT_MAX:
+        raise EventAdmissionUnavailable
+    return sequence
+
+
+def _should_mark_cycle_manual(event_type: str) -> bool:
+    return event_type not in _HOSTED_CHAT_EVENT_TYPES
+
+
+def _hosted_chat_cycle_is_processable(event_type: str, cycle_status: str) -> bool:
+    return event_type not in _HOSTED_CHAT_EVENT_TYPES or cycle_status in {"pending", "active"}
+
+
 class InboxRepository:
     def __init__(self, session_factory: _SessionFactory | Callable[[], AsyncSession] = async_session_factory) -> None:
         self._session_factory = session_factory
+
+    async def resolve_role_id(self, gateway_id: str, session_id: str) -> str | None:
+        async with self._session_factory() as session:
+            role_id = await session.scalar(
+                _SELECT_HOSTED_ROLE_ID,
+                {"gateway_id": gateway_id, "session_id": session_id},
+            )
+        return str(role_id) if role_id is not None else None
 
     async def accept_event_batch(
         self,
@@ -602,10 +704,20 @@ class InboxRepository:
                             raise EventAdmissionConflict(item.event.event_id)
                         duplicates.append(item.event.event_id)
 
+                    classifications: dict[str, str | None] = {}
+                    pending = tuple(item for item in prepared if item.event.event_id not in existing)
+                    for item in _order_prepared_events_for_insertion(pending):
+                        classifications[item.event.event_id] = await self._insert_one(
+                            session,
+                            identity,
+                            trace_id,
+                            item,
+                        )
+
                     for item in prepared:
                         if item.event.event_id in existing:
                             continue
-                        classification = await self._insert_one(session, identity, trace_id, item)
+                        classification = classifications[item.event.event_id]
                         if classification == "received":
                             received.append(item.event.event_id)
                         elif classification == "duplicate":
@@ -652,6 +764,13 @@ class InboxRepository:
                 await self._after_claim_candidate_lock(candidate)
                 if candidate is None:
                     return None
+
+                if not _hosted_chat_cycle_is_processable(
+                    str(candidate["event_type"]),
+                    str(candidate["cycle_status"]),
+                ):
+                    await self._supersede_locked_event(session, candidate)
+                    continue
 
                 disposition = classify_generation(
                     self._optional_int(candidate["current_generation"]),
@@ -780,6 +899,13 @@ class InboxRepository:
             if locked is None:
                 return False
 
+            if not _hosted_chat_cycle_is_processable(
+                str(locked["event_type"]),
+                str(locked["cycle_status"]),
+            ):
+                await self._supersede_locked_event(session, locked)
+                return False
+
             disposition = classify_generation(
                 self._optional_int(locked["current_generation"]),
                 int(locked["control_generation"]),
@@ -830,7 +956,10 @@ class InboxRepository:
             updated = await session.execute(_COMPLETE_MANUAL, common_parameters)
             if updated.scalar_one_or_none() is None:
                 return False
-            if disposition is not GenerationDisposition.HISTORICAL_RECOVERY:
+            if (
+                disposition is not GenerationDisposition.HISTORICAL_RECOVERY
+                and _should_mark_cycle_manual(event.event_type)
+            ):
                 await session.execute(_MARK_CYCLE_MANUAL, {"cycle_id": event.cycle_id})
             await self._skip_completed_convergence_events(session, locked)
             return True
@@ -875,6 +1004,13 @@ class InboxRepository:
                 expired = result.mappings().one_or_none()
                 if expired is None:
                     return dead_letter_count
+
+                if not _hosted_chat_cycle_is_processable(
+                    str(expired["event_type"]),
+                    str(expired["cycle_status"]),
+                ):
+                    await self._supersede_locked_event(session, expired)
+                    continue
 
                 disposition = classify_generation(
                     self._optional_int(expired["current_generation"]),
@@ -939,6 +1075,8 @@ class InboxRepository:
         row: RowMapping,
         event: ClaimedGatewayEvent,
     ) -> None:
+        if event.event_type in _HOSTED_CHAT_EVENT_TYPES:
+            return
         if event.event_type != "session_stopped":
             await session.execute(
                 _ADVANCE_CYCLE,
@@ -1038,29 +1176,54 @@ class InboxRepository:
         event = item.event
         savepoint = await session.begin_nested()
         try:
-            runtime_session_id = (
-                await session.execute(
-                    _UPSERT_SESSION,
+            if _is_hosted_chat_event(event):
+                cycle = (
+                    await session.execute(
+                        _SELECT_HOSTED_CHAT_CYCLE,
+                        {
+                            "gateway_id": identity.gateway_id,
+                            "session_id": event.session_id,
+                        },
+                    )
+                ).mappings().one_or_none()
+                if cycle is None:
+                    raise EventAdmissionUnavailable
+                cycle_id = cycle["id"]
+                control_generation = int(cycle["control_generation"])
+                maximum = await session.scalar(
+                    _SELECT_MAX_HOSTED_CHAT_SEQUENCE,
                     {
-                        "tenant_id": identity.tenant_id,
-                        "gateway_id": identity.gateway_id,
-                        "session_id": event.session_id,
+                        "cycle_id": cycle_id,
+                        "sequence_floor": _HOSTED_CHAT_STORAGE_SEQUENCE_FLOOR,
                     },
                 )
-            ).scalar_one()
-            cycle_id = (
-                await session.execute(
-                    _UPSERT_CYCLE,
-                    {
-                        "id": uuid4(),
-                        "tenant_id": identity.tenant_id,
-                        "runtime_session_id": runtime_session_id,
-                        "gateway_id": identity.gateway_id,
-                        "session_id": event.session_id,
-                        "control_generation": event.control_generation,
-                    },
-                )
-            ).scalar_one()
+                event_sequence = _next_hosted_chat_storage_sequence(maximum)
+            else:
+                runtime_session_id = (
+                    await session.execute(
+                        _UPSERT_SESSION,
+                        {
+                            "tenant_id": identity.tenant_id,
+                            "gateway_id": identity.gateway_id,
+                            "session_id": event.session_id,
+                        },
+                    )
+                ).scalar_one()
+                control_generation = event.control_generation
+                event_sequence = event.event_sequence
+                cycle_id = (
+                    await session.execute(
+                        _UPSERT_CYCLE,
+                        {
+                            "id": uuid4(),
+                            "tenant_id": identity.tenant_id,
+                            "runtime_session_id": runtime_session_id,
+                            "gateway_id": identity.gateway_id,
+                            "session_id": event.session_id,
+                            "control_generation": control_generation,
+                        },
+                    )
+                ).scalar_one()
             result = await session.execute(
                 _INSERT_EVENT,
                 {
@@ -1071,8 +1234,8 @@ class InboxRepository:
                     "session_id": event.session_id,
                     "event_id": event.event_id,
                     "event_type": event.event_type,
-                    "control_generation": event.control_generation,
-                    "event_sequence": event.event_sequence,
+                    "control_generation": control_generation,
+                    "event_sequence": event_sequence,
                     "content_hash": item.content_hash,
                     "event_body": event.model_dump(mode="json"),
                     "trace_id": trace_id,

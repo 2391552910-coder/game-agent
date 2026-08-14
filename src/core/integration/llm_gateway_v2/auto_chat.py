@@ -1,23 +1,27 @@
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
 from math import isfinite
 from typing import Annotated, Literal
 
 import httpx
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
     StrictInt,
+    StringConstraints,
+    TypeAdapter,
     ValidationError,
     field_validator,
     model_validator,
 )
 
-PositiveRoleId = Annotated[StrictInt, Field(gt=0)]
+PositiveRoleId = Annotated[StrictInt, Field(gt=0, le=9_223_372_036_854_775_807)]
+AutoChatEventId = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$", strict=True),
+]
+_AUTO_CHAT_EVENT_ID_ADAPTER = TypeAdapter(AutoChatEventId)
 
 
 class _AutoChatModel(BaseModel):
@@ -90,37 +94,52 @@ class ConversationContext(_AutoChatModel):
 
 
 class AutoChatMessageRequest(_AutoChatModel):
-    conversation: ConversationContext
-    latest_message: str | None = Field(default=None, alias="latestMessage")
-    force_refresh_summary: Literal[False] = Field(
-        default=False,
-        alias="forceRefreshSummary",
-    )
+    speaker_role_id: PositiveRoleId = Field(alias="speakerRoleId")
+    target_role_id: PositiveRoleId = Field(alias="targetRoleId")
+    pair_key: str = Field(alias="pairKey", min_length=5, max_length=104)
+    question: str = Field(min_length=1)
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("question must not be blank")
+        return stripped
+
+    @model_validator(mode="after")
+    def validate_role_direction(self) -> AutoChatMessageRequest:
+        if self.speaker_role_id == self.target_role_id:
+            raise ValueError("speakerRoleId and targetRoleId must be different")
+        return self
 
     @classmethod
-    def from_conversation(
+    def from_event(
         cls,
-        conversation: ConversationContext,
         *,
-        latest_message: str | None,
+        speaker_role_id: int,
+        target_role_id: int,
+        event_id: str,
+        question: str,
     ) -> AutoChatMessageRequest:
+        normalized_event_id = _AUTO_CHAT_EVENT_ID_ADAPTER.validate_python(event_id)
+        pair_key = (
+            f"{min(speaker_role_id, target_role_id)}:"
+            f"{max(speaker_role_id, target_role_id)}:{normalized_event_id}"
+        )
         return cls(
-            conversation=conversation,
-            latestMessage=latest_message,
-            forceRefreshSummary=False,
+            speakerRoleId=speaker_role_id,
+            targetRoleId=target_role_id,
+            pairKey=pair_key,
+            question=question,
         )
 
 
 class AutoChatMessage(_AutoChatModel):
     speaker_role_id: PositiveRoleId = Field(alias="speakerRoleId")
     target_role_id: PositiveRoleId = Field(alias="targetRoleId")
-    pair_key: str = Field(alias="pairKey", min_length=3, max_length=128)
-    content: str = Field(min_length=1, max_length=80)
-    summary_version: StrictInt = Field(alias="summaryVersion", ge=0)
-    summary_updated_at: str | None = Field(
-        validation_alias=AliasChoices("summaryUpdatedAt", "summary_updated_at"),
-        serialization_alias="summaryUpdatedAt",
-    )
+    pair_key: str = Field(alias="pairKey", min_length=5, max_length=104)
+    content: str = Field(min_length=1)
 
     @field_validator("content")
     @classmethod
@@ -128,6 +147,8 @@ class AutoChatMessage(_AutoChatModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("content must not be blank")
+        if len(stripped.encode("utf-16-le")) // 2 > 1000:
+            raise ValueError("content exceeds Gateway UTF-16 limit")
         return stripped
 
 
@@ -151,43 +172,36 @@ class AutoChatClient:
         *,
         base_url: str,
         timeout_seconds: float = 45.0,
-        deadline_safety_seconds: float = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
-        now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not base_url.strip():
             raise ValueError("base_url must not be empty")
         if not isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
-        if not isfinite(deadline_safety_seconds) or deadline_safety_seconds < 0:
-            raise ValueError("deadline_safety_seconds must be finite and non-negative")
-        self._message_url = f"{base_url.rstrip('/')}/chat/message"
+        self._message_url = _derive_message_url(base_url)
         self._timeout_seconds = timeout_seconds
-        self._deadline_safety_seconds = deadline_safety_seconds
         self._transport = transport
-        self._now_ms = now_ms or (lambda: int(time.time() * 1_000))
 
     async def generate(
         self,
-        conversation: ConversationContext,
         *,
-        latest_message: str | None = None,
+        speaker_role_id: int,
+        target_role_id: int,
+        event_id: str,
+        question: str,
     ) -> AutoChatMessage:
-        remaining_seconds = (conversation.expires_at_ms - self._now_ms()) / 1_000
-        request_timeout = min(
-            self._timeout_seconds,
-            remaining_seconds - self._deadline_safety_seconds,
-        )
-        if request_timeout <= 0:
-            raise AutoChatPermanentError("deadline_exhausted")
-
-        request = AutoChatMessageRequest.from_conversation(
-            conversation,
-            latest_message=latest_message,
-        )
+        try:
+            request = AutoChatMessageRequest.from_event(
+                speaker_role_id=speaker_role_id,
+                target_role_id=target_role_id,
+                event_id=event_id,
+                question=question,
+            )
+        except ValidationError:
+            raise AutoChatPermanentError("request_schema_invalid") from None
         try:
             async with httpx.AsyncClient(
-                timeout=request_timeout,
+                timeout=self._timeout_seconds,
                 transport=self._transport,
             ) as client:
                 response = await client.post(
@@ -213,9 +227,17 @@ class AutoChatClient:
         except ValidationError:
             raise AutoChatPermanentError("response_schema_invalid") from None
         if (
-            message.speaker_role_id != conversation.speaker_role_id
-            or message.target_role_id != conversation.target_role_id
-            or message.pair_key != conversation.pair_key
+            message.speaker_role_id != request.speaker_role_id
+            or message.target_role_id != request.target_role_id
+            or message.pair_key != request.pair_key
         ):
             raise AutoChatPermanentError("response_identity_mismatch")
         return message
+
+
+def _derive_message_url(base_url: str) -> str:
+    parsed = httpx.URL(base_url.strip())
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/chat/message"):
+        path = f"{path}/chat/message" if path else "/chat/message"
+    return str(parsed.copy_with(path=path, query=None, fragment=None))

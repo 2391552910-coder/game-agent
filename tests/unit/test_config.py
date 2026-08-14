@@ -136,11 +136,18 @@ def _run_conftest_environment(tmp_path: Path) -> subprocess.CompletedProcess[str
 
 
 @pytest.fixture(autouse=True)
-def _remove_inherited_v2_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def _remove_inherited_settings_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    safe_names = set(_SAFE_TEST_PROCESS_ENVIRONMENT) | set(_SAFE_LLM_GATEWAY_TEST_ENVIRONMENT)
+    for name in tuple(os.environ):
+        upper_name = name.upper()
+        is_myagent_setting = (
+            upper_name in _MYAGENT_ENV_NAMES
+            or upper_name.startswith(_MYAGENT_ENV_PREFIXES)
+        )
+        if is_myagent_setting and upper_name not in safe_names:
+            monkeypatch.delenv(name, raising=False)
     for name in _V2_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.delenv("EMBEDDING_ENABLED", raising=False)
-    monkeypatch.delenv("RERANK_ENABLED", raising=False)
 
 
 def test_global_test_environment_uses_fixed_safe_placeholders() -> None:
@@ -218,7 +225,7 @@ def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyP
     assert config.llm_gateway_v2_readiness_cache_seconds == 5
     assert config.auto_chat_base_url is None
     assert config.auto_chat_timeout_seconds == 45.0
-    assert config.auto_chat_deadline_safety_seconds == 10.0
+    assert not hasattr(config, "auto_chat_deadline_safety_seconds")
     assert config.llm_gateway_simple_chat_timeout_seconds == 3.0
     assert config.llm_gateway_hosted_chat_fixed_reply is None
 
@@ -258,13 +265,11 @@ def test_auto_chat_configuration_accepts_internal_service_url() -> None:
         **REQUIRED_SETTINGS,
         auto_chat_base_url="http://192.168.1.50:8000/",
         auto_chat_timeout_seconds=40,
-        auto_chat_deadline_safety_seconds=8,
         llm_gateway_simple_chat_timeout_seconds=2.5,
     )
 
     assert config.auto_chat_base_url == "http://192.168.1.50:8000/"
     assert config.auto_chat_timeout_seconds == 40
-    assert config.auto_chat_deadline_safety_seconds == 8
     assert config.llm_gateway_simple_chat_timeout_seconds == 2.5
 
 
@@ -283,8 +288,6 @@ def test_hosted_chat_fixed_reply_configuration_is_available() -> None:
     [
         ("auto_chat_timeout_seconds", 0),
         ("auto_chat_timeout_seconds", 61),
-        ("auto_chat_deadline_safety_seconds", -1),
-        ("auto_chat_deadline_safety_seconds", 46),
         ("llm_gateway_simple_chat_timeout_seconds", 0),
         ("llm_gateway_simple_chat_timeout_seconds", 3.1),
     ],

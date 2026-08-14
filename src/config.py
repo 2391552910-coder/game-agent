@@ -92,7 +92,6 @@ class Settings(BaseSettings):
     # ── Auto Chat ──
     auto_chat_base_url: str | None = Field(default=None)
     auto_chat_timeout_seconds: float = Field(default=45.0, gt=0, le=60.0)
-    auto_chat_deadline_safety_seconds: float = Field(default=10.0, ge=0, le=45.0)
 
     # ── LLM Gateway shared / v1 runtime ──
     llm_gateway_v1_enabled: bool = Field(default=False)

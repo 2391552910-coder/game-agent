@@ -163,7 +163,6 @@ def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
     _mock_settings.llm_gateway_control_max_retries = 1
     _mock_settings.auto_chat_base_url = "http://auto-chat.local" if auto_chat_enabled else None
     _mock_settings.auto_chat_timeout_seconds = 45
-    _mock_settings.auto_chat_deadline_safety_seconds = 10
     _mock_settings.llm_gateway_hosted_chat_queue_size = 100
     _mock_settings.llm_gateway_hosted_chat_state_ttl_seconds = 300
     _mock_settings.llm_gateway_hosted_chat_max_state_entries = 10_000
@@ -177,6 +176,7 @@ def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
     assert isinstance(service, HostedChatService) is expected_enabled
     if expected_enabled:
         assert isinstance(service._conversation_client, AutoChatClient)
+        assert service._identity_resolver is dispatcher.context_repository
     assert isinstance(dispatcher.activity_repository, ActivityPlanRepository)
     assert isinstance(dispatcher.decision_planner.activity_coordinator, ActivityPlanCoordinator)
     assert (

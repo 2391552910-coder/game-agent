@@ -195,9 +195,9 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
                 else AutoChatClient(
                     base_url=auto_chat_base_url,
                     timeout_seconds=getattr(settings, "auto_chat_timeout_seconds", 45.0),
-                    deadline_safety_seconds=getattr(settings, "auto_chat_deadline_safety_seconds", 10.0),
                 )
             ),
+            identity_resolver=inbox_repository,
             simple_router=(
                 None
                 if fixed_chat_reply

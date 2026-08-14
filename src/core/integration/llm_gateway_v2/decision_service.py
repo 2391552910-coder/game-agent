@@ -3,13 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Protocol, cast
-
-from pydantic import ValidationError
 
 from src.core.agents.gateway_v2_models import (
     GatewayV2AgentAction,
@@ -25,12 +22,6 @@ from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanContext,
 )
 from src.core.integration.llm_gateway_v2.activity_planner import ActivityPlanCoordinator
-from src.core.integration.llm_gateway_v2.auto_chat import (
-    AutoChatMessage,
-    AutoChatPermanentError,
-    AutoChatRetryableError,
-    ConversationContext,
-)
 from src.core.integration.llm_gateway_v2.canonical import canonical_json_bytes
 from src.core.integration.llm_gateway_v2.competitive_activity import (
     build_dance_arguments,
@@ -88,25 +79,8 @@ class GatewayV2AgentExecutionError(Exception):
         super().__init__("gateway v2 agent execution failed")
 
 
-class GatewayV2ConversationExecutionError(Exception):
-    stage = "conversation"
-
-    def __init__(self, category: str, *, retryable: bool) -> None:
-        self.category = category
-        self.retryable = retryable
-        super().__init__("gateway v2 conversation execution failed")
-
-
 class GatewayV2AgentRunner(Protocol):
     async def ainvoke(self, state: dict[str, Any]) -> Mapping[str, Any]: ...
-
-
-class GatewayV2ConversationDecisionService(Protocol):
-    async def decide(self, context: GatewayV2AgentContext) -> GatewayV2AgentAction: ...
-
-
-class AutoChatMessageGenerator(Protocol):
-    async def generate(self, conversation: ConversationContext) -> AutoChatMessage: ...
 
 
 def build_gateway_v2_agent_context(event: GatewayV2Event) -> GatewayV2AgentContext:
@@ -574,116 +548,6 @@ def gateway_v2_activity_skill_is_permitted(
     )
 
 
-class GatewayV2AutoChatDecisionService:
-    def __init__(
-        self,
-        *,
-        client: AutoChatMessageGenerator,
-        decision_ttl_ms: int = 10_000,
-        now_ms: Callable[[], int] | None = None,
-    ) -> None:
-        if decision_ttl_ms <= 0:
-            raise ValueError("decision_ttl_ms must be positive")
-        self._client = client
-        self._decision_ttl_ms = decision_ttl_ms
-        self._now_ms = now_ms or (lambda: int(time.time() * 1_000))
-
-    async def decide(self, context: GatewayV2AgentContext) -> GatewayV2AgentAction:
-        if context.lease_kind != "conversation":
-            raise GatewayV2ConversationExecutionError(
-                "lease_kind_invalid",
-                retryable=False,
-            )
-        try:
-            conversation = ConversationContext.model_validate(
-                context.session_snapshot.get("conversation")
-            )
-        except ValidationError:
-            raise GatewayV2ConversationExecutionError(
-                "conversation_context_invalid",
-                retryable=False,
-            ) from None
-
-        started_at = time.monotonic()
-        try:
-            message = await self._client.generate(conversation)
-        except AutoChatRetryableError as error:
-            self._log_failure(conversation, started_at, error.category)
-            raise GatewayV2ConversationExecutionError(
-                error.category,
-                retryable=True,
-            ) from None
-        except AutoChatPermanentError as error:
-            self._log_failure(conversation, started_at, error.category)
-            raise GatewayV2ConversationExecutionError(
-                error.category,
-                retryable=False,
-            ) from None
-
-        remaining_ms = conversation.expires_at_ms - self._now_ms()
-        if remaining_ms <= 0:
-            raise GatewayV2ConversationExecutionError(
-                "deadline_exhausted",
-                retryable=False,
-            )
-        candidate = GatewayV2CallSkillAction(
-            action="call_skill",
-            skillName="nearby_chat_send",
-            schemaVersion="v1",
-            arguments={
-                "conversationId": conversation.conversation_id,
-                "targetRoleId": conversation.target_role_id,
-                "content": message.content,
-            },
-            reason="Auto Chat generated a nearby conversation message",
-            ttlMs=min(self._decision_ttl_ms, remaining_ms),
-        )
-        try:
-            selected = select_gateway_v2_action(context, [candidate])
-        except GatewayV2DecisionSelectionError:
-            self._log_failure(
-                conversation,
-                started_at,
-                "conversation_lease_not_permitted",
-            )
-            raise GatewayV2ConversationExecutionError(
-                "conversation_lease_not_permitted",
-                retryable=False,
-            ) from None
-        logger.info(
-            "Auto Chat conversation message generated",
-            extra=self._log_fields(conversation, started_at),
-        )
-        return selected
-
-    @staticmethod
-    def _log_fields(
-        conversation: ConversationContext,
-        started_at: float,
-    ) -> dict[str, Any]:
-        return {
-            "conversation_id": conversation.conversation_id,
-            "speaker_role_id": conversation.speaker_role_id,
-            "target_role_id": conversation.target_role_id,
-            "elapsed_ms": max(int((time.monotonic() - started_at) * 1_000), 0),
-        }
-
-    @classmethod
-    def _log_failure(
-        cls,
-        conversation: ConversationContext,
-        started_at: float,
-        category: str,
-    ) -> None:
-        logger.warning(
-            "Auto Chat conversation message generation failed",
-            extra={
-                **cls._log_fields(conversation, started_at),
-                "error_category": category,
-            },
-        )
-
-
 class GatewayV2DecisionService:
     def __init__(
         self,
@@ -724,15 +588,11 @@ class GatewayV2DecisionService:
             "snapshot": context.prompt_payload()["session"],
             "gateway_context": context.model_dump(mode="json"),
             "rag_context": "",
-            "enriched_context": "",
-            "behavior_report": "",
             "reasoned_actions": [],
             "errors": [],
             "tracking_summary": "",
             "anomalies": [],
             "abandoned_tracking_ids": [],
-            "intent_result": {},
-            "goal_evaluation_result": {},
             "player_memory": {},
             "activity_plan": activity_plan,
             "recent_action_history": (
@@ -741,7 +601,6 @@ class GatewayV2DecisionService:
             "recent_failure_history": (
                 [] if activity_context is None else [dict(item) for item in activity_context.recent_failures]
             ),
-            "current_phase": None if activity_context is None else activity_context.plan.phase,
             "current_step": current_step,
         }
         try:
@@ -842,7 +701,6 @@ class _DecisionPlanRepository(Protocol):
 class GatewayV2DecisionPlanner:
     decision_service: GatewayV2DecisionService
     repository: _DecisionPlanRepository
-    conversation_service: GatewayV2ConversationDecisionService | None = None
     activity_coordinator: ActivityPlanCoordinator | None = None
     scene_catalog: SceneCatalog | None = None
     force_skills: tuple[str, ...] = ()
@@ -970,12 +828,6 @@ class GatewayV2DecisionPlanner:
         except GatewayV2AgentExecutionError as error:
             return EventProcessResult(
                 "retryable_failed",
-                error_stage=error.stage,
-                error_category=error.category,
-            )
-        except GatewayV2ConversationExecutionError as error:
-            return EventProcessResult(
-                "retryable_failed" if error.retryable else "manual",
                 error_stage=error.stage,
                 error_category=error.category,
             )

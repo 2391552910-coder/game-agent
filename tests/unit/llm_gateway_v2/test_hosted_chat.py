@@ -40,62 +40,28 @@ def _conversation(**overrides: object) -> ConversationContext:
     return ConversationContext.model_validate(payload)
 
 
-def _message(conversation: ConversationContext, content: str = "收到") -> AutoChatMessage:
+def _message(
+    speaker_role_id: int,
+    target_role_id: int,
+    event_id: str,
+    content: str = "收到",
+) -> AutoChatMessage:
     return AutoChatMessage(
-        speakerRoleId=conversation.speaker_role_id,
-        targetRoleId=conversation.target_role_id,
-        pairKey=conversation.pair_key,
+        speakerRoleId=speaker_role_id,
+        targetRoleId=target_role_id,
+        pairKey=f"{min(speaker_role_id, target_role_id)}:{max(speaker_role_id, target_role_id)}:{event_id}",
         content=content,
-        summaryVersion=1,
-        summaryUpdatedAt=None,
     )
 
 
-@pytest.mark.asyncio
-async def test_service_calls_auto_chat_and_forwards_returned_content_unchanged() -> None:
-    generation_requests: list[tuple[ConversationContext, str | None]] = []
+class _RoleResolver:
+    def __init__(self, role_id: str | None = "100") -> None:
+        self.role_id = role_id
+        self.calls: list[tuple[str, str]] = []
 
-    class ConversationClient:
-        async def generate(
-            self,
-            conversation: ConversationContext,
-            *,
-            latest_message: str | None,
-        ) -> AutoChatMessage:
-            generation_requests.append((conversation, latest_message))
-            return AutoChatMessage(
-                speakerRoleId=conversation.speaker_role_id,
-                targetRoleId=conversation.target_role_id,
-                pairKey=conversation.pair_key,
-                content="对话端生成的原始内容",
-                summaryVersion=1,
-                summaryUpdatedAt=None,
-            )
-
-    class Sender:
-        requests: list[HostedChatSendRequest] = []
-
-        async def send(self, request: HostedChatSendRequest) -> HostedChatSendReceipt:
-            self.requests.append(request)
-            return HostedChatSendReceipt("request-1", "message-1")
-
-    sender = Sender()
-    service = HostedChatService(conversation_client=ConversationClient(), sender=sender)
-    conversation = _conversation()
-    event = SimpleNamespace(
-        event_id="nearby-1",
-        session_id="session-1",
-        payload=SimpleNamespace(
-            target=SimpleNamespace(avatar_id="100", role_id="200"),
-            conversation=conversation,
-        ),
-    )
-
-    await service.handle_nearby_friend_request("gateway-1", event)
-
-    assert generation_requests == [(conversation, None)]
-    assert len(sender.requests) == 1
-    assert sender.requests[0].content == "对话端生成的原始内容"
+    async def resolve_role_id(self, gateway_id: str, session_id: str) -> str | None:
+        self.calls.append((gateway_id, session_id))
+        return self.role_id
 
 
 @pytest.mark.asyncio
@@ -153,11 +119,14 @@ async def test_fixed_reply_forwards_content_without_calling_any_model() -> None:
         session_id="session-1",
         payload=SimpleNamespace(
             target=SimpleNamespace(avatar_id="100", role_id="200"),
-            conversation=_conversation(),
+            conversation=None,
         ),
     )
     await service.handle_nearby_friend_request("gateway-1", nearby)
-    assert [request.content for request in sender.requests] == ["Gateway 流程固定回复"]
+    assert [request.content for request in sender.requests] == [
+        "Gateway 流程固定回复",
+        "Gateway 流程固定回复",
+    ]
 
 
 @pytest.mark.asyncio
@@ -247,28 +216,53 @@ async def test_simple_route_does_not_require_gateway_conversation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_complex_route_without_gateway_conversation_fails_explicitly() -> None:
+async def test_complex_route_uses_hosted_role_identity_without_gateway_conversation() -> None:
     class Router:
         async def route(self, text: str) -> SimpleChatRoute:
             return SimpleChatRoute(route="complex", content="")
 
     class ConversationClient:
+        calls: list[dict[str, object]] = []
+
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None = None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
-            raise AssertionError("missing role identity must not call auto chat")
+            self.calls.append(
+                {
+                    "speaker_role_id": speaker_role_id,
+                    "target_role_id": target_role_id,
+                    "event_id": event_id,
+                    "question": question,
+                }
+            )
+            return AutoChatMessage(
+                speakerRoleId=speaker_role_id,
+                targetRoleId=target_role_id,
+                pairKey=f"{min(speaker_role_id, target_role_id)}:"
+                f"{max(speaker_role_id, target_role_id)}:{event_id}",
+                content="对话端回复",
+            )
 
     class Sender:
-        async def send(self, request: HostedChatSendRequest) -> HostedChatSendReceipt:
-            raise AssertionError("failed generation must not send a reply")
+        requests: list[HostedChatSendRequest] = []
 
+        async def send(self, request: HostedChatSendRequest) -> HostedChatSendReceipt:
+            self.requests.append(request)
+            return HostedChatSendReceipt("request-1", "message-1")
+
+    conversation_client = ConversationClient()
+    resolver = _RoleResolver("1248993658045202501")
+    sender = Sender()
     service = HostedChatService(
-        conversation_client=ConversationClient(),
+        conversation_client=conversation_client,
+        identity_resolver=resolver,
         simple_router=Router(),
-        sender=Sender(),
+        sender=sender,
     )
     event = SimpleNamespace(
         event_id="complex-without-conversation",
@@ -282,10 +276,68 @@ async def test_complex_route_without_gateway_conversation_fails_explicitly() -> 
         ),
     )
 
+    await service.handle_chat_received("gateway-1", event)
+
+    assert resolver.calls == [("gateway-1", "session-1")]
+    assert conversation_client.calls == [
+        {
+            "speaker_role_id": 1248993658045202501,
+            "target_role_id": 200,
+            "event_id": "complex-without-conversation",
+            "question": "你最近参加了什么活动？",
+        }
+    ]
+    assert [request.content for request in sender.requests] == ["对话端回复"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role_id", "category"),
+    [
+        (None, "hosted_role_id_missing"),
+        ("not-a-number", "hosted_role_id_invalid"),
+        ("0", "hosted_role_id_invalid"),
+        ("9223372036854775808", "hosted_role_id_invalid"),
+    ],
+)
+async def test_complex_route_rejects_missing_or_invalid_hosted_role_id(
+    role_id: str | None,
+    category: str,
+) -> None:
+    class Router:
+        async def route(self, text: str) -> SimpleChatRoute:
+            return SimpleChatRoute(route="complex", content="")
+
+    class ConversationClient:
+        async def generate(self, **kwargs) -> AutoChatMessage:
+            raise AssertionError("invalid hosted identity must not call auto chat")
+
+    class Sender:
+        async def send(self, request: HostedChatSendRequest) -> HostedChatSendReceipt:
+            raise AssertionError("invalid hosted identity must not send")
+
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver(role_id),
+        simple_router=Router(),
+        sender=Sender(),
+    )
+    event = SimpleNamespace(
+        event_id="invalid-hosted-role",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            supported=True,
+            text="你最近参加了什么活动？",
+            sender=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="private",
+            conversation=None,
+        ),
+    )
+
     with pytest.raises(HostedChatPermanentError) as raised:
         await service.handle_chat_received("gateway-1", event)
 
-    assert raised.value.category == "conversation_required"
+    assert raised.value.category == category
 
 
 @pytest.mark.asyncio
@@ -344,16 +396,18 @@ async def test_complex_route_calls_auto_chat_after_deepseek_classification() -> 
     incoming_text = "  请分析并规划接下来的步骤\n"
 
     class ConversationClient:
-        calls: list[tuple[ConversationContext, str | None]] = []
+        calls: list[tuple[int, int, str, str]] = []
 
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
-            self.calls.append((conversation, latest_message))
-            return _message(conversation, "这是复杂问题的回答")
+            self.calls.append((speaker_role_id, target_role_id, event_id, question))
+            return _message(speaker_role_id, target_role_id, event_id, "这是复杂问题的回答")
 
     class Router:
         async def route(self, text: str) -> SimpleChatRoute:
@@ -371,6 +425,7 @@ async def test_complex_route_calls_auto_chat_after_deepseek_classification() -> 
     sender = Sender()
     service = HostedChatService(
         conversation_client=conversation_client,
+        identity_resolver=_RoleResolver("100"),
         simple_router=Router(),
         sender=sender,
     )
@@ -389,7 +444,7 @@ async def test_complex_route_calls_auto_chat_after_deepseek_classification() -> 
 
     await service.handle_chat_received("gateway-1", event)
 
-    assert conversation_client.calls == [(conversation, incoming_text)]
+    assert conversation_client.calls == [(100, 200, "complex-1", incoming_text)]
     assert sender.requests[0].content == "这是复杂问题的回答"
 
 
@@ -406,16 +461,18 @@ async def test_three_gateway_questions_route_and_forward_as_expected() -> None:
             return routes[text]
 
     class ConversationClient:
-        calls: list[tuple[str, str | None]] = []
+        calls: list[tuple[str, str]] = []
 
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
-            self.calls.append((conversation.conversation_id, latest_message))
-            return _message(conversation, "对话端生成的复杂问题回答")
+            self.calls.append((event_id, question))
+            return _message(speaker_role_id, target_role_id, event_id, "对话端生成的复杂问题回答")
 
     class Sender:
         requests: list[HostedChatSendRequest] = []
@@ -428,6 +485,7 @@ async def test_three_gateway_questions_route_and_forward_as_expected() -> None:
     sender = Sender()
     service = HostedChatService(
         conversation_client=conversation_client,
+        identity_resolver=_RoleResolver("100"),
         simple_router=Router(),
         sender=sender,
     )
@@ -452,8 +510,8 @@ async def test_three_gateway_questions_route_and_forward_as_expected() -> None:
         "对话端生成的复杂问题回答",
     ]
     assert conversation_client.calls == [
-        ("conv-2", "你最近参加了什么活动？"),
-        ("conv-3", "你的名字叫什么"),
+        ("question-2", "你最近参加了什么活动？"),
+        ("question-3", "你的名字叫什么"),
     ]
 
 
@@ -468,10 +526,8 @@ async def test_complex_route_uses_real_auto_chat_http_contract() -> None:
             json={
                 "speakerRoleId": 100,
                 "targetRoleId": 200,
-                "pairKey": "100:200",
+                "pairKey": "100:200:complex-http-1",
                 "content": "我最近参加了夏日庆典。",
-                "summaryVersion": 1,
-                "summaryUpdatedAt": None,
             },
         )
 
@@ -491,23 +547,13 @@ async def test_complex_route_uses_real_auto_chat_http_contract() -> None:
             self.requests.append(request)
             return HostedChatSendReceipt(request_id or "request-1", "message-1")
 
-    conversation = _conversation(
-        historyRounds=[
-            {
-                "askRoleId": 100,
-                "askContent": "你好",
-                "answerRoleId": 200,
-                "answerContent": "你好呀",
-            }
-        ],
-        completedRounds=1,
-    )
     sender = Sender()
     service = HostedChatService(
         conversation_client=AutoChatClient(
             base_url="http://auto-chat.local",
             transport=httpx.MockTransport(auto_chat_handler),
         ),
+        identity_resolver=_RoleResolver("100"),
         simple_router=Router(),
         sender=sender,
     )
@@ -519,7 +565,7 @@ async def test_complex_route_uses_real_auto_chat_http_contract() -> None:
             text="你最近参加了什么活动？",
             sender=SimpleNamespace(avatar_id="100", role_id="200"),
             chat_type="friend",
-            conversation=conversation,
+            conversation=None,
         ),
     )
 
@@ -527,12 +573,9 @@ async def test_complex_route_uses_real_auto_chat_http_contract() -> None:
 
     assert len(auto_chat_requests) == 1
     assert auto_chat_requests[0].read().decode("utf-8") == (
-        '{"conversation":{"conversationId":"conv-100-200-1",'
-        '"pairKey":"100:200","speakerRoleId":100,"targetRoleId":200,'
-        '"brainUsername":"conv-100","historyRounds":[{"askRoleId":100,'
-        '"askContent":"你好","answerRoleId":200,"answerContent":"你好呀"}],'
-        '"completedRounds":1,"maxRounds":6,"expiresAtMs":9999999999999},'
-        '"latestMessage":"你最近参加了什么活动？","forceRefreshSummary":false}'
+        '{"speakerRoleId":100,"targetRoleId":200,'
+        '"pairKey":"100:200:complex-http-1",'
+        '"question":"你最近参加了什么活动？"}'
     )
     assert [request.content for request in sender.requests] == ["我最近参加了夏日庆典。"]
 
@@ -544,11 +587,13 @@ async def test_hosted_chat_logs_status_without_conversation_content(
     class ConversationClient:
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
-            return _message(conversation, "generated-secret")
+            return _message(speaker_role_id, target_role_id, event_id, "generated-secret")
 
     class Router:
         async def route(self, text: str) -> SimpleChatRoute:
@@ -565,6 +610,7 @@ async def test_hosted_chat_logs_status_without_conversation_content(
 
     service = HostedChatService(
         conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver("100"),
         simple_router=Router(),
         sender=Sender(),
     )
@@ -736,23 +782,29 @@ async def test_control_client_uses_service_supplied_request_id() -> None:
 
 @pytest.mark.asyncio
 async def test_hosted_chat_service_ignores_unsupported_and_deduplicates_event() -> None:
-    generated: list[ConversationContext] = []
+    generated: list[str] = []
 
     class ConversationClient:
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None = None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
-            generated.append(conversation)
-            return _message(conversation)
+            generated.append(event_id)
+            return _message(speaker_role_id, target_role_id, event_id)
 
     class Sender:
         async def send(self, request: HostedChatSendRequest):
             return HostedChatSendReceipt("request-1", "message-1")
 
-    service = HostedChatService(conversation_client=ConversationClient(), sender=Sender())
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver("100"),
+        sender=Sender(),
+    )
     conversation = _conversation()
     unsupported = SimpleNamespace(
         event_id="event-1",
@@ -781,7 +833,7 @@ async def test_hosted_chat_service_ignores_unsupported_and_deduplicates_event() 
     )
     await service.handle_chat_received("gateway-1", supported)
     await service.handle_chat_received("gateway-1", supported)
-    assert generated == [conversation]
+    assert generated == ["event-2"]
 
 
 @pytest.mark.asyncio
@@ -791,13 +843,15 @@ async def test_auto_chat_permanent_error_does_not_send_or_regenerate_on_same_eve
     class ConversationClient:
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None = None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
             nonlocal calls
             calls += 1
-            raise AutoChatPermanentError("deadline_exhausted")
+            raise AutoChatPermanentError("response_schema_invalid")
 
     class Sender:
         calls = 0
@@ -807,7 +861,11 @@ async def test_auto_chat_permanent_error_does_not_send_or_regenerate_on_same_eve
             return HostedChatSendReceipt("request-1", "message-1")
 
     sender = Sender()
-    service = HostedChatService(conversation_client=ConversationClient(), sender=sender)
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver("100"),
+        sender=sender,
+    )
     event = SimpleNamespace(
         event_id="event-timeout",
         session_id="session-1",
@@ -833,15 +891,17 @@ async def test_auto_chat_retryable_error_releases_event_for_retry() -> None:
     class ConversationClient:
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None = None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise AutoChatRetryableError("timeout")
-            return _message(conversation)
+            return _message(speaker_role_id, target_role_id, event_id)
 
     class Sender:
         calls = 0
@@ -851,7 +911,11 @@ async def test_auto_chat_retryable_error_releases_event_for_retry() -> None:
             return HostedChatSendReceipt("request-1", "message-1")
 
     sender = Sender()
-    service = HostedChatService(conversation_client=ConversationClient(), sender=sender)
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver("100"),
+        sender=sender,
+    )
     event = SimpleNamespace(
         event_id="event-retryable",
         session_id="session-1",
@@ -879,13 +943,15 @@ async def test_sender_retry_reuses_generated_content_and_request_id() -> None:
     class ConversationClient:
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None = None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
             nonlocal generator_calls
             generator_calls += 1
-            return _message(conversation, "只生成一次")
+            return _message(speaker_role_id, target_role_id, event_id, "只生成一次")
 
     class Sender:
         requests: list[HostedChatSendRequest] = []
@@ -906,7 +972,11 @@ async def test_sender_retry_reuses_generated_content_and_request_id() -> None:
             return HostedChatSendReceipt(request_id or "request-1", "message-1")
 
     sender = Sender()
-    service = HostedChatService(conversation_client=ConversationClient(), sender=sender)
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver("100"),
+        sender=sender,
+    )
     event = SimpleNamespace(
         event_id="event-send-retry",
         session_id="session-1",
@@ -933,11 +1003,13 @@ async def test_result_before_202_is_reconciled_without_resend() -> None:
     class ConversationClient:
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None = None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
-            return _message(conversation)
+            return _message(speaker_role_id, target_role_id, event_id)
 
     class Sender:
         calls = 0
@@ -947,7 +1019,11 @@ async def test_result_before_202_is_reconciled_without_resend() -> None:
             return HostedChatSendReceipt("request-early", "message-early")
 
     sender = Sender()
-    service = HostedChatService(conversation_client=ConversationClient(), sender=sender)
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver("100"),
+        sender=sender,
+    )
     result_event = SimpleNamespace(
         event_id="result-1",
         payload=SimpleNamespace(
@@ -982,17 +1058,23 @@ async def test_send_result_rejects_mismatched_target_identity() -> None:
     class ConversationClient:
         async def generate(
             self,
-            conversation: ConversationContext,
             *,
-            latest_message: str | None = None,
+            speaker_role_id: int,
+            target_role_id: int,
+            event_id: str,
+            question: str,
         ) -> AutoChatMessage:
-            return _message(conversation)
+            return _message(speaker_role_id, target_role_id, event_id)
 
     class Sender:
         async def send(self, request: HostedChatSendRequest):
             return HostedChatSendReceipt("request-1", "message-1")
 
-    service = HostedChatService(conversation_client=ConversationClient(), sender=Sender())
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        identity_resolver=_RoleResolver("100"),
+        sender=Sender(),
+    )
     received = SimpleNamespace(
         event_id="event-1",
         session_id="session-1",
@@ -1018,83 +1100,3 @@ async def test_send_result_rejects_mismatched_target_identity() -> None:
     )
     with pytest.raises(HostedChatPermanentError):
         await service.handle_send_result("gateway-1", mismatched)
-
-
-@pytest.mark.asyncio
-async def test_nearby_opening_then_received_reply_uses_gateway_conversations() -> None:
-    generation_requests: list[tuple[ConversationContext, str | None]] = []
-
-    class ConversationClient:
-        async def generate(
-            self,
-            conversation: ConversationContext,
-            *,
-            latest_message: str | None,
-        ) -> AutoChatMessage:
-            generation_requests.append((conversation, latest_message))
-            content = "开场白" if len(generation_requests) == 1 else "回复内容"
-            return _message(conversation, content)
-
-    class Sender:
-        requests: list[HostedChatSendRequest] = []
-
-        async def send(self, request: HostedChatSendRequest):
-            self.requests.append(request)
-            sequence = len(self.requests)
-            return HostedChatSendReceipt(f"request-{sequence}", f"message-{sequence}")
-
-    sender = Sender()
-    service = HostedChatService(conversation_client=ConversationClient(), sender=sender)
-    opening_conversation = _conversation()
-    nearby = SimpleNamespace(
-        event_id="nearby-1",
-        session_id="session-1",
-        payload=SimpleNamespace(
-            target=SimpleNamespace(avatar_id="100", role_id="200"),
-            conversation=opening_conversation,
-        ),
-    )
-    await service.handle_nearby_friend_request("gateway-1", nearby)
-    sent = SimpleNamespace(
-        event_id="result-1",
-        payload=SimpleNamespace(
-            chat_message_id="message-1",
-            session_id="session-1",
-            target=SimpleNamespace(avatar_id="100", role_id="200"),
-            chat_type="friend",
-            status="sent",
-            reason=None,
-        ),
-    )
-    await service.handle_send_result("gateway-1", sent)
-    reply_conversation = _conversation(
-        historyRounds=[
-            {
-                "askRoleId": 100,
-                "askContent": "开场白",
-                "answerRoleId": 200,
-                "answerContent": "你好",
-            }
-        ],
-        completedRounds=1,
-    )
-    reply = SimpleNamespace(
-        event_id="received-1",
-        session_id="session-1",
-        payload=SimpleNamespace(
-            supported=True,
-            text="你好",
-            sender=SimpleNamespace(avatar_id="100", role_id="200"),
-            chat_type="friend",
-            conversation=reply_conversation,
-        ),
-    )
-    await service.handle_chat_received("gateway-1", reply)
-
-    assert [request.content for request in sender.requests] == ["开场白", "回复内容"]
-    assert {request.target_role_id for request in sender.requests} == {"200"}
-    assert generation_requests == [
-        (opening_conversation, None),
-        (reply_conversation, "你好"),
-    ]
-    assert generation_requests[1][0].history_rounds[0].ask_content == "开场白"

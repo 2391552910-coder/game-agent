@@ -74,6 +74,27 @@ def _payload(*events: dict) -> dict:
     }
 
 
+def _chat_received_event() -> dict:
+    return {
+        "eventId": "chat-received-1",
+        "eventType": "chat_received",
+        "sessionId": "session-1",
+        "stateVersion": 0,
+        "decisionLeaseId": None,
+        "occurredAtMs": 1_700_000_000_001,
+        "payload": {
+            "sessionId": "session-1",
+            "schemaVersion": "v1",
+            "contentType": 0,
+            "sender": {"avatarId": "100", "roleId": "200"},
+            "chatType": "private",
+            "supported": True,
+            "text": "你好",
+            "serverTimeMs": 1_700_000_000_001,
+        },
+    }
+
+
 def _body(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
 
@@ -136,6 +157,30 @@ async def test_valid_signed_batch_returns_exact_ack_without_tenant_api_key(clien
     identity, envelope = accept.await_args.args
     assert identity == InboundGatewayIdentity(APP_ID, GATEWAY_ID, TENANT_ID)
     assert envelope.trace_id == "trace-1"
+
+
+@pytest.mark.asyncio
+async def test_signed_chat_batch_does_not_require_decision_order_fields(client, _mock_settings) -> None:
+    _configure(_mock_settings)
+    ack = GatewayV2BatchAck.model_validate(
+        {
+            "accepted": True,
+            "traceId": "trace-1",
+            "receivedEventIds": ["chat-received-1"],
+            "duplicateEventIds": [],
+        }
+    )
+    with patch(
+        "src.api.routes.gateway_v2.accept_gateway_event_batch",
+        AsyncMock(return_value=ack),
+    ) as accept:
+        response = await _post(client, _payload(_chat_received_event()))
+
+    assert response.status_code == 200
+    event = accept.await_args.args[1].events[0]
+    assert event.event_type == "chat_received"
+    assert "controlGeneration" not in event.model_dump(mode="json")
+    assert "eventSequence" not in event.model_dump(mode="json")
 
 
 @pytest.mark.parametrize(

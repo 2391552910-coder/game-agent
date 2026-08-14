@@ -147,6 +147,26 @@ _UPDATE_ACTIVITY_STATE = sa.text(
     sa.bindparam("last_event_sequence", type_=sa.BigInteger),
 )
 
+_UPDATE_HOSTED_CHAT_ACTIVITY_STATE = sa.text(
+    """
+    UPDATE llm_gateway_control_cycles
+    SET activity_plan_id = :activity_plan_id,
+        activity_goal = :activity_goal,
+        activity_plan = :activity_plan,
+        activity_phase = :activity_phase,
+        activity_status = :activity_status,
+        activity_current_step_id = :activity_current_step_id,
+        activity_plan_version = :activity_plan_version,
+        updated_at = clock_timestamp()
+    WHERE id = :cycle_id
+      AND status IN ('pending', 'active')
+    RETURNING id
+    """
+).bindparams(
+    sa.bindparam("activity_goal", type_=JSONB),
+    sa.bindparam("activity_plan", type_=JSONB),
+)
+
 _SELECT_DECISION_BINDING = sa.text(
     """
     SELECT activity_plan_id, activity_plan_version, activity_step_id, activity_phase
@@ -315,12 +335,17 @@ class ActivityPlanRepository:
         return await self._complete_passive_step(event)
 
     async def record_chat_opportunity(self, event: ClaimedGatewayEvent) -> bool:
-        return await self._complete_passive_step(event)
+        return await self._complete_passive_step(event, track_event_order=False)
 
     async def complete_passive_step(self, event: ClaimedGatewayEvent) -> bool:
         return await self._complete_passive_step(event)
 
-    async def _complete_passive_step(self, event: ClaimedGatewayEvent) -> bool:
+    async def _complete_passive_step(
+        self,
+        event: ClaimedGatewayEvent,
+        *,
+        track_event_order: bool = True,
+    ) -> bool:
         try:
             async with self._session_factory() as session, session.begin():
                 row = await self._lock_cycle(session, event)
@@ -332,7 +357,10 @@ class ActivityPlanRepository:
                 if current.phase != "social" or current.skill_name is not None:
                     return True
                 updated = complete_social_opportunity(plan)
-                await self._write_state(session, event, updated)
+                if track_event_order:
+                    await self._write_state(session, event, updated)
+                else:
+                    await self._write_hosted_chat_state(session, event, updated)
                 return True
         except (ActivityPlanValidationError, SQLAlchemyError, OSError) as error:
             raise ActivityPlanUnavailableError from error
@@ -450,8 +478,28 @@ class ActivityPlanRepository:
     ) -> None:
         await self._write_state(session, event, plan)
 
+    async def _write_hosted_chat_state(
+        self,
+        session: AsyncSession,
+        event: ClaimedGatewayEvent,
+        plan: ActivityPlan,
+    ) -> None:
+        parameters = self._hosted_chat_state_parameters(event, plan)
+        result = await session.execute(_UPDATE_HOSTED_CHAT_ACTIVITY_STATE, parameters)
+        if result.scalar_one_or_none() is None:
+            raise ActivityPlanUnavailableError
+
     @staticmethod
     def _state_parameters(event: ClaimedGatewayEvent, plan: ActivityPlan) -> dict[str, Any]:
+        return {
+            **ActivityPlanRepository._hosted_chat_state_parameters(event, plan),
+            "activity_last_event_id": event.row_id,
+            "activity_last_event_sequence": event.event_sequence,
+            "last_event_sequence": event.event_sequence,
+        }
+
+    @staticmethod
+    def _hosted_chat_state_parameters(event: ClaimedGatewayEvent, plan: ActivityPlan) -> dict[str, Any]:
         body = plan.model_dump(mode="json", by_alias=True)
         goal = {
             "goalId": plan.goal_id,
@@ -466,9 +514,6 @@ class ActivityPlanRepository:
             "activity_status": plan.status,
             "activity_current_step_id": plan.current_step_id,
             "activity_plan_version": plan.version,
-            "activity_last_event_id": event.row_id,
-            "activity_last_event_sequence": event.event_sequence,
-            "last_event_sequence": event.event_sequence,
         }
 
     @staticmethod

@@ -268,19 +268,18 @@ def _event(
         if event_type in {"nearby_friend_chat_requested", "chat_send_result"}
         else sequence
     )
-    return parse_gateway_v2_event(
-        {
-            "eventId": f"event-{sequence}",
-            "eventType": event_type,
-            "sessionId": SESSION_ID,
-            "controlGeneration": 1,
-            "eventSequence": sequence,
-            "stateVersion": wire_state_version,
-            "decisionLeaseId": top_lease_id,
-            "occurredAtMs": occurred_at_ms,
-            "payload": payload,
-        }
-    )
+    event = {
+        "eventId": f"event-{sequence}",
+        "eventType": event_type,
+        "sessionId": SESSION_ID,
+        "stateVersion": wire_state_version,
+        "decisionLeaseId": top_lease_id,
+        "occurredAtMs": occurred_at_ms,
+        "payload": payload,
+    }
+    if event_type not in {"nearby_friend_chat_requested", "chat_send_result"}:
+        event.update(controlGeneration=1, eventSequence=sequence)
+    return parse_gateway_v2_event(event)
 
 
 def _first_proposal() -> ActivityPlanProposal:
@@ -557,7 +556,8 @@ async def test_activity_plan_survives_runtime_restart_and_advances_through_socia
             await session.execute(
                 sa.text(
                     "SELECT activity_plan_version, activity_status, activity_phase, "
-                    "activity_current_step_id FROM llm_gateway_control_cycles"
+                    "activity_current_step_id, activity_last_event_sequence "
+                    "FROM llm_gateway_control_cycles"
                 )
             )
         ).mappings().one()
@@ -566,6 +566,7 @@ async def test_activity_plan_survives_runtime_restart_and_advances_through_socia
         "activity_status": "active",
         "activity_phase": "activity",
         "activity_current_step_id": "coffee",
+        "activity_last_event_sequence": 7,
     }
 
 

@@ -19,7 +19,6 @@ from src.core.integration.llm_gateway_v2.auto_chat import (
     AutoChatMessage,
     AutoChatPermanentError,
     AutoChatRetryableError,
-    ConversationContext,
 )
 from src.core.integration.llm_gateway_v2.canonical import canonical_json_bytes
 from src.core.integration.llm_gateway_v2.simple_chat import (
@@ -99,14 +98,20 @@ class HostedChatSender(Protocol):
 class HostedChatConversationClient(Protocol):
     async def generate(
         self,
-        conversation: ConversationContext,
         *,
-        latest_message: str | None = None,
+        speaker_role_id: int,
+        target_role_id: int,
+        event_id: str,
+        question: str,
     ) -> AutoChatMessage: ...
 
 
 class HostedChatSimpleRouter(Protocol):
     async def route(self, text: str) -> SimpleChatRoute: ...
+
+
+class HostedRoleIdentityResolver(Protocol):
+    async def resolve_role_id(self, gateway_id: str, session_id: str) -> str | None: ...
 
 
 class HostedChatControlClient:
@@ -231,6 +236,7 @@ class HostedChatService:
         *,
         conversation_client: HostedChatConversationClient | None,
         sender: HostedChatSender,
+        identity_resolver: HostedRoleIdentityResolver | None = None,
         simple_router: HostedChatSimpleRouter | None = None,
         fixed_reply: str | None = None,
         max_queue_size: int = 100,
@@ -252,6 +258,7 @@ class HostedChatService:
                 raise ValueError("fixed_reply exceeds UTF-16 limit")
         self._conversation_client = conversation_client
         self._sender = sender
+        self._identity_resolver = identity_resolver
         self._simple_router = simple_router
         self._fixed_reply = fixed_reply
         self._semaphore = asyncio.Semaphore(max_queue_size)
@@ -284,7 +291,6 @@ class HostedChatService:
                 sender.avatar_id,
                 sender.role_id,
                 payload.chat_type,
-                payload.conversation,
                 payload.text,
             )
         except HostedChatPermanentError:
@@ -298,8 +304,6 @@ class HostedChatService:
         event_id = str(event.event_id)
         if not await self._claim_event(gateway_id, event_id):
             return
-        if self._fixed_reply is not None:
-            return
         payload = event.payload
         target = payload.target
         try:
@@ -310,7 +314,6 @@ class HostedChatService:
                 target.avatar_id,
                 target.role_id,
                 "friend",
-                payload.conversation,
                 None,
             )
         except HostedChatPermanentError:
@@ -362,11 +365,9 @@ class HostedChatService:
         target_avatar_id: str,
         target_role_id: str,
         chat_type: HostedChatType,
-        conversation: ConversationContext | None,
         incoming_text: str | None,
     ) -> None:
-        conversation_key = conversation.pair_key if conversation is not None else f"target:{target_role_id}"
-        key = (gateway_id, session_id, conversation_key)
+        key = (gateway_id, session_id, f"target:{target_role_id}")
         async with self._state_lock:
             if self._queued_count >= self._max_queue_size:
                 raise HostedChatRetryableError("queue_full")
@@ -381,7 +382,6 @@ class HostedChatService:
                     target_avatar_id,
                     target_role_id,
                     chat_type,
-                    conversation,
                     incoming_text,
                 )
         finally:
@@ -403,11 +403,9 @@ class HostedChatService:
         target_avatar_id: str,
         target_role_id: str,
         chat_type: HostedChatType,
-        conversation: ConversationContext | None,
         incoming_text: str | None,
     ) -> None:
-        conversation_key = conversation.pair_key if conversation is not None else f"target:{target_role_id}"
-        key = (gateway_id, session_id, conversation_key)
+        key = (gateway_id, session_id, f"target:{target_role_id}")
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             pending_key = (gateway_id, event_id)
@@ -418,11 +416,12 @@ class HostedChatService:
                     pending = None
             if pending is None:
                 request = await self._build_request(
+                    gateway_id=gateway_id,
+                    event_id=event_id,
                     session_id=session_id,
                     target_avatar_id=target_avatar_id,
                     target_role_id=target_role_id,
                     chat_type=chat_type,
-                    conversation=conversation,
                     incoming_text=incoming_text,
                 )
                 pending = _ExpiringPendingSend(
@@ -476,14 +475,15 @@ class HostedChatService:
     async def _build_request(
         self,
         *,
+        gateway_id: str,
+        event_id: str,
         session_id: str,
         target_avatar_id: str,
         target_role_id: str,
         chat_type: HostedChatType,
-        conversation: ConversationContext | None,
         incoming_text: str | None,
     ) -> HostedChatSendRequest:
-        if incoming_text is not None and self._fixed_reply is not None:
+        if self._fixed_reply is not None:
             return HostedChatSendRequest(
                 sessionId=session_id,
                 targetAvatarId=target_avatar_id,
@@ -507,23 +507,38 @@ class HostedChatService:
                     content=route.content,
                 )
 
-        if conversation is None:
-            raise HostedChatPermanentError("conversation_required")
+        if incoming_text is None:
+            raise HostedChatPermanentError("opening_fixed_reply_not_configured")
         if self._conversation_client is None:
             raise HostedChatPermanentError("conversation_client_not_configured")
+        if self._identity_resolver is None:
+            raise HostedChatPermanentError("hosted_role_identity_resolver_not_configured")
+        hosted_role_id = await self._identity_resolver.resolve_role_id(gateway_id, session_id)
+        if hosted_role_id is None:
+            raise HostedChatPermanentError("hosted_role_id_missing")
+        speaker_role_id = _parse_role_id(hosted_role_id, category="hosted_role_id_invalid")
+        parsed_target_role_id = _parse_role_id(target_role_id, category="target_role_id_invalid")
+        if speaker_role_id == parsed_target_role_id:
+            raise HostedChatPermanentError("hosted_role_identity_conflict")
         try:
             message = await self._conversation_client.generate(
-                conversation,
-                latest_message=incoming_text,
+                speaker_role_id=speaker_role_id,
+                target_role_id=parsed_target_role_id,
+                event_id=event_id,
+                question=incoming_text,
             )
         except AutoChatRetryableError as error:
             raise HostedChatRetryableError(error.category) from None
         except AutoChatPermanentError as error:
             raise HostedChatPermanentError(error.category) from None
+        expected_pair_key = (
+            f"{min(speaker_role_id, parsed_target_role_id)}:"
+            f"{max(speaker_role_id, parsed_target_role_id)}:{event_id}"
+        )
         if (
-            message.speaker_role_id != conversation.speaker_role_id
-            or message.target_role_id != conversation.target_role_id
-            or message.pair_key != conversation.pair_key
+            message.speaker_role_id != speaker_role_id
+            or message.target_role_id != parsed_target_role_id
+            or message.pair_key != expected_pair_key
         ):
             raise HostedChatPermanentError("response_identity_mismatch")
         return HostedChatSendRequest(
@@ -581,3 +596,12 @@ class HostedChatService:
             and request.target_role_id == result.target_role_id
             and request.chat_type == result.chat_type
         )
+
+
+def _parse_role_id(value: object, *, category: str) -> int:
+    if not isinstance(value, str) or not value.isdigit() or value == "0":
+        raise HostedChatPermanentError(category)
+    parsed = int(value)
+    if parsed > 9_223_372_036_854_775_807:
+        raise HostedChatPermanentError(category)
+    return parsed

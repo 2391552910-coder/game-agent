@@ -775,6 +775,11 @@ class ChatReceivedPayload(_WireModel):
 
 class NearbyFriendChatRequestedPayload(_WireModel):
     session_id: NonEmptyString128 = Field(validation_alias="sessionId", serialization_alias="sessionId")
+    schema_version: Literal["v1"] = Field(
+        default="v1",
+        validation_alias="schemaVersion",
+        serialization_alias="schemaVersion",
+    )
     target: ChatTarget
     chat_type: Literal["friend"] = Field(validation_alias="chatType", serialization_alias="chatType")
     distance: float = Field(ge=0)
@@ -782,7 +787,7 @@ class NearbyFriendChatRequestedPayload(_WireModel):
         validation_alias="friendChatCount",
         serialization_alias="friendChatCount",
     )
-    conversation: ConversationContext
+    conversation: ConversationContext | None = None
 
     @field_validator("distance")
     @classmethod
@@ -793,19 +798,24 @@ class NearbyFriendChatRequestedPayload(_WireModel):
 
     @model_validator(mode="after")
     def validate_conversation_target(self) -> "NearbyFriendChatRequestedPayload":
-        if int(self.target.role_id) != self.conversation.target_role_id:
+        if self.conversation is not None and int(self.target.role_id) != self.conversation.target_role_id:
             raise ValueError("chat target roleId does not match conversation targetRoleId")
         return self
 
 
 class ChatSendResultPayload(_WireModel):
     session_id: NonEmptyString128 = Field(validation_alias="sessionId", serialization_alias="sessionId")
+    schema_version: Literal["v1"] = Field(
+        default="v1",
+        validation_alias="schemaVersion",
+        serialization_alias="schemaVersion",
+    )
     chat_message_id: NonEmptyString128 = Field(validation_alias="chatMessageId", serialization_alias="chatMessageId")
     target: ChatTarget
     chat_type: ChatType = Field(validation_alias="chatType", serialization_alias="chatType")
     status: ChatSendResultStatus
     reason: NonEmptyString256 | None = None
-    upstream_code: NonEmptyString128 | None = Field(
+    upstream_code: Annotated[int, Strict()] | None = Field(
         default=None,
         validation_alias="upstreamCode",
         serialization_alias="upstreamCode",
@@ -815,14 +825,7 @@ class ChatSendResultPayload(_WireModel):
         serialization_alias="completedAtMs",
     )
 
-    @model_validator(mode="after")
-    def validate_reason(self) -> "ChatSendResultPayload":
-        if self.status == "failed" and self.reason is None:
-            raise ValueError("failed chat result requires reason")
-        return self
-
-
-class _GatewayV2EventBase(_WireModel):
+class _GatewayV2CommonEventBase(_WireModel):
     event_id: NonEmptyString128 = Field(
         validation_alias="eventId",
         serialization_alias="eventId",
@@ -830,14 +833,6 @@ class _GatewayV2EventBase(_WireModel):
     session_id: NonEmptyString128 = Field(
         validation_alias="sessionId",
         serialization_alias="sessionId",
-    )
-    control_generation: StrictPositiveInt = Field(
-        validation_alias="controlGeneration",
-        serialization_alias="controlGeneration",
-    )
-    event_sequence: StrictPositiveInt = Field(
-        validation_alias="eventSequence",
-        serialization_alias="eventSequence",
     )
     state_version: StrictNonNegativeInt = Field(
         validation_alias="stateVersion",
@@ -850,6 +845,17 @@ class _GatewayV2EventBase(_WireModel):
     occurred_at_ms: StrictNonNegativeInt = Field(
         validation_alias="occurredAtMs",
         serialization_alias="occurredAtMs",
+    )
+
+
+class _GatewayV2EventBase(_GatewayV2CommonEventBase):
+    control_generation: StrictPositiveInt = Field(
+        validation_alias="controlGeneration",
+        serialization_alias="controlGeneration",
+    )
+    event_sequence: StrictPositiveInt = Field(
+        validation_alias="eventSequence",
+        serialization_alias="eventSequence",
     )
 
     def validate_lease_identity(self, lease: DecisionLeaseContext) -> None:
@@ -937,7 +943,7 @@ class SessionStoppedEvent(_GatewayV2EventBase):
     payload: SessionStoppedPayload
 
 
-class ChatReceivedEvent(_GatewayV2EventBase):
+class ChatReceivedEvent(_GatewayV2CommonEventBase):
     event_type: Literal["chat_received"] = Field(validation_alias="eventType", serialization_alias="eventType")
     payload: ChatReceivedPayload
 
@@ -950,7 +956,7 @@ class ChatReceivedEvent(_GatewayV2EventBase):
         return self
 
 
-class NearbyFriendChatRequestedEvent(_GatewayV2EventBase):
+class NearbyFriendChatRequestedEvent(_GatewayV2CommonEventBase):
     event_type: Literal["nearby_friend_chat_requested"] = Field(
         validation_alias="eventType", serialization_alias="eventType"
     )
@@ -965,7 +971,7 @@ class NearbyFriendChatRequestedEvent(_GatewayV2EventBase):
         return self
 
 
-class ChatSendResultEvent(_GatewayV2EventBase):
+class ChatSendResultEvent(_GatewayV2CommonEventBase):
     event_type: Literal["chat_send_result"] = Field(validation_alias="eventType", serialization_alias="eventType")
     payload: ChatSendResultPayload
 

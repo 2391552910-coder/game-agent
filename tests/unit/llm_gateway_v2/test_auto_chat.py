@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 
@@ -36,58 +34,63 @@ def _conversation(**overrides: object) -> ConversationContext:
     return ConversationContext.model_validate(payload)
 
 
+def _response(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "speakerRoleId": 10001,
+        "targetRoleId": 10002,
+        "pairKey": "10001:10002:event-123",
+        "content": "我已经上线了，等你一起走。",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _client(
     transport: httpx.AsyncBaseTransport,
     *,
-    now_ms: int = 1_000_000,
+    base_url: str = "http://auto-chat.local/",
 ) -> AutoChatClient:
     return AutoChatClient(
-        base_url="http://auto-chat.local/",
+        base_url=base_url,
         timeout_seconds=45,
-        deadline_safety_seconds=10,
         transport=transport,
-        now_ms=lambda: now_ms,
     )
 
 
-async def test_client_sends_full_conversation_and_latest_message_without_auth() -> None:
+async def _generate(
+    client: AutoChatClient,
+    *,
+    speaker_role_id: int = 10001,
+    target_role_id: int = 10002,
+    event_id: str = "event-123",
+    question: str = "你最近参加了什么活动？",
+):
+    return await client.generate(
+        speaker_role_id=speaker_role_id,
+        target_role_id=target_role_id,
+        event_id=event_id,
+        question=question,
+    )
+
+
+async def test_client_sends_exact_four_field_request_without_auth() -> None:
     requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "speakerRoleId": 10001,
-                "targetRoleId": 10002,
-                "pairKey": "10001:10002",
-                "content": "我已经上线了，等你一起走。",
-                "summaryVersion": 3,
-                "summaryUpdatedAt": None,
-            },
-        )
+        return httpx.Response(200, json=_response())
 
-    result = await _client(httpx.MockTransport(handler)).generate(
-        _conversation(),
-        latest_message="你最近参加了什么活动？",
-    )
+    result = await _generate(_client(httpx.MockTransport(handler)))
 
     assert result.content == "我已经上线了，等你一起走。"
     assert len(requests) == 1
     assert str(requests[0].url) == "http://auto-chat.local/chat/message"
     assert requests[0].headers["content-type"] == "application/json"
-    assert requests[0].read().decode("utf-8")
     assert requests[0].content.decode("utf-8") == (
-        '{"conversation":{"conversationId":"conv-10001-10002-1",'
-        '"pairKey":"10001:10002","speakerRoleId":10001,'
-        '"targetRoleId":10002,"brainUsername":"conv-10001",'
-        '"historyRounds":[{"askRoleId":10001,"askContent":"你今天上线吗？",'
-        '"answerRoleId":10002,"answerContent":"已经上线了。"}],'
-        '"completedRounds":1,"maxRounds":6,"expiresAtMs":1060000},'
-        '"latestMessage":"你最近参加了什么活动？",'
-        '"forceRefreshSummary":false}'
+        '{"speakerRoleId":10001,"targetRoleId":10002,'
+        '"pairKey":"10001:10002:event-123",'
+        '"question":"你最近参加了什么活动？"}'
     )
-    assert b"userPrompt" not in requests[0].content
     assert {
         "authorization",
         "x-api-key",
@@ -98,71 +101,21 @@ async def test_client_sends_full_conversation_and_latest_message_without_auth() 
     }.isdisjoint(requests[0].headers)
 
 
-async def test_client_sends_null_latest_message_for_opening_request() -> None:
-    requests: list[httpx.Request] = []
+async def test_client_accepts_full_message_endpoint_as_base_url() -> None:
+    paths: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "speakerRoleId": 10001,
-                "targetRoleId": 10002,
-                "pairKey": "10001:10002",
-                "content": "你好，今天准备去哪里？",
-                "summaryVersion": 0,
-                "summaryUpdatedAt": None,
-            },
-        )
+        paths.append(request.url.path)
+        return httpx.Response(200, json=_response())
 
-    await _client(httpx.MockTransport(handler)).generate(
-        _conversation(),
-        latest_message=None,
+    await _generate(
+        _client(
+            httpx.MockTransport(handler),
+            base_url="http://auto-chat.local/chat/message",
+        )
     )
 
-    assert json.loads(requests[0].read())["latestMessage"] is None
-
-
-async def test_client_caps_timeout_to_conversation_deadline_minus_safety_margin() -> None:
-    observed_timeout: list[float] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        timeout = request.extensions["timeout"]
-        observed_timeout.append(timeout["read"])
-        return httpx.Response(
-            200,
-            json={
-                "speakerRoleId": 10001,
-                "targetRoleId": 10002,
-                "pairKey": "10001:10002",
-                "content": "好的。",
-                "summaryVersion": 0,
-                "summaryUpdatedAt": None,
-            },
-        )
-
-    conversation = _conversation(expiresAtMs=1_025_000)
-
-    await _client(httpx.MockTransport(handler)).generate(conversation)
-
-    assert observed_timeout == [15.0]
-
-
-async def test_client_rejects_request_when_deadline_has_no_safety_window() -> None:
-    calls = 0
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(500)
-
-    with pytest.raises(AutoChatPermanentError) as raised:
-        await _client(httpx.MockTransport(handler)).generate(
-            _conversation(expiresAtMs=1_010_000)
-        )
-
-    assert raised.value.category == "deadline_exhausted"
-    assert calls == 0
+    assert paths == ["/chat/message"]
 
 
 @pytest.mark.parametrize(
@@ -170,10 +123,10 @@ async def test_client_rejects_request_when_deadline_has_no_safety_window() -> No
     [
         ({"speakerRoleId": 99999}, "response_identity_mismatch"),
         ({"targetRoleId": 99999}, "response_identity_mismatch"),
-        ({"pairKey": "10001:99999"}, "response_identity_mismatch"),
+        ({"pairKey": "10001:10002:other-event"}, "response_identity_mismatch"),
         ({"content": "   "}, "response_schema_invalid"),
-        ({"content": "长" * 81}, "response_schema_invalid"),
-        ({"summaryVersion": -1}, "response_schema_invalid"),
+        ({"content": "长" * 1001}, "response_schema_invalid"),
+        ({"summaryVersion": 1}, "response_schema_invalid"),
     ],
 )
 async def test_client_rejects_invalid_auto_chat_response(
@@ -181,19 +134,10 @@ async def test_client_rejects_invalid_auto_chat_response(
     category: str,
 ) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        payload: dict[str, object] = {
-            "speakerRoleId": 10001,
-            "targetRoleId": 10002,
-            "pairKey": "10001:10002",
-            "content": "好的。",
-            "summaryVersion": 0,
-            "summaryUpdatedAt": None,
-        }
-        payload.update(response_overrides)
-        return httpx.Response(200, json=payload)
+        return httpx.Response(200, json=_response(**response_overrides))
 
     with pytest.raises(AutoChatPermanentError) as raised:
-        await _client(httpx.MockTransport(handler)).generate(_conversation())
+        await _generate(_client(httpx.MockTransport(handler)))
 
     assert raised.value.category == category
 
@@ -203,7 +147,7 @@ async def test_client_rejects_non_json_response_as_permanent_contract_error() ->
         return httpx.Response(200, content=b"not-json")
 
     with pytest.raises(AutoChatPermanentError) as raised:
-        await _client(httpx.MockTransport(handler)).generate(_conversation())
+        await _generate(_client(httpx.MockTransport(handler)))
 
     assert raised.value.category == "response_not_json"
 
@@ -214,18 +158,18 @@ async def test_client_classifies_server_failures_as_retryable(status_code: int) 
         return httpx.Response(status_code, json={"detail": "unavailable"})
 
     with pytest.raises(AutoChatRetryableError) as raised:
-        await _client(httpx.MockTransport(handler)).generate(_conversation())
+        await _generate(_client(httpx.MockTransport(handler)))
 
     assert raised.value.category == "upstream_server_error"
 
 
-@pytest.mark.parametrize("status_code", [400, 401, 422])
+@pytest.mark.parametrize("status_code", [400, 401, 409, 422])
 async def test_client_classifies_client_failures_as_permanent(status_code: int) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code, json={"detail": "invalid"})
 
     with pytest.raises(AutoChatPermanentError) as raised:
-        await _client(httpx.MockTransport(handler)).generate(_conversation())
+        await _generate(_client(httpx.MockTransport(handler)))
 
     assert raised.value.category == "upstream_request_rejected"
 
@@ -235,7 +179,7 @@ async def test_client_classifies_timeout_without_leaking_external_error() -> Non
         raise httpx.ReadTimeout("secret-token", request=request)
 
     with pytest.raises(AutoChatRetryableError) as raised:
-        await _client(httpx.MockTransport(handler)).generate(_conversation())
+        await _generate(_client(httpx.MockTransport(handler)))
 
     assert raised.value.category == "timeout"
     assert str(raised.value) == "auto chat request failed"
@@ -246,9 +190,47 @@ async def test_client_classifies_network_error_as_retryable() -> None:
         raise httpx.ConnectError("connection failed", request=request)
 
     with pytest.raises(AutoChatRetryableError) as raised:
-        await _client(httpx.MockTransport(handler)).generate(_conversation())
+        await _generate(_client(httpx.MockTransport(handler)))
 
     assert raised.value.category == "request_failed"
+
+
+@pytest.mark.parametrize(
+    "event_id",
+    ["", "event:123", "事件-123", "event 123", "x" * 65],
+)
+async def test_client_rejects_invalid_event_id_before_http(event_id: str) -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=_response())
+
+    with pytest.raises(AutoChatPermanentError) as raised:
+        await _generate(_client(httpx.MockTransport(handler)), event_id=event_id)
+
+    assert raised.value.category == "request_schema_invalid"
+    assert calls == 0
+
+
+async def test_client_rejects_same_role_and_blank_question_before_http() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=_response())
+
+    client = _client(httpx.MockTransport(handler))
+    with pytest.raises(AutoChatPermanentError) as same_role:
+        await _generate(client, target_role_id=10001)
+    with pytest.raises(AutoChatPermanentError) as blank_question:
+        await _generate(client, question="  ")
+
+    assert same_role.value.category == "request_schema_invalid"
+    assert blank_question.value.category == "request_schema_invalid"
+    assert calls == 0
 
 
 def test_conversation_context_rejects_more_than_five_history_rounds() -> None:

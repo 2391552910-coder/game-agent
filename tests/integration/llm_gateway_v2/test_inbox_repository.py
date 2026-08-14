@@ -23,6 +23,7 @@ from src.core.integration.llm_gateway_v2.contracts import (
     parse_gateway_v2_event,
 )
 from src.core.integration.llm_gateway_v2.event_service import EventService
+from src.core.integration.llm_gateway_v2.event_worker import EventProcessResult
 from src.core.integration.llm_gateway_v2.inbox_repository import (
     EventAdmissionConflict,
     EventAdmissionUnavailable,
@@ -93,29 +94,18 @@ def _chat_event(event_id: str = "chat-event-1", *, sequence: int = 2) -> Gateway
             "eventId": event_id,
             "eventType": "chat_received",
             "sessionId": "session-1",
-            "controlGeneration": 1,
-            "eventSequence": sequence,
             "stateVersion": 0,
             "decisionLeaseId": None,
             "occurredAtMs": 1_700_000_000_000 + sequence,
             "payload": {
                 "sessionId": "session-1",
+                "schemaVersion": "v1",
+                "contentType": 0,
                 "sender": {"avatarId": "100", "roleId": "200"},
                 "chatType": "friend",
                 "supported": True,
                 "text": "你好",
                 "serverTimeMs": 1_700_000_000_000 + sequence,
-                "conversation": {
-                    "conversationId": "conv-100-200-1",
-                    "pairKey": "100:200",
-                    "speakerRoleId": 100,
-                    "targetRoleId": 200,
-                    "brainUsername": "conv-100",
-                    "historyRounds": [],
-                    "completedRounds": 0,
-                    "maxRounds": 6,
-                    "expiresAtMs": 1_800_000_000_000,
-                },
             },
         }
     )
@@ -186,24 +176,64 @@ async def test_hosted_chat_event_is_admitted_once_without_a_decision_lease(sessi
     started = _event("session-started")
     chat = _chat_event()
 
-    first = await repository.accept_event_batch(IDENTITY, "trace-chat", (started, chat))
+    first = await repository.accept_event_batch(IDENTITY, "trace-chat", (chat, started))
     duplicate = await repository.accept_event_batch(IDENTITY, "trace-chat-retry", (chat,))
 
-    assert first.received_event_ids == ("session-started", "chat-event-1")
+    assert first.received_event_ids == ("chat-event-1", "session-started")
     assert duplicate.received_event_ids == ()
     assert duplicate.duplicate_event_ids == ("chat-event-1",)
     async with session_factory() as session:
         row = (
             await session.execute(
                 sa.text(
-                    "SELECT event_type, event_body FROM llm_gateway_events "
+                    "SELECT event_type, control_generation, event_sequence, event_body "
+                    "FROM llm_gateway_events "
                     "WHERE event_id = 'chat-event-1'"
                 )
             )
         ).mappings().one()
     assert row["event_type"] == "chat_received"
+    assert row["control_generation"] == 1
+    assert row["event_sequence"] >= 2**62
     assert row["event_body"]["stateVersion"] == 0
     assert row["event_body"]["decisionLeaseId"] is None
+    assert "controlGeneration" not in row["event_body"]
+    assert "eventSequence" not in row["event_body"]
+
+    claimed_start = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert claimed_start is not None
+    assert claimed_start.event_type == "session_started"
+    assert await repository.complete_event(
+        claimed_start,
+        EventProcessResult("succeeded"),
+        max_attempts=5,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    claimed_chat = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert claimed_chat is not None
+    assert claimed_chat.event_type == "chat_received"
+    assert await repository.complete_event(
+        claimed_chat,
+        EventProcessResult("succeeded"),
+        max_attempts=5,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    async with session_factory() as session:
+        next_sequence = await session.scalar(
+            sa.text("SELECT next_event_sequence FROM llm_gateway_control_cycles")
+        )
+    assert next_sequence == 2
 
 
 async def test_complete_event_body_hash_and_trace_are_persisted(session_factory) -> None:
