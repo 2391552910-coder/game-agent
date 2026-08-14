@@ -161,6 +161,134 @@ async def test_fixed_reply_forwards_content_without_calling_any_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fixed_reply_does_not_require_gateway_conversation() -> None:
+    class Sender:
+        requests: list[HostedChatSendRequest] = []
+
+        async def send(
+            self,
+            request: HostedChatSendRequest,
+            *,
+            request_id: str | None = None,
+        ) -> HostedChatSendReceipt:
+            self.requests.append(request)
+            return HostedChatSendReceipt(request_id or "request-fixed", "message-fixed")
+
+    sender = Sender()
+    service = HostedChatService(
+        conversation_client=None,
+        fixed_reply="固定回复",
+        sender=sender,
+    )
+    event = SimpleNamespace(
+        event_id="fixed-without-conversation",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            supported=True,
+            text="测试消息",
+            sender=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="private",
+            conversation=None,
+        ),
+    )
+
+    await service.handle_chat_received("gateway-1", event)
+
+    assert [request.model_dump(mode="json", by_alias=True) for request in sender.requests] == [
+        {
+            "sessionId": "session-1",
+            "targetAvatarId": "100",
+            "targetRoleId": "200",
+            "chatType": "private",
+            "content": "固定回复",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_simple_route_does_not_require_gateway_conversation() -> None:
+    class Router:
+        async def route(self, text: str) -> SimpleChatRoute:
+            return SimpleChatRoute(route="simple", content="简单回答")
+
+    class Sender:
+        requests: list[HostedChatSendRequest] = []
+
+        async def send(
+            self,
+            request: HostedChatSendRequest,
+            *,
+            request_id: str | None = None,
+        ) -> HostedChatSendReceipt:
+            self.requests.append(request)
+            return HostedChatSendReceipt(request_id or "request-simple", "message-simple")
+
+    sender = Sender()
+    service = HostedChatService(
+        conversation_client=None,
+        simple_router=Router(),
+        sender=sender,
+    )
+    event = SimpleNamespace(
+        event_id="simple-without-conversation",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            supported=True,
+            text="你好",
+            sender=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="private",
+            conversation=None,
+        ),
+    )
+
+    await service.handle_chat_received("gateway-1", event)
+
+    assert [request.content for request in sender.requests] == ["简单回答"]
+
+
+@pytest.mark.asyncio
+async def test_complex_route_without_gateway_conversation_fails_explicitly() -> None:
+    class Router:
+        async def route(self, text: str) -> SimpleChatRoute:
+            return SimpleChatRoute(route="complex", content="")
+
+    class ConversationClient:
+        async def generate(
+            self,
+            conversation: ConversationContext,
+            *,
+            latest_message: str | None = None,
+        ) -> AutoChatMessage:
+            raise AssertionError("missing role identity must not call auto chat")
+
+    class Sender:
+        async def send(self, request: HostedChatSendRequest) -> HostedChatSendReceipt:
+            raise AssertionError("failed generation must not send a reply")
+
+    service = HostedChatService(
+        conversation_client=ConversationClient(),
+        simple_router=Router(),
+        sender=Sender(),
+    )
+    event = SimpleNamespace(
+        event_id="complex-without-conversation",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            supported=True,
+            text="你最近参加了什么活动？",
+            sender=SimpleNamespace(avatar_id="100", role_id="200"),
+            chat_type="private",
+            conversation=None,
+        ),
+    )
+
+    with pytest.raises(HostedChatPermanentError) as raised:
+        await service.handle_chat_received("gateway-1", event)
+
+    assert raised.value.category == "conversation_required"
+
+
+@pytest.mark.asyncio
 async def test_simple_route_forwards_deepseek_content_without_calling_auto_chat() -> None:
     class ConversationClient:
         calls = 0

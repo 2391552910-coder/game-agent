@@ -57,6 +57,66 @@ def test_chat_received_is_parsed_without_entering_decision_lease() -> None:
     assert event.state_version == 0
 
 
+def test_chat_received_accepts_gateway_v1_text_payload_without_conversation() -> None:
+    event = parse_gateway_v2_event(
+        _event(
+            "chat_received",
+            {
+                "sessionId": "session-1",
+                "schemaVersion": "v1",
+                "contentType": 0,
+                "sender": {"avatarId": "100", "roleId": "200"},
+                "chatType": "private",
+                "supported": True,
+                "text": "你好",
+                "serverTimeMs": 10,
+            },
+        )
+    )
+
+    assert event.payload.schema_version == "v1"
+    assert event.payload.content_type == 0
+    assert event.payload.conversation is None
+
+
+def test_chat_received_rejects_unknown_schema_version() -> None:
+    with pytest.raises(ValidationError):
+        parse_gateway_v2_event(
+            _event(
+                "chat_received",
+                {
+                    "sessionId": "session-1",
+                    "schemaVersion": "v2",
+                    "contentType": 0,
+                    "sender": {"avatarId": "100", "roleId": "200"},
+                    "chatType": "private",
+                    "supported": True,
+                    "text": "你好",
+                    "serverTimeMs": 10,
+                },
+            )
+        )
+
+
+def test_supported_chat_received_rejects_non_text_content_type() -> None:
+    with pytest.raises(ValidationError):
+        parse_gateway_v2_event(
+            _event(
+                "chat_received",
+                {
+                    "sessionId": "session-1",
+                    "schemaVersion": "v1",
+                    "contentType": 1,
+                    "sender": {"avatarId": "100", "roleId": "200"},
+                    "chatType": "private",
+                    "supported": True,
+                    "text": "not-text",
+                    "serverTimeMs": 10,
+                },
+            )
+        )
+
+
 @pytest.mark.parametrize("event_type", ["nearby_friend_chat_requested", "chat_send_result"])
 def test_hosted_chat_events_require_zero_state_and_no_lease(event_type: str) -> None:
     payload = {

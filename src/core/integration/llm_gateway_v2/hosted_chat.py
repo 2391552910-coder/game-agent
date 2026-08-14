@@ -362,10 +362,11 @@ class HostedChatService:
         target_avatar_id: str,
         target_role_id: str,
         chat_type: HostedChatType,
-        conversation: ConversationContext,
+        conversation: ConversationContext | None,
         incoming_text: str | None,
     ) -> None:
-        key = (gateway_id, session_id, conversation.pair_key)
+        conversation_key = conversation.pair_key if conversation is not None else f"target:{target_role_id}"
+        key = (gateway_id, session_id, conversation_key)
         async with self._state_lock:
             if self._queued_count >= self._max_queue_size:
                 raise HostedChatRetryableError("queue_full")
@@ -402,10 +403,11 @@ class HostedChatService:
         target_avatar_id: str,
         target_role_id: str,
         chat_type: HostedChatType,
-        conversation: ConversationContext,
+        conversation: ConversationContext | None,
         incoming_text: str | None,
     ) -> None:
-        key = (gateway_id, session_id, conversation.pair_key)
+        conversation_key = conversation.pair_key if conversation is not None else f"target:{target_role_id}"
+        key = (gateway_id, session_id, conversation_key)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             pending_key = (gateway_id, event_id)
@@ -478,7 +480,7 @@ class HostedChatService:
         target_avatar_id: str,
         target_role_id: str,
         chat_type: HostedChatType,
-        conversation: ConversationContext,
+        conversation: ConversationContext | None,
         incoming_text: str | None,
     ) -> HostedChatSendRequest:
         if incoming_text is not None and self._fixed_reply is not None:
@@ -505,6 +507,8 @@ class HostedChatService:
                     content=route.content,
                 )
 
+        if conversation is None:
+            raise HostedChatPermanentError("conversation_required")
         if self._conversation_client is None:
             raise HostedChatPermanentError("conversation_client_not_configured")
         try:

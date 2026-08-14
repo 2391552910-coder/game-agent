@@ -734,12 +734,22 @@ class ChatTarget(_WireModel):
 
 class ChatReceivedPayload(_WireModel):
     session_id: NonEmptyString128 = Field(validation_alias="sessionId", serialization_alias="sessionId")
+    schema_version: Literal["v1"] = Field(
+        default="v1",
+        validation_alias="schemaVersion",
+        serialization_alias="schemaVersion",
+    )
+    content_type: StrictNonNegativeInt = Field(
+        default=0,
+        validation_alias="contentType",
+        serialization_alias="contentType",
+    )
     sender: ChatSender
     chat_type: ChatType = Field(validation_alias="chatType", serialization_alias="chatType")
     supported: StrictBool
     text: str | None = None
     server_time_ms: StrictNonNegativeInt = Field(validation_alias="serverTimeMs", serialization_alias="serverTimeMs")
-    conversation: ConversationContext
+    conversation: ConversationContext | None = None
 
     @field_validator("text")
     @classmethod
@@ -753,9 +763,12 @@ class ChatReceivedPayload(_WireModel):
 
     @model_validator(mode="after")
     def validate_supported_text(self) -> "ChatReceivedPayload":
-        if self.supported and self.text is None:
-            raise ValueError("supported chat_received requires text")
-        if int(self.sender.role_id) != self.conversation.target_role_id:
+        if self.supported:
+            if self.content_type != 0:
+                raise ValueError("supported chat_received requires contentType=0")
+            if self.text is None:
+                raise ValueError("supported chat_received requires text")
+        if self.conversation is not None and int(self.sender.role_id) != self.conversation.target_role_id:
             raise ValueError("chat sender roleId does not match conversation targetRoleId")
         return self
 
