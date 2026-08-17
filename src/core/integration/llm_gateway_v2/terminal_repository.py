@@ -132,6 +132,18 @@ _LOCK_SKILL_CALL = sa.text(
     """
 )
 
+_LOCK_SKILL_CALL_FOR_DECISION = sa.text(
+    """
+    SELECT
+        id, decision_row_id, decision_id, session_id, skill_call_id, skill_name,
+        status, failure_category,
+        reason, retryable, terminal_event_id, effect_status
+    FROM llm_gateway_skill_calls
+    WHERE decision_row_id = :decision_row_id
+    FOR UPDATE
+    """
+)
+
 _INSERT_STARTED = sa.text(
     """
     INSERT INTO llm_gateway_skill_calls (
@@ -240,7 +252,11 @@ class TerminalRepository:
                 or event.payload.skill_name != skill_name
             ):
                 return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
-            call = await self._lock_call(session, claimed.gateway_id, event.payload.skill_call_id)
+            call = await self._lock_call_for_decision(session, decision["id"])
+            if call is not None and str(call["skill_call_id"]) != event.payload.skill_call_id:
+                return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
+            if call is None:
+                call = await self._lock_call(session, claimed.gateway_id, event.payload.skill_call_id)
             if call is None:
                 await session.execute(
                     _INSERT_STARTED,
@@ -292,7 +308,11 @@ class TerminalRepository:
                 or event.payload.skill_name != skill_name
             ):
                 return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
-            call = await self._lock_call(session, claimed.gateway_id, event.payload.skill_call_id)
+            call = await self._lock_call_for_decision(session, decision["id"])
+            if call is not None and str(call["skill_call_id"]) != event.payload.skill_call_id:
+                return MutationResult(MutationDisposition.CONFLICT, "skill_call_identity_conflict")
+            if call is None:
+                call = await self._lock_call(session, claimed.gateway_id, event.payload.skill_call_id)
             if call is not None and not self._call_matches_identity(
                 call,
                 decision,
@@ -391,6 +411,17 @@ class TerminalRepository:
         result = await session.execute(
             _LOCK_SKILL_CALL,
             {"gateway_id": gateway_id, "skill_call_id": skill_call_id},
+        )
+        return result.mappings().one_or_none()
+
+    @staticmethod
+    async def _lock_call_for_decision(
+        session: AsyncSession,
+        decision_row_id: object,
+    ) -> RowMapping | None:
+        result = await session.execute(
+            _LOCK_SKILL_CALL_FOR_DECISION,
+            {"decision_row_id": decision_row_id},
         )
         return result.mappings().one_or_none()
 

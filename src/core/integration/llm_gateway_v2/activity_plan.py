@@ -35,9 +35,41 @@ NonEmptyString = Annotated[
 PlanStatus = Literal["active", "completed", "paused", "abandoned"]
 StepStatus = Literal["pending", "started", "succeeded", "failed", "skipped"]
 
+# Gateway may mark a failure retryable for transport-level convergence, while
+# the activity itself is already known to be unavailable or too long-running.
+# Retrying those activities immediately creates the pressure-test retry storms.
+_ACTIVITY_RETRY_SUPPRESSION_REASONS = frozenset(
+    {
+        "no_available_dart_pos",
+        "no_available_seat",
+        "no_available_chair",
+        "no_available_vehicle",
+        "ttl_expired",
+        "upstream_timeout",
+    }
+)
+
 
 class ActivityPlanValidationError(ValueError):
     pass
+
+
+def should_retry_activity_failure(
+    skill_name: str,
+    reason: str,
+    *,
+    retryable: bool,
+) -> bool:
+    """Return whether the current plan step may be retried immediately.
+
+    The terminal row still records the Gateway-provided retryable flag. This
+    decision only controls activity-plan advancement, so resource exhaustion
+    and long-running activity timeouts can move to the next activity without
+    losing the original failure evidence.
+    """
+
+    del skill_name
+    return retryable and reason not in _ACTIVITY_RETRY_SUPPRESSION_REASONS
 
 
 class _ActivityModel(BaseModel):

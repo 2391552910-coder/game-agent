@@ -253,8 +253,15 @@ def test_wait_accepts_and_serializes_wait_ms() -> None:
     assert decision.model_dump(by_alias=True)["waitMs"] == 1_000
 
 
-@pytest.mark.parametrize("wait_ms", [0, -1, True, 1.5, "1000", None])
-def test_wait_requires_a_strictly_positive_integer_wait_ms(wait_ms: Any) -> None:
+def test_wait_accepts_zero_wait_ms() -> None:
+    decision = parse_gateway_v2_decision(decision_payload("wait", waitMs=0))
+
+    assert isinstance(decision, GatewayV2WaitDecision)
+    assert decision.wait_ms == 0
+
+
+@pytest.mark.parametrize("wait_ms", [-1, True, 1.5, "1000", None])
+def test_wait_rejects_non_integer_or_negative_wait_ms(wait_ms: Any) -> None:
     with pytest.raises(ValidationError):
         parse_gateway_v2_decision(decision_payload("wait", waitMs=wait_ms))
 
@@ -312,6 +319,7 @@ VALID_RESPONSES: list[tuple[dict[str, Any], type]] = [
             "traceId": "trace-1",
             "sessionId": "session-1",
             "decisionId": "decision-1",
+            "decisionLeaseId": "lease-1",
             "controlGeneration": 1,
             "skillCallId": "call-1",
             "stateVersion": 8,
@@ -327,6 +335,7 @@ VALID_RESPONSES: list[tuple[dict[str, Any], type]] = [
             "traceId": "trace-1",
             "sessionId": "session-1",
             "decisionId": "decision-1",
+            "decisionLeaseId": "lease-1",
             "controlGeneration": 1,
             "skillCallId": None,
             "stateVersion": 8,
@@ -342,6 +351,7 @@ VALID_RESPONSES: list[tuple[dict[str, Any], type]] = [
             "traceId": None,
             "sessionId": None,
             "decisionId": None,
+            "decisionLeaseId": None,
             "controlGeneration": 0,
             "skillCallId": None,
             "stateVersion": 0,
@@ -389,8 +399,8 @@ def test_rejected_accepts_optional_blocking_context() -> None:
         {
             "blockedByState": "seated",
             "blockedByActivity": "coffee",
-            "blockedBySceneId": "scene-1",
-            "blockedByChairId": "chair-1",
+            "blockedBySceneId": 1,
+            "blockedByChairId": 2,
         }
     )
 
@@ -398,8 +408,8 @@ def test_rejected_accepts_optional_blocking_context() -> None:
 
     assert response.blocked_by_state == "seated"
     assert response.blocked_by_activity == "coffee"
-    assert response.blocked_by_scene_id == "scene-1"
-    assert response.blocked_by_chair_id == "chair-1"
+    assert response.blocked_by_scene_id == 1
+    assert response.blocked_by_chair_id == 2
 
 
 @pytest.mark.parametrize(

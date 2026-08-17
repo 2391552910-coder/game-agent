@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -253,6 +254,7 @@ class EventWorker:
         return len(claimed)
 
     async def _process_one(self, event: ClaimedGatewayEvent) -> None:
+        processing_started = time.monotonic()
         processor_task: asyncio.Task[EventProcessResult] = asyncio.create_task(
             self._invoke_processor(event),
             name=f"llm-gateway-v2-process-{event.event_id}",
@@ -281,6 +283,9 @@ class EventWorker:
                                 error=error,
                                 trace_id=event.trace_id,
                                 event_id=event.event_id,
+                                session_id=event.session_id,
+                                control_generation=event.control_generation,
+                                elapsed_ms=(time.monotonic() - processing_started) * 1_000,
                             ),
                             "worker_id": self._worker_id,
                         },
@@ -288,7 +293,14 @@ class EventWorker:
                 else:
                     logger.warning(
                         "LLM Gateway v2 event claim was lost",
-                        extra={"event_id": event.event_id, "worker_id": self._worker_id},
+                        extra={
+                            "trace_id": event.trace_id,
+                            "event_id": event.event_id,
+                            "session_id": event.session_id,
+                            "control_generation": event.control_generation,
+                            "elapsed_ms": (time.monotonic() - processing_started) * 1_000,
+                            "worker_id": self._worker_id,
+                        },
                     )
                 await self._cancel_and_wait(processor_task)
                 return
@@ -308,14 +320,35 @@ class EventWorker:
                         error=error,
                         trace_id=event.trace_id,
                         event_id=event.event_id,
+                        session_id=event.session_id,
+                        control_generation=event.control_generation,
+                        elapsed_ms=(time.monotonic() - processing_started) * 1_000,
                     ),
                     "worker_id": self._worker_id,
                 },
             )
             return
 
+        processor_elapsed_ms = (time.monotonic() - processing_started) * 1_000
+        logger.info(
+            "LLM Gateway v2 event processing completed",
+            extra={
+                "trace_id": event.trace_id,
+                "event_id": event.event_id,
+                "session_id": event.session_id,
+                "control_generation": event.control_generation,
+                "event_type": event.event_type,
+                "outcome": result.outcome,
+                "error_stage": result.error_stage,
+                "error_category": result.error_category,
+                "elapsed_ms": processor_elapsed_ms,
+                "worker_id": self._worker_id,
+            },
+        )
+
+        completion_started = time.monotonic()
         try:
-            await self._repository.complete_event(
+            committed = await self._repository.complete_event(
                 event,
                 result,
                 max_attempts=self._max_attempts,
@@ -334,7 +367,24 @@ class EventWorker:
                         error=error,
                         trace_id=event.trace_id,
                         event_id=event.event_id,
+                        session_id=event.session_id,
+                        control_generation=event.control_generation,
+                        elapsed_ms=(time.monotonic() - completion_started) * 1_000,
                     ),
+                    "worker_id": self._worker_id,
+                },
+            )
+        else:
+            logger.info(
+                "LLM Gateway v2 event completion committed",
+                extra={
+                    "trace_id": event.trace_id,
+                    "event_id": event.event_id,
+                    "session_id": event.session_id,
+                    "control_generation": event.control_generation,
+                    "outcome": result.outcome,
+                    "committed": committed,
+                    "elapsed_ms": (time.monotonic() - completion_started) * 1_000,
                     "worker_id": self._worker_id,
                 },
             )

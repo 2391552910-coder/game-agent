@@ -32,6 +32,7 @@ def _accepted_response(*, skill_call_id: str | None) -> dict[str, object]:
         "traceId": "trace-1",
         "sessionId": "session-1",
         "decisionId": "decision-1",
+        "decisionLeaseId": "lease-1",
         "controlGeneration": 1,
         "skillCallId": skill_call_id,
         "stateVersion": 1,
@@ -47,12 +48,30 @@ def _rejected_response(reason: str) -> dict[str, object]:
         "traceId": None,
         "sessionId": None,
         "decisionId": None,
+        "decisionLeaseId": None,
         "controlGeneration": 0,
         "skillCallId": None,
         "stateVersion": 0,
         "nextDecisionLeaseId": None,
         "reason": reason,
     }
+
+
+def _request_body(action: str = "wait") -> bytes:
+    return json.dumps(
+        {
+            "traceId": "trace-1",
+            "contractVersion": "llm-gateway-http-v2",
+            "sessionId": "session-1",
+            "decisionId": "decision-1",
+            "decisionLeaseId": "lease-1",
+            "stateVersion": 1,
+            "controlGeneration": 1,
+            "ttlMs": 30_000,
+            "action": action,
+            **({"waitMs": 1_000} if action == "wait" else {}),
+        }
+    ).encode()
 
 
 @pytest.mark.parametrize("action", ["call_skill", "stop_hosting"])
@@ -63,7 +82,7 @@ async def test_client_accepts_skill_actions_only_with_skill_call_id(action: str)
         requests.append(request)
         return httpx.Response(200, json=_accepted_response(skill_call_id="call-1"))
 
-    raw_body = b'{"decisionId":"decision-1"}'
+    raw_body = _request_body(action)
     result = await _client(httpx.MockTransport(handler)).send(action=action, raw_body=raw_body)
 
     assert result.status == "accepted"
@@ -81,10 +100,22 @@ async def test_client_accepts_non_skill_actions_without_skill_call_id(action: st
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(204, json=_accepted_response(skill_call_id=None))
 
-    result = await _client(httpx.MockTransport(handler)).send(action=action, raw_body=b"{}")
+    result = await _client(httpx.MockTransport(handler)).send(action=action, raw_body=_request_body(action))
 
     assert result.status == "accepted"
     assert result.skill_call_id is None
+
+
+async def test_client_rejects_response_with_mismatched_request_identity() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = _accepted_response(skill_call_id=None)
+        payload["sessionId"] = "other-session"
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(DecisionClientProtocolError) as error:
+        await _client(httpx.MockTransport(handler)).send(action="wait", raw_body=_request_body())
+
+    assert error.value.category == "response_identity_mismatch"
 
 
 async def test_client_parses_non_2xx_unknown_rejected_reason_before_http_classification() -> None:

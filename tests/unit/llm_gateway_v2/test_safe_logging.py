@@ -102,6 +102,45 @@ def test_safe_exception_fields_include_only_stable_diagnostics() -> None:
     assert SECRET_TEXT not in repr(fields)
 
 
+def test_safe_exception_fields_include_gateway_decision_correlation() -> None:
+    fields = safe_exception_fields(
+        stage="http",
+        category="response_rejected",
+        error=RuntimeError(SECRET_TEXT),
+        trace_id="trace-1",
+        event_id="event-1",
+        decision_id="decision-1",
+        skill_call_id="call-1",
+        session_id="session-1",
+        decision_lease_id="lease-1",
+        control_generation=7,
+        state_version=11,
+        http_status=409,
+        response_status="rejected",
+        response_reason="stale_state",
+        elapsed_ms=12.5,
+    )
+
+    assert fields == {
+        "stage": "http",
+        "error_category": "response_rejected",
+        "exception_type": "RuntimeError",
+        "trace_id": "trace-1",
+        "event_id": "event-1",
+        "decision_id": "decision-1",
+        "skill_call_id": "call-1",
+        "session_id": "session-1",
+        "decision_lease_id": "lease-1",
+        "control_generation": 7,
+        "state_version": 11,
+        "http_status": 409,
+        "response_status": "rejected",
+        "response_reason": "stale_state",
+        "elapsed_ms": 12.5,
+    }
+    assert SECRET_TEXT not in repr(fields)
+
+
 def test_startup_runtime_summary_reports_effective_model_and_timeouts_without_secrets(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

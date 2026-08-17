@@ -63,6 +63,9 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (  # noqa: E402
 )
 from src.core.integration.llm_gateway_v2.simple_chat import SimpleChatRouter  # noqa: E402
 from src.core.integration.llm_gateway_v2.terminal_repository import TerminalRepository  # noqa: E402
+from src.core.integration.llm_gateway_v2.token_usage import (  # noqa: E402
+    GatewayV2TokenUsageReporter,
+)
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry  # noqa: E402
 from src.core.llm.factory import get_env_llm  # noqa: E402
 
@@ -344,6 +347,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     gateway_worker_started = False
     gateway_v2_rag_started = False
     gateway_v2_runtime: GatewayV2Runtime | None = None
+    gateway_v2_token_reporter: GatewayV2TokenUsageReporter | None = None
     service: ReadinessService = app.state.readiness_service
     try:
         logger.info("服务启动中...")
@@ -365,6 +369,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.llm_gateway_v2_enabled:
             await warmup_gateway_v2_rag()
             gateway_v2_rag_started = True
+            gateway_v2_token_reporter = GatewayV2TokenUsageReporter()
+            await gateway_v2_token_reporter.start()
             gateway_v2_runtime = build_gateway_v2_runtime()
             app.state.gateway_v2_runtime = gateway_v2_runtime
             await gateway_v2_runtime.event_worker.start()
@@ -396,6 +402,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 grace_seconds=settings.llm_gateway_v2_shutdown_grace_seconds,
             )
             app.state.gateway_v2_runtime = None
+        if gateway_v2_token_reporter is not None:
+            await gateway_v2_token_reporter.stop()
         if gateway_v2_rag_started:
             await shutdown_gateway_v2_rag()
         if gateway_worker_started:

@@ -52,20 +52,28 @@ class HostedChatSendRequest(_HostedChatModel):
             raise ValueError("identifier exceeds Int64")
         return value
 
-    @field_validator("session_id", "content")
+    @field_validator("session_id")
     @classmethod
-    def validate_text(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
+    def validate_session_id(cls, value: str) -> str:
+        if not value.strip():
             raise ValueError("value must not be blank")
-        if len(stripped.encode("utf-16-le")) // 2 > 1000:
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be blank")
+        if len(value.encode("utf-16-le")) // 2 > 1000:
             raise ValueError("content exceeds UTF-16 limit")
-        return stripped
+        return value
 
 
 class HostedChatSendAccepted(_HostedChatModel):
-    accepted: Literal[True]
+    trace_id: str = Field(alias="traceId", min_length=1, max_length=128)
     chat_message_id: str = Field(alias="chatMessageId", min_length=1, max_length=128)
+    status: Literal["accepted"]
+    accepted_at_ms: int = Field(alias="acceptedAtMs", ge=0)
 
 
 @dataclass(frozen=True)

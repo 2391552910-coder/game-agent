@@ -159,10 +159,14 @@ async def retrieve_rag_context_node(state: AnalysisState) -> dict[str, Any]:
             ),
         )
         if exact_context:
+            if "gateway_context" in state:
+                return {"rag_context": exact_context}
             return {
                 "rag_context": exact_context,
                 "errors": ["RAG 检索失败，已返回精确匹配上下文"],
             }
+        if "gateway_context" in state:
+            return {"rag_context": ""}
         return {
             "rag_context": "",
             "errors": ["RAG 检索失败"],

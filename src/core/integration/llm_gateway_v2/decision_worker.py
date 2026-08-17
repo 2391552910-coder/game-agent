@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Protocol
 
 from src.core.integration.llm_gateway_v2.decision_client import (
@@ -18,6 +19,25 @@ from src.core.integration.llm_gateway_v2.worker_status import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _decision_identity_fields(
+    decision: ClaimedDecision,
+    response: DecisionClientResult | None = None,
+) -> dict[str, Any]:
+    return {
+        "trace_id": (response.trace_id if response is not None else None) or decision.trace_id,
+        "session_id": (response.session_id if response is not None else None) or decision.session_id,
+        "decision_id": (response.decision_id if response is not None else None) or decision.decision_id,
+        "decision_lease_id": (response.decision_lease_id if response is not None else None)
+        or decision.decision_lease_id,
+        "control_generation": (
+            response.control_generation if response is not None else None
+        )
+        or decision.control_generation,
+        "state_version": (response.state_version if response is not None else None) or decision.state_version,
+        "skill_call_id": response.skill_call_id if response is not None else None,
+    }
 
 
 class DecisionWorkRepository(Protocol):
@@ -204,6 +224,7 @@ class DecisionWorker:
         return len(claimed)
 
     async def _process_one(self, decision: ClaimedDecision) -> None:
+        http_started = time.monotonic()
         request_task = asyncio.create_task(
             self._send_decision(decision),
             name=f"llm-gateway-v2-send-{decision.decision_id}",
@@ -230,7 +251,8 @@ class DecisionWorker:
                                 stage="worker",
                                 category="claim_renewal_failed",
                                 error=error,
-                                decision_id=decision.decision_id,
+                                **_decision_identity_fields(decision),
+                                elapsed_ms=(time.monotonic() - http_started) * 1_000,
                             ),
                             "worker_id": self._worker_id,
                         },
@@ -238,7 +260,11 @@ class DecisionWorker:
                 else:
                     logger.warning(
                         "LLM Gateway v2 decision claim was lost",
-                        extra={"decision_id": decision.decision_id, "worker_id": self._worker_id},
+                        extra={
+                            **_decision_identity_fields(decision),
+                            "worker_id": self._worker_id,
+                            "elapsed_ms": (time.monotonic() - http_started) * 1_000,
+                        },
                     )
                 await self._cancel_and_wait(request_task)
                 return
@@ -247,9 +273,33 @@ class DecisionWorker:
             try:
                 response = request_task.result()
             except DecisionClientTransportError as error:
+                logger.warning(
+                    "LLM Gateway v2 decision HTTP failed",
+                    extra={
+                        **_decision_identity_fields(decision),
+                        "http_status": None,
+                        "response_status": None,
+                        "response_reason": None,
+                        "error_category": error.category,
+                        "elapsed_ms": (time.monotonic() - http_started) * 1_000,
+                        "worker_id": self._worker_id,
+                    },
+                )
                 await self._complete_failure(decision, error.category)
                 return
             except DecisionClientProtocolError as error:
+                logger.warning(
+                    "LLM Gateway v2 decision HTTP failed",
+                    extra={
+                        **_decision_identity_fields(decision),
+                        "http_status": error.http_status,
+                        "response_status": None,
+                        "response_reason": None,
+                        "error_category": error.category,
+                        "elapsed_ms": (time.monotonic() - http_started) * 1_000,
+                        "worker_id": self._worker_id,
+                    },
+                )
                 await self._complete_failure(decision, error.category)
                 return
         except asyncio.CancelledError:
@@ -263,15 +313,29 @@ class DecisionWorker:
                         stage="http",
                         category="request_stopped",
                         error=error,
-                        decision_id=decision.decision_id,
+                        **_decision_identity_fields(decision),
+                        elapsed_ms=(time.monotonic() - http_started) * 1_000,
                     ),
                     "worker_id": self._worker_id,
                 },
             )
             return
 
+        logger.info(
+            "LLM Gateway v2 decision HTTP completed",
+            extra={
+                **_decision_identity_fields(decision, response),
+                "http_status": response.http_status,
+                "response_status": response.status,
+                "response_reason": response.reason[:256],
+                "elapsed_ms": (time.monotonic() - http_started) * 1_000,
+                "worker_id": self._worker_id,
+            },
+        )
+
+        commit_started = time.monotonic()
         try:
-            await self._repository.record_decision_response(decision, response)
+            committed = await self._repository.record_decision_response(decision, response)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -282,8 +346,25 @@ class DecisionWorker:
                         stage="database",
                         category="response_commit_failed",
                         error=error,
-                        decision_id=decision.decision_id,
+                        **_decision_identity_fields(decision, response),
+                        http_status=response.http_status,
+                        response_status=response.status,
+                        response_reason=response.reason,
+                        elapsed_ms=(time.monotonic() - commit_started) * 1_000,
                     ),
+                    "worker_id": self._worker_id,
+                },
+            )
+        else:
+            logger.info(
+                "LLM Gateway v2 decision response commit completed",
+                extra={
+                    **_decision_identity_fields(decision, response),
+                    "http_status": response.http_status,
+                    "response_status": response.status,
+                    "response_reason": response.reason[:256],
+                    "committed": committed,
+                    "elapsed_ms": (time.monotonic() - commit_started) * 1_000,
                     "worker_id": self._worker_id,
                 },
             )
@@ -317,7 +398,7 @@ class DecisionWorker:
                         stage="database",
                         category="failure_commit_failed",
                         error=error,
-                        decision_id=decision.decision_id,
+                        **_decision_identity_fields(decision),
                     ),
                     "worker_id": self._worker_id,
                 },

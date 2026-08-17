@@ -77,17 +77,27 @@ def _error(status_code: int, code: str, message: str) -> JSONResponse:
     responses={503: {"model": GatewayV2Error}},
 )
 async def capabilities(request: Request) -> GatewayV2Capabilities | JSONResponse:
+    started = time.monotonic()
     if not settings.llm_gateway_v2_enabled:
         return _error(503, "service_disabled", "service disabled")
 
-    readiness = await request.app.state.readiness_service.snapshot()
-    if readiness.status != "ready":
+    available, reason = request.app.state.readiness_service.gateway_v2_capabilities_status()
+    if not available:
+        logger.warning(
+            "LLM Gateway v2 capabilities unavailable",
+            extra={"reason": reason, "elapsed_ms": (time.monotonic() - started) * 1_000},
+        )
         return _error(503, "service_unavailable", "service unavailable")
 
-    return build_gateway_v2_capabilities(
+    capabilities_response = build_gateway_v2_capabilities(
         max_event_batch_size=settings.llm_gateway_v2_max_event_batch_size,
         max_decision_ttl_ms=settings.llm_gateway_v2_max_decision_ttl_ms,
     )
+    logger.info(
+        "LLM Gateway v2 capabilities served",
+        extra={"elapsed_ms": (time.monotonic() - started) * 1_000},
+    )
+    return capabilities_response
 
 
 @router.post(
@@ -111,6 +121,7 @@ async def capabilities(request: Request) -> GatewayV2Capabilities | JSONResponse
 async def receive_events(
     request: Request,
 ) -> GatewayV2BatchAck | JSONResponse:
+    started = time.monotonic()
     raw_body = await request.body()
     try:
         app_id = verify_inbound_hmac(
@@ -143,7 +154,18 @@ async def receive_events(
         return _error(503, "service_disabled", "service disabled")
 
     try:
-        return await accept_gateway_event_batch(identity, envelope)
+        response = await accept_gateway_event_batch(identity, envelope)
+        logger.info(
+            "LLM Gateway v2 event HTTP response sent",
+            extra={
+                "trace_id": envelope.trace_id,
+                "gateway_id": envelope.gateway_id,
+                "event_count": len(envelope.events),
+                "http_status": 200,
+                "elapsed_ms": (time.monotonic() - started) * 1_000,
+            },
+        )
+        return response
     except EventBatchInvalid:
         return _error(400, "bad_request", "bad request")
     except EventContentConflict:
@@ -151,5 +173,15 @@ async def receive_events(
     except EventServiceUnavailable:
         return _error(503, "service_unavailable", "service unavailable")
     except Exception:
-        logger.error("LLM Gateway v2 event admission failed, trace_id=%s", envelope.trace_id)
+        logger.error(
+            "LLM Gateway v2 event admission failed",
+            extra={
+                "trace_id": envelope.trace_id,
+                "gateway_id": envelope.gateway_id,
+                "event_count": len(envelope.events),
+                "http_status": 500,
+                "elapsed_ms": (time.monotonic() - started) * 1_000,
+            },
+            exc_info=True,
+        )
         return _error(500, "internal_error", "internal error")

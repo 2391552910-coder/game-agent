@@ -24,13 +24,15 @@ _CORRECTABLE_FAILURE_REASONS: dict[str, frozenset[str]] = {
             "darts_dart_plan_invalid",
             "darts_dart_item_invalid",
             "darts_dart_count_invalid",
-            "darts_pos_invalid",
+            "darts_dart_pos_invalid",
+            "darts_score_below_limit",
         }
     ),
     "dance_auto_schedule": frozenset(
         {
             "dance_score_invalid",
             "dance_score_exceeds_limit",
+            "dance_score_below_limit",
         }
     ),
     "shooting_auto_schedule": frozenset(
@@ -43,14 +45,14 @@ _CORRECTABLE_FAILURE_REASONS: dict[str, frozenset[str]] = {
             "shooting_project_invalid",
             "shooting_game_mode_invalid",
             "shooting_table_num_invalid",
+            "shooting_score_below_limit",
         }
     ),
     "paper_plane_auto_schedule": frozenset(
         {
-            "paper_plane_name_invalid",
-            "paper_plane_use_time_invalid",
-            "paper_plane_use_time_exceeds_limit",
-            "paper_plane_complete_invalid",
+            "paper_plane_plane_name_invalid",
+            "paper_plane_use_time_ms_invalid",
+            "paper_plane_use_time_ms_out_of_range",
         }
     ),
 }

@@ -52,6 +52,10 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCatalog,
     scene_id_from_snapshot,
 )
+from src.core.integration.llm_gateway_v2.token_usage import (
+    GatewayV2TokenUsageTracker,
+    gateway_v2_token_usage_tracker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,13 @@ _SPECIALIZED_ARGUMENT_SKILLS = frozenset(
         "dance_auto_schedule",
     }
 )
+
+_REQUIRED_ACTIVITY_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "wish_board_auto_schedule": ("boardName", "wish"),
+    "coffee_auto_schedule": ("coffeeName",),
+    "seat_sit": ("sceneId", "chairId"),
+    "seat_get_out": ("sceneId", "chairId"),
+}
 
 
 class GatewayV2DecisionSelectionError(Exception):
@@ -135,6 +146,23 @@ def _argument_leaf_paths(value: Mapping[str, Any], prefix: str = "") -> set[str]
 
 def _contains_path(paths: set[str], required: str) -> bool:
     return required in paths or any(path.startswith(f"{required}.") for path in paths)
+
+
+def _required_activity_arguments_are_valid(
+    skill_name: str,
+    arguments: Mapping[str, Any],
+) -> bool:
+    required = _REQUIRED_ACTIVITY_ARGUMENTS.get(skill_name)
+    if required is None:
+        return True
+    if any(name not in arguments for name in required):
+        return False
+    if skill_name == "wish_board_auto_schedule":
+        return all(isinstance(arguments[name], str) and bool(arguments[name].strip()) for name in required)
+    if skill_name == "coffee_auto_schedule":
+        value = arguments["coffeeName"]
+        return isinstance(value, str) and bool(value.strip())
+    return all(type(arguments[name]) is int and arguments[name] > 0 for name in required)
 
 
 def _paper_plane_arguments_for_context(context: GatewayV2AgentContext) -> dict[str, Any]:
@@ -315,6 +343,8 @@ def _skill_is_permitted(
     try:
         argument_paths = _argument_leaf_paths(candidate.arguments)
     except ValueError:
+        return False
+    if not _required_activity_arguments_are_valid(candidate.skill_name, candidate.arguments):
         return False
     if hint is None:
         return not argument_paths
@@ -648,7 +678,7 @@ def freeze_gateway_v2_decision(
     action = _normalize_gateway_v2_action(context, action)
     if (
         isinstance(action, GatewayV2CallSkillAction)
-        and action.skill_name in _SPECIALIZED_ARGUMENT_SKILLS
+        and action.skill_name in _SPECIALIZED_ARGUMENT_SKILLS.union(_REQUIRED_ACTIVITY_ARGUMENTS)
         and not _skill_is_permitted(context, action)
     ):
         action = _safe_unavailable_skill_action(context)
@@ -704,8 +734,34 @@ class GatewayV2DecisionPlanner:
     activity_coordinator: ActivityPlanCoordinator | None = None
     scene_catalog: SceneCatalog | None = None
     force_skills: tuple[str, ...] = ()
+    token_usage_tracker: GatewayV2TokenUsageTracker = gateway_v2_token_usage_tracker
 
     async def __call__(
+        self,
+        event: ClaimedGatewayEvent,
+        context: GatewayV2AgentContext,
+    ) -> EventProcessResult:
+        token_scope = self.token_usage_tracker.start_decision(
+            event_id=event.event_id,
+            session_id=context.session_id,
+            control_generation=context.control_generation,
+            decision_lease_id=context.decision_lease_id,
+        )
+        try:
+            result = await self._plan(event, context)
+        except BaseException:
+            self.token_usage_tracker.complete_decision(
+                token_scope,
+                decision_status="unhandled_error",
+            )
+            raise
+        self.token_usage_tracker.complete_decision(
+            token_scope,
+            decision_status=result.outcome,
+        )
+        return result
+
+    async def _plan(
         self,
         event: ClaimedGatewayEvent,
         context: GatewayV2AgentContext,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -291,11 +292,30 @@ class EventService:
         ):
             raise EventBatchInvalid
 
+        started = time.monotonic()
         try:
             acceptance = await self.repository.accept_event_batch(identity, envelope.trace_id, envelope.events)
         except EventAdmissionConflict:
+            logger.warning(
+                "LLM Gateway v2 event admission conflict",
+                extra={
+                    "trace_id": envelope.trace_id,
+                    "gateway_id": identity.gateway_id,
+                    "event_count": len(envelope.events),
+                    "elapsed_ms": (time.monotonic() - started) * 1_000,
+                },
+            )
             raise EventContentConflict from None
         except EventAdmissionUnavailable:
+            logger.error(
+                "LLM Gateway v2 event admission unavailable",
+                extra={
+                    "trace_id": envelope.trace_id,
+                    "gateway_id": identity.gateway_id,
+                    "event_count": len(envelope.events),
+                    "elapsed_ms": (time.monotonic() - started) * 1_000,
+                },
+            )
             raise EventServiceUnavailable from None
 
         await self.hooks.after_event_commit(
@@ -305,7 +325,7 @@ class EventService:
         input_order = tuple(dict.fromkeys(event.event_id for event in envelope.events))
         received = set(acceptance.received_event_ids)
         duplicate = set(acceptance.duplicate_event_ids) - received
-        return GatewayV2BatchAck.model_validate(
+        ack = GatewayV2BatchAck.model_validate(
             {
                 "accepted": True,
                 "traceId": envelope.trace_id,
@@ -313,6 +333,18 @@ class EventService:
                 "duplicateEventIds": [event_id for event_id in input_order if event_id in duplicate],
             }
         )
+        logger.info(
+            "LLM Gateway v2 event admission committed",
+            extra={
+                "trace_id": envelope.trace_id,
+                "gateway_id": identity.gateway_id,
+                "event_count": len(envelope.events),
+                "received_count": len(acceptance.received_event_ids),
+                "duplicate_count": len(acceptance.duplicate_event_ids),
+                "elapsed_ms": (time.monotonic() - started) * 1_000,
+            },
+        )
+        return ack
 
     async def accept_batch(
         self,

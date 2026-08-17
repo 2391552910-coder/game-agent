@@ -109,6 +109,7 @@ def _skill_hints() -> list[dict[str, object]]:
     hints: list[dict[str, object]] = []
     for skill in SKILLS:
         allowed_args: list[dict[str, object]] = []
+        suggested_args: dict[str, object] = {}
         if skill == "dance_auto_schedule":
             allowed_args = [{"path": "score"}]
         elif skill == "darts_auto_schedule":
@@ -123,19 +124,19 @@ def _skill_hints() -> list[dict[str, object]]:
                 {"path": "useTimeMs"},
                 {"path": "isComplete"},
             ]
+        elif skill == "coffee_auto_schedule":
+            allowed_args = [{"path": "coffeeName"}]
+            suggested_args = {"coffeeName": "latte"}
         hints.append(
             {
-            "skillName": skill,
-            "schemaVersion": "v1",
-            "argumentStatus": "ready",
-            "suggestedArgs": {},
-            "allowedArgs": allowed_args,
-            "missingArgs": [
-                {"path": str(field["path"])}
-                for field in allowed_args
-            ],
-            "warnings": [],
-            "nextSteps": [],
+                "skillName": skill,
+                "schemaVersion": "v1",
+                "argumentStatus": "ready",
+                "suggestedArgs": suggested_args,
+                "allowedArgs": allowed_args,
+                "missingArgs": [{"path": str(field["path"])} for field in allowed_args],
+                "warnings": [],
+                "nextSteps": [],
             }
         )
     return hints
@@ -189,10 +190,7 @@ def _event(
     occurred_at_ms = 1_800_000_000_000 + sequence
     lease_id = f"lease-{sequence}"
     top_lease_id = (
-        lease_id
-        if lease
-        and event_type in {"session_started", "observation_updated", "skill_finished"}
-        else None
+        lease_id if lease and event_type in {"session_started", "observation_updated", "skill_finished"} else None
     )
     if event_type in {"session_started", "observation_updated"}:
         payload: dict[str, object] = {
@@ -263,11 +261,7 @@ def _event(
         }
     else:
         raise AssertionError(event_type)
-    wire_state_version = (
-        0
-        if event_type in {"nearby_friend_chat_requested", "chat_send_result"}
-        else sequence
-    )
+    wire_state_version = 0 if event_type in {"nearby_friend_chat_requested", "chat_send_result"} else sequence
     event = {
         "eventId": f"event-{sequence}",
         "eventType": event_type,
@@ -553,14 +547,18 @@ async def test_activity_plan_survives_runtime_restart_and_advances_through_socia
     assert all(not any(key.startswith("activity") for key in row["request_body_json"]) for row in decisions)
     async with session_factory() as session:
         cycle = (
-            await session.execute(
-                sa.text(
-                    "SELECT activity_plan_version, activity_status, activity_phase, "
-                    "activity_current_step_id, activity_last_event_sequence "
-                    "FROM llm_gateway_control_cycles"
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT activity_plan_version, activity_status, activity_phase, "
+                        "activity_current_step_id, activity_last_event_sequence "
+                        "FROM llm_gateway_control_cycles"
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert dict(cycle) == {
         "activity_plan_version": 2,
         "activity_status": "active",
@@ -667,21 +665,28 @@ async def test_non_retryable_parameter_failure_uses_new_lease_for_corrected_deci
 
     async with session_factory() as session:
         cycle = (
-            await session.execute(
-                sa.text(
-                    "SELECT activity_current_step_id, activity_phase, activity_plan "
-                    "FROM llm_gateway_control_cycles"
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT activity_current_step_id, activity_phase, activity_plan FROM llm_gateway_control_cycles"
+                    )
                 )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         terminals = (
-            await session.execute(
-                sa.text(
-                    "SELECT status, reason, retryable FROM llm_gateway_skill_calls "
-                    "WHERE skill_name='dance_auto_schedule' ORDER BY created_at"
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT status, reason, retryable FROM llm_gateway_skill_calls "
+                        "WHERE skill_name='dance_auto_schedule' ORDER BY created_at"
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
     assert cycle["activity_current_step_id"] == "balloon"
     assert cycle["activity_phase"] == "transport"
     assert [row["status"] for row in terminals] == ["failed", "succeeded"]

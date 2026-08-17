@@ -123,12 +123,18 @@ def test_dance_arguments_always_include_integer_score_without_gateway_range() ->
     [
         ("darts_auto_schedule", "darts_score_invalid"),
         ("darts_auto_schedule", "darts_score_exceeds_limit"),
+        ("darts_auto_schedule", "darts_dart_pos_invalid"),
+        ("darts_auto_schedule", "darts_score_below_limit"),
         ("dance_auto_schedule", "dance_score_invalid"),
         ("dance_auto_schedule", "dance_score_exceeds_limit"),
+        ("dance_auto_schedule", "dance_score_below_limit"),
         ("shooting_auto_schedule", "shooting_distance_invalid"),
         ("shooting_auto_schedule", "shooting_project_invalid"),
         ("shooting_auto_schedule", "shooting_score_exceeds_limit"),
-        ("paper_plane_auto_schedule", "paper_plane_use_time_invalid"),
+        ("shooting_auto_schedule", "shooting_score_below_limit"),
+        ("paper_plane_auto_schedule", "paper_plane_plane_name_invalid"),
+        ("paper_plane_auto_schedule", "paper_plane_use_time_ms_invalid"),
+        ("paper_plane_auto_schedule", "paper_plane_use_time_ms_out_of_range"),
     ],
 )
 def test_known_parameter_failures_allow_a_corrected_decision(

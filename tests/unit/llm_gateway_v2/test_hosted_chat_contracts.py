@@ -55,6 +55,25 @@ def test_chat_received_is_parsed_without_entering_decision_lease() -> None:
     assert event.state_version == 0
 
 
+def test_chat_received_preserves_text_whitespace() -> None:
+    text = "  你好\n下一行  "
+    event = parse_gateway_v2_event(
+        _event(
+            "chat_received",
+            {
+                "sessionId": "session-1",
+                "sender": {"avatarId": "100", "roleId": "200"},
+                "chatType": "friend",
+                "supported": True,
+                "text": text,
+                "serverTimeMs": 10,
+            },
+        )
+    )
+
+    assert event.payload.text == text
+
+
 def test_chat_received_accepts_gateway_v1_text_payload_without_conversation() -> None:
     event = parse_gateway_v2_event(
         _event(

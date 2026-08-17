@@ -8,6 +8,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from pydantic import ValidationError
@@ -58,6 +60,10 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCoordinates,
     SceneTarget,
     load_default_scene_catalog,
+)
+from src.core.integration.llm_gateway_v2.token_usage import (
+    GatewayV2TokenUsageTracker,
+    gateway_v2_token_callback_config,
 )
 
 
@@ -542,6 +548,37 @@ def test_selector_rejects_argument_paths_outside_hint_allowlist() -> None:
     )
 
     assert isinstance(selected, GatewayV2WaitAction)
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "required_args"),
+    [
+        ("wish_board_auto_schedule", ["boardName", "wish"]),
+        ("coffee_auto_schedule", ["coffeeName"]),
+        ("seat_sit", ["sceneId", "chairId"]),
+        ("seat_get_out", ["sceneId", "chairId"]),
+    ],
+)
+def test_activity_skills_without_structured_arguments_are_not_emitted(
+    skill_name: str,
+    required_args: list[str],
+) -> None:
+    payload = _lease(
+        available_skills=[{"skillName": skill_name, "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": skill_name,
+                "schemaVersion": "v1",
+                "allowedArgs": required_args,
+                "missingArgs": required_args,
+            }
+        ],
+    )
+    context = build_gateway_v2_agent_context(_event(lease=payload))
+
+    action = _gateway_v2_activity_skill_action(context, skill_name, "v1", reason="activity")
+
+    assert action is None
 
 
 def test_paper_plane_activity_action_replaces_gateway_suggested_arguments() -> None:
@@ -1144,6 +1181,47 @@ async def test_action_reasoning_retries_one_invalid_structured_response(
     assert result["reasoned_actions"][0]["skillName"] == "jump"
 
 
+async def test_action_reasoning_passes_v2_token_callback_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = build_gateway_v2_agent_context(_event())
+    captured: dict[str, Any] = {}
+
+    class _StructuredOutputStub:
+        def with_structured_output(self, schema: Any, *, method: str) -> RunnableLambda:
+            assert schema is GatewayV2ActionList
+            assert method == "json_mode"
+
+            async def invoke(_: Any, config: dict[str, Any]) -> GatewayV2ActionList:
+                captured["marker"] = config.get("metadata", {}).get("token_scope_marker")
+                return GatewayV2ActionList(actions=(_skill("jump"),))
+
+            return RunnableLambda(invoke)
+
+    async def fake_get_llm(*, model_type: str) -> _StructuredOutputStub:
+        assert model_type == "default"
+        return _StructuredOutputStub()
+
+    monkeypatch.setattr(gateway_v2_module, "get_llm", fake_get_llm)
+    monkeypatch.setattr(
+        gateway_v2_module,
+        "gateway_v2_token_callback_config",
+        lambda: {"metadata": {"token_scope_marker": "action-reasoning"}},
+        raising=False,
+    )
+
+    result = await gateway_v2_action_reasoning_node(
+        {
+            "gateway_context": context.model_dump(mode="json"),
+            "snapshot": context.prompt_payload()["session"],
+            "rag_context": "No RAG context",
+        }
+    )
+
+    assert result.get("errors", []) == []
+    assert captured == {"marker": "action-reasoning"}
+
+
 def test_v2_graph_uses_only_realtime_decision_nodes() -> None:
     graph = build_gateway_v2_decision_graph()
 
@@ -1422,6 +1500,70 @@ class _ActivityCoordinator:
         del event, context
         self.calls += 1
         return self.context
+
+
+@dataclass
+class _TokenRecordingDecisionService:
+    async def decide(self, context, *, user_id, tenant_id, activity_context=None):
+        del context, user_id, tenant_id, activity_context
+        config = gateway_v2_token_callback_config()
+        assert config is not None
+        callback = config["callbacks"][0]
+        run_id = uuid4()
+        await callback.on_chat_model_start({}, [[]], run_id=run_id)
+        await callback.on_llm_end(
+            LLMResult(
+                generations=[
+                    [
+                        ChatGeneration(
+                            message=AIMessage(
+                                content="ok",
+                                usage_metadata={
+                                    "input_tokens": 70,
+                                    "output_tokens": 30,
+                                    "total_tokens": 100,
+                                },
+                            )
+                        )
+                    ]
+                ]
+            ),
+            run_id=run_id,
+        )
+        return GatewayV2WaitAction(reason="wait", waitMs=1_000)
+
+
+async def test_planner_aggregates_and_logs_one_v2_decision_token_scope(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tracker = GatewayV2TokenUsageTracker()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=_TokenRecordingDecisionService(),
+        repository=_PlanningRepository(),
+        token_usage_tracker=tracker,
+    )
+    claimed = _claimed_for_planner()
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="src.core.integration.llm_gateway_v2.token_usage",
+    ):
+        result = await planner(claimed, build_gateway_v2_agent_context(claimed.event))
+
+    assert result == EventProcessResult("succeeded")
+    lifetime = tracker.snapshot_lifetime()
+    assert lifetime.decision_count == 1
+    assert lifetime.model_calls == 1
+    assert lifetime.total_tokens == 100
+    record = next(
+        item
+        for item in caplog.records
+        if item.getMessage().startswith("LLM Gateway v2 token usage decision")
+    )
+    assert record.event_id == claimed.event_id
+    assert record.session_id == claimed.session_id
+    assert record.decision_status == "succeeded"
+    assert record.total_tokens == 100
 
 
 def _move_activity_context(target_id: str) -> ActivityPlanContext:

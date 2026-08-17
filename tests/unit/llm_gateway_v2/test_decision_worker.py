@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
@@ -119,6 +120,41 @@ async def test_worker_records_body_first_accepted_response() -> None:
 
     assert repository.responses == [(claim, response)]
     assert repository.failures == []
+
+
+async def test_worker_logs_full_decision_identity_and_gateway_response(
+    caplog,
+) -> None:
+    claim = _claim(token="00000000-0000-0000-0000-000000000111")
+    repository = _Repository([claim])
+    response = DecisionClientResult(
+        202,
+        "accepted",
+        "accepted",
+        "call-1",
+        trace_id="trace-1",
+        session_id="session-1",
+        decision_id="decision-1",
+        decision_lease_id="lease-1",
+        control_generation=1,
+        state_version=1,
+    )
+
+    with caplog.at_level(logging.INFO, logger="src.core.integration.llm_gateway_v2.decision_worker"):
+        await _worker(repository, _Client([response])).run_once()
+
+    record = next(record for record in caplog.records if record.message == "LLM Gateway v2 decision HTTP completed")
+    assert record.trace_id == "trace-1"
+    assert record.session_id == "session-1"
+    assert record.decision_id == "decision-1"
+    assert record.decision_lease_id == "lease-1"
+    assert record.control_generation == 1
+    assert record.state_version == 1
+    assert record.skill_call_id == "call-1"
+    assert record.http_status == 202
+    assert record.response_status == "accepted"
+    assert record.response_reason == "accepted"
+    assert record.elapsed_ms >= 0
 
 
 async def test_worker_timeout_retry_reuses_exact_persisted_raw_bytes() -> None:

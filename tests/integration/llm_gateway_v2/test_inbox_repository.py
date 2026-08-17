@@ -171,6 +171,33 @@ async def test_new_duplicate_mixed_batch_and_retry_are_durable(session_factory) 
         assert await session.scalar(sa.text("SELECT status FROM llm_gateway_events LIMIT 1")) == "pending"
 
 
+async def test_standalone_hosted_chat_event_is_admitted_without_a_control_cycle(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+
+    accepted = await repository.accept_event_batch(IDENTITY, "trace-standalone-chat", (_chat_event(),))
+
+    assert accepted.received_event_ids == ("chat-event-1",)
+    assert await _counts(session_factory) == (1, 1, 1)
+    claimed = await repository.claim_next_event(
+        worker_id="chat-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert claimed is not None
+    assert claimed.event_type == "chat_received"
+    assert await repository.complete_event(
+        claimed,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    async with session_factory() as session:
+        assert await session.scalar(
+            sa.text("SELECT status FROM llm_gateway_events WHERE event_id='chat-event-1'")
+        ) == "succeeded"
+
+
 async def test_hosted_chat_event_is_admitted_once_without_a_decision_lease(session_factory) -> None:
     repository = InboxRepository(session_factory)
     started = _event("session-started")

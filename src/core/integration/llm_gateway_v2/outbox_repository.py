@@ -72,6 +72,7 @@ class ClaimedDecision:
     attempt_count: int
     locked_by: str
     lock_until: datetime
+    trace_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,7 @@ def resolve_decision_rejection(
     stored_reason: str | None,
     incoming_reason: str,
 ) -> DecisionRejectionResolution:
-    if current_status in {"planned", "sending"}:
+    if current_status in {"planned", "sending", "retryable_failed", "cancelled"}:
         return DecisionRejectionResolution(
             MutationDisposition.APPLIED,
             "rejected",
@@ -113,6 +114,26 @@ def resolve_decision_rejection(
         stored_reason,
         "rejection_invalid_state",
     )
+
+
+def decision_rejection_identity_matches(
+    decision: Mapping[str, Any],
+    event: DecisionRejectedEvent,
+) -> bool:
+    if str(decision["session_id"]) != event.session_id:
+        return False
+    if int(decision["control_generation"]) != event.control_generation:
+        return False
+    if event.decision_lease_id is not None and str(decision["decision_lease_id"]) != event.decision_lease_id:
+        return False
+    if str(decision["action"]) != event.payload.action:
+        return False
+
+    body = decision["request_body_json"]
+    if not isinstance(body, Mapping):
+        return False
+    expected_skill = body.get("skillName") if event.payload.action == "call_skill" else None
+    return event.payload.skill_name == expected_skill
 
 
 def session_stop_skill_status(action: str, reason: str) -> str:
@@ -241,6 +262,7 @@ _LOCK_DECISION_CANDIDATE = sa.text(
         d.action,
         d.request_body_bytes,
         d.body_hash,
+        source_event.trace_id,
         d.status AS decision_status,
         d.attempt_count,
         c.status AS cycle_status,
@@ -251,7 +273,25 @@ _LOCK_DECISION_CANDIDATE = sa.text(
     FROM llm_gateway_decisions AS d
     JOIN llm_gateway_control_cycles AS c ON c.id = d.cycle_id
     JOIN llm_gateway_sessions AS s ON s.id = c.runtime_session_id
+    JOIN llm_gateway_events AS source_event ON source_event.id = d.source_event_id
     WHERE d.attempt_count < :max_attempts
+      AND NOT EXISTS (
+          SELECT 1
+          FROM llm_gateway_decisions AS in_flight
+          WHERE in_flight.cycle_id = d.cycle_id
+            AND in_flight.id <> d.id
+            AND in_flight.status = 'sending'
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM llm_gateway_skill_calls AS active_call
+          WHERE active_call.decision_row_id IN (
+              SELECT active_decision.id
+              FROM llm_gateway_decisions AS active_decision
+              WHERE active_decision.cycle_id = d.cycle_id
+          )
+            AND active_call.status IN ('pending', 'started')
+      )
       AND (
           (d.status IN ('planned', 'retryable_failed') AND d.next_attempt_at <= clock_timestamp())
           OR (
@@ -330,6 +370,7 @@ _LOCK_CLAIMED_DECISION = sa.text(
         d.action_tracking_id,
         d.status AS decision_status,
         d.attempt_count,
+        source_event.trace_id,
         d.claim_token,
         d.claimed_fence_version,
         c.status AS cycle_status,
@@ -340,6 +381,7 @@ _LOCK_CLAIMED_DECISION = sa.text(
     FROM llm_gateway_decisions AS d
     JOIN llm_gateway_control_cycles AS c ON c.id = d.cycle_id
     JOIN llm_gateway_sessions AS s ON s.id = c.runtime_session_id
+    JOIN llm_gateway_events AS source_event ON source_event.id = d.source_event_id
     WHERE d.id = :row_id
     FOR UPDATE OF s, c, d
     """
@@ -438,6 +480,15 @@ _LOCK_RESPONSE_SKILL_CALL = sa.text(
     """
 )
 
+_LOCK_RESPONSE_CALL_FOR_DECISION = sa.text(
+    """
+    SELECT id, decision_row_id, decision_id, skill_call_id, skill_name, status
+    FROM llm_gateway_skill_calls
+    WHERE decision_row_id = :decision_row_id
+    FOR UPDATE
+    """
+)
+
 _INSERT_PENDING_SKILL_CALL = sa.text(
     """
     INSERT INTO llm_gateway_skill_calls (
@@ -490,7 +541,9 @@ _COMPLETE_DECISION_RESPONSE = sa.text(
 
 _LOCK_DECISION_FOR_REJECTION = sa.text(
     """
-    SELECT id, status, response_reason
+    SELECT
+        id, status, response_reason, session_id, action, control_generation,
+        state_version, decision_lease_id, request_body_json
     FROM llm_gateway_decisions
     WHERE gateway_id = :gateway_id AND decision_id = :decision_id
     FOR UPDATE
@@ -505,7 +558,10 @@ _APPLY_REJECTION = sa.text(
             WHEN CAST(:status AS VARCHAR(32)) = 'rejected' THEN 'rejected'
             ELSE response_status
         END,
-        response_reason = COALESCE(response_reason, :incoming_reason),
+        response_reason = CASE
+            WHEN :replace_response_reason THEN :incoming_reason
+            ELSE response_reason
+        END,
         error_stage = :error_stage,
         error_category = :error_category,
         completed_at = CASE
@@ -960,41 +1016,57 @@ class OutboxRepository:
                     error_stage = "http"
                     error_category = "decision_action_invalid"
                 else:
-                    call_result = await session.execute(
-                        _LOCK_RESPONSE_SKILL_CALL,
-                        {
-                            "gateway_id": decision.gateway_id,
-                            "skill_call_id": skill_call_id,
-                        },
+                    decision_call = (
+                        (
+                            await session.execute(
+                                _LOCK_RESPONSE_CALL_FOR_DECISION,
+                                {"decision_row_id": decision.row_id},
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
                     )
-                    call = call_result.mappings().one_or_none()
-                    if call is None:
-                        effect_status = "pending" if locked["action_tracking_id"] is not None else "not_applicable"
-                        await session.execute(
-                            _INSERT_PENDING_SKILL_CALL,
-                            {
-                                "tenant_id": decision.tenant_id,
-                                "decision_row_id": decision.row_id,
-                                "gateway_id": decision.gateway_id,
-                                "session_id": decision.session_id,
-                                "decision_id": decision.decision_id,
-                                "skill_call_id": skill_call_id,
-                                "skill_name": skill_name,
-                                "effect_status": effect_status,
-                            },
-                        )
-                    elif not self._response_call_matches(call, decision, skill_name):
-                        await session.execute(
-                            _MARK_RESPONSE_CALL_MANUAL,
-                            {"row_id": call["id"]},
-                        )
+                    if decision_call is not None and str(decision_call["skill_call_id"]) != skill_call_id:
                         status = "manual"
                         error_stage = "http"
                         error_category = "skill_call_identity_conflict"
-                    elif str(call["status"]) == "manual":
-                        status = "manual"
-                        error_stage = "http"
-                        error_category = "skill_call_state_conflict"
+                        skill_call_id = str(decision_call["skill_call_id"])
+                    else:
+                        call_result = await session.execute(
+                            _LOCK_RESPONSE_SKILL_CALL,
+                            {
+                                "gateway_id": decision.gateway_id,
+                                "skill_call_id": skill_call_id,
+                            },
+                        )
+                        call = call_result.mappings().one_or_none()
+                        if call is None:
+                            effect_status = "pending" if locked["action_tracking_id"] is not None else "not_applicable"
+                            await session.execute(
+                                _INSERT_PENDING_SKILL_CALL,
+                                {
+                                    "tenant_id": decision.tenant_id,
+                                    "decision_row_id": decision.row_id,
+                                    "gateway_id": decision.gateway_id,
+                                    "session_id": decision.session_id,
+                                    "decision_id": decision.decision_id,
+                                    "skill_call_id": skill_call_id,
+                                    "skill_name": skill_name,
+                                    "effect_status": effect_status,
+                                },
+                            )
+                        elif not self._response_call_matches(call, decision, skill_name):
+                            await session.execute(
+                                _MARK_RESPONSE_CALL_MANUAL,
+                                {"row_id": call["id"]},
+                            )
+                            status = "manual"
+                            error_stage = "http"
+                            error_category = "skill_call_identity_conflict"
+                        elif str(call["status"]) == "manual":
+                            status = "manual"
+                            error_stage = "http"
+                            error_category = "skill_call_state_conflict"
 
             completed = await session.execute(
                 _COMPLETE_DECISION_RESPONSE,
@@ -1065,6 +1137,8 @@ class OutboxRepository:
             decision = result.mappings().one_or_none()
             if decision is None:
                 return MutationResult(MutationDisposition.MISSING, "missing_decision")
+            if not decision_rejection_identity_matches(decision, event):
+                return MutationResult(MutationDisposition.CONFLICT, "decision_identity_conflict")
             resolution = resolve_decision_rejection(
                 str(decision["status"]),
                 None if decision["response_reason"] is None else str(decision["response_reason"]),
@@ -1076,6 +1150,7 @@ class OutboxRepository:
                     "row_id": decision["id"],
                     "status": resolution.status,
                     "incoming_reason": event.payload.reason,
+                    "replace_response_reason": resolution.disposition is MutationDisposition.APPLIED,
                     "error_stage": "decision_rejected_event" if resolution.error_category else None,
                     "error_category": resolution.error_category,
                 },
@@ -1232,6 +1307,7 @@ class OutboxRepository:
             attempt_count=int(claimed["attempt_count"]),
             locked_by=str(claimed["locked_by"]),
             lock_until=lock_until,
+            trace_id=str(candidate["trace_id"]),
         )
 
     @staticmethod

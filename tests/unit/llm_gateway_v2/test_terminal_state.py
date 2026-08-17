@@ -11,6 +11,7 @@ from src.core.integration.llm_gateway_v2.contracts import parse_gateway_v2_event
 from src.core.integration.llm_gateway_v2.event_service import GatewayV2EventDispatcher
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent, EventProcessResult
 from src.core.integration.llm_gateway_v2.outbox_repository import (
+    decision_rejection_identity_matches,
     resolve_decision_rejection,
     session_stop_skill_status,
 )
@@ -573,6 +574,48 @@ def test_pending_decision_rejection_becomes_rejected(current_status: str) -> Non
     assert resolution.disposition is MutationDisposition.APPLIED
     assert resolution.status == "rejected"
     assert resolution.reason == "lease expired"
+
+
+def test_retryable_failed_decision_rejection_becomes_rejected() -> None:
+    resolution = resolve_decision_rejection("retryable_failed", "timeout", "lease expired")
+
+    assert resolution.disposition is MutationDisposition.APPLIED
+    assert resolution.status == "rejected"
+    assert resolution.reason == "lease expired"
+
+
+def test_decision_rejection_requires_the_original_decision_identity() -> None:
+    event = parse_gateway_v2_event(
+        {
+            "eventId": "rejection-identity",
+            "eventType": "decision_rejected",
+            "sessionId": "session-1",
+            "controlGeneration": 2,
+            "eventSequence": 2,
+            "stateVersion": 4,
+            "decisionLeaseId": "lease-2",
+            "occurredAtMs": 10,
+            "payload": {
+                "decisionId": "decision-1",
+                "action": "call_skill",
+                "skillName": "jump",
+                "reason": "stale_state",
+                "rejectedAtMs": 10,
+            },
+        }
+    )
+
+    assert not decision_rejection_identity_matches(
+        {
+            "session_id": "session-1",
+            "control_generation": 1,
+            "state_version": 4,
+            "decision_lease_id": "lease-2",
+            "action": "call_skill",
+            "request_body_json": {"skillName": "jump"},
+        },
+        event,
+    )
 
 
 def test_repeated_rejection_preserves_first_reason_and_records_mismatch() -> None:

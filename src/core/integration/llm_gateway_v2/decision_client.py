@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 import httpx
@@ -34,6 +35,12 @@ class DecisionClientResult:
     status: DecisionResponseStatus
     reason: str
     skill_call_id: str | None
+    trace_id: str | None = None
+    session_id: str | None = None
+    decision_id: str | None = None
+    decision_lease_id: str | None = None
+    control_generation: int | None = None
+    state_version: int | None = None
 
     @property
     def is_idempotency_conflict(self) -> bool:
@@ -44,6 +51,8 @@ def validate_decision_response(
     request_action: str,
     http_status: int,
     payload: object,
+    *,
+    request_identity: Mapping[str, Any] | None = None,
 ) -> DecisionClientResult:
     try:
         response = parse_gateway_v2_decision_response(payload)
@@ -53,12 +62,25 @@ def validate_decision_response(
             http_status=http_status,
         ) from None
 
+    if request_identity is not None:
+        _validate_response_identity(response, request_identity)
+
+    result_identity = {
+        "trace_id": response.trace_id,
+        "session_id": response.session_id,
+        "decision_id": response.decision_id,
+        "decision_lease_id": response.decision_lease_id,
+        "control_generation": response.control_generation,
+        "state_version": response.state_version,
+    }
+
     if response.status == "rejected":
         return DecisionClientResult(
             http_status=http_status,
             status="rejected",
             reason=response.reason,
             skill_call_id=None,
+            **result_identity,
         )
 
     if not 200 <= http_status < 300:
@@ -91,7 +113,48 @@ def validate_decision_response(
         status="accepted",
         reason=response.reason,
         skill_call_id=skill_call_id,
+        **result_identity,
     )
+
+
+def _validate_response_identity(response: Any, expected: Mapping[str, Any]) -> None:
+    fields = (
+        ("traceId", "trace_id"),
+        ("sessionId", "session_id"),
+        ("decisionId", "decision_id"),
+        ("decisionLeaseId", "decision_lease_id"),
+        ("controlGeneration", "control_generation"),
+        ("stateVersion", "state_version"),
+    )
+    for request_key, response_attribute in fields:
+        expected_value = expected.get(request_key)
+        actual_value = getattr(response, response_attribute)
+        if actual_value is None:
+            if response.status == "accepted":
+                raise DecisionClientProtocolError("response_identity_missing")
+            continue
+        if actual_value != expected_value:
+            raise DecisionClientProtocolError("response_identity_mismatch")
+
+
+def _request_identity(raw_body: bytes) -> dict[str, Any] | None:
+    try:
+        decoded = json.loads(raw_body)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(decoded, Mapping):
+        return None
+    required = (
+        "traceId",
+        "sessionId",
+        "decisionId",
+        "decisionLeaseId",
+        "controlGeneration",
+        "stateVersion",
+    )
+    if not all(key in decoded for key in required):
+        return None
+    return {key: decoded[key] for key in required}
 
 
 class GatewayV2DecisionClient:
@@ -155,4 +218,9 @@ class GatewayV2DecisionClient:
                 "response_not_json",
                 http_status=response.status_code,
             ) from None
-        return validate_decision_response(action, response.status_code, payload)
+        return validate_decision_response(
+            action,
+            response.status_code,
+            payload,
+            request_identity=_request_identity(raw_body),
+        )

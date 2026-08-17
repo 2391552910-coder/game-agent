@@ -164,7 +164,7 @@ def parse_gateway_v2_agent_action(value: object) -> GatewayV2AgentAction:
 
 
 class GatewayV2ActionList(_GatewayV2AgentModel):
-    actions: tuple[GatewayV2AgentAction, ...]
+    actions: tuple[GatewayV2AgentAction, ...] = Field(min_length=1, max_length=5)
 
 
 class GatewayV2AgentContext(_GatewayV2AgentModel):

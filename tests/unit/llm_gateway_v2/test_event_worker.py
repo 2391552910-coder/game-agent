@@ -190,6 +190,36 @@ async def test_gap_blocks_later_sequence() -> None:
     assert repository.completions == []
 
 
+async def test_worker_logs_event_processing_and_completion_elapsed_times(caplog) -> None:
+    claim = _claimed()
+    repository = FakeRepository(deque([claim, None]))
+
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        del event
+        return EventProcessResult("succeeded")
+
+    with caplog.at_level(logging.INFO, logger="src.core.integration.llm_gateway_v2.event_worker"):
+        await _worker(repository, processor, max_parallelism=1).run_once()
+
+    processed = next(
+        record
+        for record in caplog.records
+        if record.message == "LLM Gateway v2 event processing completed"
+    )
+    completed = next(
+        record
+        for record in caplog.records
+        if record.message == "LLM Gateway v2 event completion committed"
+    )
+    assert processed.trace_id == claim.trace_id
+    assert processed.event_id == claim.event_id
+    assert processed.session_id == claim.session_id
+    assert processed.control_generation == claim.control_generation
+    assert processed.elapsed_ms >= 0
+    assert completed.committed is True
+    assert completed.elapsed_ms >= 0
+
+
 async def test_different_sessions_can_run_concurrently() -> None:
     first = _claimed(session_id="session-1", event_id="event-1")
     second = _claimed(session_id="session-2", event_id="event-2")

@@ -111,12 +111,12 @@ _SELECT_HOSTED_CHAT_CYCLE = sa.text(
     JOIN llm_gateway_control_cycles AS c ON c.runtime_session_id = s.id
     WHERE s.gateway_id = :gateway_id
       AND s.session_id = :session_id
-      AND c.status IN ('pending', 'active')
     ORDER BY
         CASE
             WHEN s.current_generation IS NOT NULL
              AND c.control_generation = s.current_generation THEN 0
             WHEN c.status = 'active' THEN 1
+            WHEN c.status = 'pending' THEN 2
             ELSE 2
         END,
         c.control_generation DESC
@@ -132,7 +132,6 @@ _SELECT_HOSTED_ROLE_ID = sa.text(
     JOIN llm_gateway_control_cycles AS c ON c.runtime_session_id = s.id
     WHERE s.gateway_id = :gateway_id
       AND s.session_id = :session_id
-      AND c.status IN ('pending', 'active')
     ORDER BY
         CASE
             WHEN s.current_generation IS NOT NULL
@@ -251,6 +250,30 @@ _SUPERSEDE_OLD_CYCLES = sa.text(
       AND id <> :cycle_id
       AND control_generation < :control_generation
       AND status IN ('pending', 'active')
+    """
+)
+
+_CANCEL_SUPERSEDED_DECISIONS = sa.text(
+    """
+    UPDATE llm_gateway_decisions AS d
+    SET status = 'cancelled',
+        response_status = 'cancelled',
+        response_reason = 'generation_changed',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        error_stage = 'fence',
+        error_category = 'generation_changed',
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    FROM llm_gateway_control_cycles AS c
+    WHERE d.cycle_id = c.id
+      AND c.runtime_session_id = :runtime_session_id
+      AND c.id <> :cycle_id
+      AND c.control_generation < :control_generation
+      AND c.status = 'superseded'
+      AND d.status IN ('planned', 'sending', 'retryable_failed')
     """
 )
 
@@ -547,17 +570,18 @@ _RENEW_EVENT_CLAIM = sa.text(
       AND e.status = 'processing'
       AND e.lock_until > clock_timestamp()
       AND (
-          e.event_type NOT IN ('chat_received', 'nearby_friend_chat_requested', 'chat_send_result')
-          OR c.status IN ('pending', 'active')
-      )
-      AND (
-          (
-              s.current_generation = e.control_generation
-              AND s.fence_version = e.claimed_fence_version
-          )
+          e.event_type IN ('chat_received', 'nearby_friend_chat_requested', 'chat_send_result')
           OR (
-              e.control_generation < s.current_generation
-              AND e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
+              (
+                  c.status IN ('pending', 'active')
+                  AND s.current_generation = e.control_generation
+                  AND s.fence_version = e.claimed_fence_version
+              )
+              OR (
+                  c.status = 'superseded'
+                  AND e.control_generation < s.current_generation
+                  AND e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
+              )
           )
       )
     RETURNING e.id
@@ -666,7 +690,8 @@ def _should_mark_cycle_manual(event_type: str) -> bool:
 
 
 def _hosted_chat_cycle_is_processable(event_type: str, cycle_status: str) -> bool:
-    return event_type not in _HOSTED_CHAT_EVENT_TYPES or cycle_status in {"pending", "active"}
+    del cycle_status
+    return True
 
 
 class InboxRepository:
@@ -690,6 +715,9 @@ class InboxRepository:
         prepared = _prepare_batch(identity.gateway_id, events)
         received: list[str] = []
         duplicates: list[str] = []
+        runtime_session_cache: dict[str, object] = {}
+        cycle_cache: dict[tuple[str, int], object] = {}
+        hosted_cycle_cache: dict[str, tuple[object, int]] = {}
 
         try:
             async with self._session_factory() as session:
@@ -712,6 +740,9 @@ class InboxRepository:
                             identity,
                             trace_id,
                             item,
+                            runtime_session_cache=runtime_session_cache,
+                            cycle_cache=cycle_cache,
+                            hosted_cycle_cache=hosted_cycle_cache,
                         )
 
                     for item in prepared:
@@ -772,12 +803,15 @@ class InboxRepository:
                     await self._supersede_locked_event(session, candidate)
                     continue
 
-                disposition = classify_generation(
-                    self._optional_int(candidate["current_generation"]),
-                    int(candidate["control_generation"]),
-                    str(candidate["event_type"]),
-                    int(candidate["event_sequence"]),
-                )
+                if str(candidate["event_type"]) in _HOSTED_CHAT_EVENT_TYPES:
+                    disposition = GenerationDisposition.CURRENT
+                else:
+                    disposition = classify_generation(
+                        self._optional_int(candidate["current_generation"]),
+                        int(candidate["control_generation"]),
+                        str(candidate["event_type"]),
+                        int(candidate["event_sequence"]),
+                    )
                 if disposition is GenerationDisposition.STALE:
                     await self._supersede_locked_event(session, candidate)
                     continue
@@ -807,6 +841,14 @@ class InboxRepository:
                     )
                     await session.execute(
                         _SUPERSEDE_OLD_CYCLES,
+                        {
+                            "runtime_session_id": candidate["runtime_session_id"],
+                            "cycle_id": candidate["cycle_id"],
+                            "control_generation": candidate["control_generation"],
+                        },
+                    )
+                    await session.execute(
+                        _CANCEL_SUPERSEDED_DECISIONS,
                         {
                             "runtime_session_id": candidate["runtime_session_id"],
                             "cycle_id": candidate["cycle_id"],
@@ -906,15 +948,19 @@ class InboxRepository:
                 await self._supersede_locked_event(session, locked)
                 return False
 
-            disposition = classify_generation(
-                self._optional_int(locked["current_generation"]),
-                int(locked["control_generation"]),
-                str(locked["event_type"]),
-                int(locked["event_sequence"]),
-            )
+            if str(locked["event_type"]) in _HOSTED_CHAT_EVENT_TYPES:
+                disposition = GenerationDisposition.CURRENT
+            else:
+                disposition = classify_generation(
+                    self._optional_int(locked["current_generation"]),
+                    int(locked["control_generation"]),
+                    str(locked["event_type"]),
+                    int(locked["event_sequence"]),
+                )
             current_fence = int(locked["fence_version"])
             claim_is_valid = (
-                disposition is GenerationDisposition.HISTORICAL_RECOVERY
+                event.event_type in _HOSTED_CHAT_EVENT_TYPES
+                or disposition is GenerationDisposition.HISTORICAL_RECOVERY
                 or (
                     disposition is GenerationDisposition.CURRENT
                     and current_fence == event.claimed_fence_version
@@ -1012,15 +1058,19 @@ class InboxRepository:
                     await self._supersede_locked_event(session, expired)
                     continue
 
-                disposition = classify_generation(
-                    self._optional_int(expired["current_generation"]),
-                    int(expired["control_generation"]),
-                    str(expired["event_type"]),
-                    int(expired["event_sequence"]),
-                )
+                if str(expired["event_type"]) in _HOSTED_CHAT_EVENT_TYPES:
+                    disposition = GenerationDisposition.CURRENT
+                else:
+                    disposition = classify_generation(
+                        self._optional_int(expired["current_generation"]),
+                        int(expired["control_generation"]),
+                        str(expired["event_type"]),
+                        int(expired["event_sequence"]),
+                    )
                 claimed_fence_version = self._optional_int(expired["claimed_fence_version"])
                 claim_is_valid = (
-                    disposition is GenerationDisposition.HISTORICAL_RECOVERY
+                    str(expired["event_type"]) in _HOSTED_CHAT_EVENT_TYPES
+                    or disposition is GenerationDisposition.HISTORICAL_RECOVERY
                     or (
                         disposition is GenerationDisposition.CURRENT
                         and int(expired["fence_version"]) == claimed_fence_version
@@ -1172,24 +1222,65 @@ class InboxRepository:
         identity: InboundGatewayIdentity,
         trace_id: str,
         item: _PreparedEvent,
+        *,
+        runtime_session_cache: dict[str, object],
+        cycle_cache: dict[tuple[str, int], object],
+        hosted_cycle_cache: dict[str, tuple[object, int]],
     ) -> str | None:
         event = item.event
         savepoint = await session.begin_nested()
+        created_runtime_session_key: str | None = None
+        created_cycle_key: tuple[str, int] | None = None
+        created_hosted_cycle_key: str | None = None
         try:
             if _is_hosted_chat_event(event):
-                cycle = (
-                    await session.execute(
-                        _SELECT_HOSTED_CHAT_CYCLE,
-                        {
-                            "gateway_id": identity.gateway_id,
-                            "session_id": event.session_id,
-                        },
-                    )
-                ).mappings().one_or_none()
-                if cycle is None:
-                    raise EventAdmissionUnavailable
-                cycle_id = cycle["id"]
-                control_generation = int(cycle["control_generation"])
+                cached_cycle = hosted_cycle_cache.get(event.session_id)
+                if cached_cycle is None:
+                    cycle = (
+                        await session.execute(
+                            _SELECT_HOSTED_CHAT_CYCLE,
+                            {
+                                "gateway_id": identity.gateway_id,
+                                "session_id": event.session_id,
+                            },
+                        )
+                    ).mappings().one_or_none()
+                else:
+                    cycle = None
+                if cached_cycle is not None:
+                    cycle_id, control_generation = cached_cycle
+                elif cycle is None:
+                    runtime_session_id = runtime_session_cache.get(event.session_id)
+                    if runtime_session_id is None:
+                        runtime_session_id = (
+                            await session.execute(
+                                _UPSERT_SESSION,
+                                {
+                                    "tenant_id": identity.tenant_id,
+                                    "gateway_id": identity.gateway_id,
+                                    "session_id": event.session_id,
+                                },
+                            )
+                        ).scalar_one()
+                        created_runtime_session_key = event.session_id
+                    control_generation = 1
+                    cycle_id = (
+                        await session.execute(
+                            _UPSERT_CYCLE,
+                            {
+                                "id": uuid4(),
+                                "tenant_id": identity.tenant_id,
+                                "runtime_session_id": runtime_session_id,
+                                "gateway_id": identity.gateway_id,
+                                "session_id": event.session_id,
+                                "control_generation": control_generation,
+                            },
+                        )
+                    ).scalar_one()
+                    created_hosted_cycle_key = event.session_id
+                else:
+                    cycle_id = cycle["id"]
+                    control_generation = int(cycle["control_generation"])
                 maximum = await session.scalar(
                     _SELECT_MAX_HOSTED_CHAT_SEQUENCE,
                     {
@@ -1199,31 +1290,38 @@ class InboxRepository:
                 )
                 event_sequence = _next_hosted_chat_storage_sequence(maximum)
             else:
-                runtime_session_id = (
-                    await session.execute(
-                        _UPSERT_SESSION,
-                        {
-                            "tenant_id": identity.tenant_id,
-                            "gateway_id": identity.gateway_id,
-                            "session_id": event.session_id,
-                        },
-                    )
-                ).scalar_one()
+                runtime_session_id = runtime_session_cache.get(event.session_id)
+                if runtime_session_id is None:
+                    runtime_session_id = (
+                        await session.execute(
+                            _UPSERT_SESSION,
+                            {
+                                "tenant_id": identity.tenant_id,
+                                "gateway_id": identity.gateway_id,
+                                "session_id": event.session_id,
+                            },
+                        )
+                    ).scalar_one()
+                    created_runtime_session_key = event.session_id
                 control_generation = event.control_generation
                 event_sequence = event.event_sequence
-                cycle_id = (
-                    await session.execute(
-                        _UPSERT_CYCLE,
-                        {
-                            "id": uuid4(),
-                            "tenant_id": identity.tenant_id,
-                            "runtime_session_id": runtime_session_id,
-                            "gateway_id": identity.gateway_id,
-                            "session_id": event.session_id,
-                            "control_generation": control_generation,
-                        },
-                    )
-                ).scalar_one()
+                cycle_key = (event.session_id, control_generation)
+                cycle_id = cycle_cache.get(cycle_key)
+                if cycle_id is None:
+                    cycle_id = (
+                        await session.execute(
+                            _UPSERT_CYCLE,
+                            {
+                                "id": uuid4(),
+                                "tenant_id": identity.tenant_id,
+                                "runtime_session_id": runtime_session_id,
+                                "gateway_id": identity.gateway_id,
+                                "session_id": event.session_id,
+                                "control_generation": control_generation,
+                            },
+                        )
+                    ).scalar_one()
+                    created_cycle_key = cycle_key
             result = await session.execute(
                 _INSERT_EVENT,
                 {
@@ -1243,10 +1341,22 @@ class InboxRepository:
             )
             inserted_event_id = result.scalar_one_or_none()
             await savepoint.commit()
+            if created_runtime_session_key is not None:
+                runtime_session_cache[created_runtime_session_key] = runtime_session_id
+            if created_cycle_key is not None:
+                cycle_cache[created_cycle_key] = cycle_id
+            if created_hosted_cycle_key is not None:
+                hosted_cycle_cache[created_hosted_cycle_key] = (cycle_id, control_generation)
         except DBAPIError as error:
             if not _is_recoverable_event_statement_error(error):
                 raise EventAdmissionUnavailable from None
             await savepoint.rollback()
+            if created_runtime_session_key is not None:
+                runtime_session_cache.pop(created_runtime_session_key, None)
+            if created_cycle_key is not None:
+                cycle_cache.pop(created_cycle_key, None)
+            if created_hosted_cycle_key is not None:
+                hosted_cycle_cache.pop(created_hosted_cycle_key, None)
             stored_hash = await self._load_one_hash(session, identity.gateway_id, event.event_id)
             if stored_hash is None:
                 return None

@@ -61,6 +61,12 @@ def _arguments(skill_name: str) -> dict:
         }
     if skill_name == "dance_auto_schedule":
         return {"score": 95}
+    if skill_name == "wish_board_auto_schedule":
+        return {"boardName": "wish-board-1", "wish": "Have a good day"}
+    if skill_name == "coffee_auto_schedule":
+        return {"coffeeName": "latte"}
+    if skill_name in {"seat_sit", "seat_get_out"}:
+        return {"sceneId": 7, "chairId": 1}
     return {}
 
 
@@ -77,6 +83,12 @@ def _argument_paths(skill_name: str) -> list[str]:
         return ["distance", "weapon", "posture", "score"]
     if skill_name == "dance_auto_schedule":
         return ["score"]
+    if skill_name == "wish_board_auto_schedule":
+        return ["boardName", "wish"]
+    if skill_name == "coffee_auto_schedule":
+        return ["coffeeName"]
+    if skill_name in {"seat_sit", "seat_get_out"}:
+        return ["sceneId", "chairId"]
     return []
 
 
@@ -121,17 +133,8 @@ def _context(
                     "schemaVersion": "v1",
                     "argumentStatus": "ready",
                     "suggestedArgs": {},
-                    "allowedArgs": [
-                        {
-                            "path": path,
-                            **{},
-                        }
-                        for path in _argument_paths(name)
-                    ],
-                    "missingArgs": [
-                        {"path": path}
-                        for path in _argument_paths(name)
-                    ],
+                    "allowedArgs": [{"path": path} for path in _argument_paths(name)],
+                    "missingArgs": [{"path": path} for path in _argument_paths(name)],
                     "warnings": [],
                     "nextSteps": [],
                 }

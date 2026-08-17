@@ -30,6 +30,9 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (
     role_identity_from_snapshot,
     scene_id_from_snapshot,
 )
+from src.core.integration.llm_gateway_v2.token_usage import (
+    gateway_v2_token_callback_config,
+)
 from src.core.llm.factory import get_llm
 
 logger = logging.getLogger(__name__)
@@ -173,10 +176,13 @@ class GatewayV2ActivityPlanGenerator:
                 ensure_ascii=False,
             ),
         }
-        generated = await asyncio.wait_for(
-            chain.ainvoke(values),
-            timeout=self._timeout_seconds,
+        callback_config = gateway_v2_token_callback_config()
+        invocation = (
+            chain.ainvoke(values)
+            if callback_config is None
+            else chain.ainvoke(values, config=callback_config)
         )
+        generated = await asyncio.wait_for(invocation, timeout=self._timeout_seconds)
         return ActivityPlanProposal.model_validate(generated)
 
 

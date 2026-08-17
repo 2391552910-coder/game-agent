@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from langchain_core.runnables import RunnableLambda
 
+from src.core.integration.llm_gateway_v2 import activity_planner as activity_planner_module
 from src.core.integration.llm_gateway_v2 import decision_service as decision_service_module
 from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlan,
@@ -17,7 +19,10 @@ from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanContext,
     ActivityPlanSnapshot,
 )
-from src.core.integration.llm_gateway_v2.activity_planner import ActivityPlanCoordinator
+from src.core.integration.llm_gateway_v2.activity_planner import (
+    ActivityPlanCoordinator,
+    GatewayV2ActivityPlanGenerator,
+)
 from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCatalog,
     SceneCoordinates,
@@ -121,6 +126,45 @@ def _non_lobby_proposal() -> ActivityPlanProposal:
             ],
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_model_plan_generation_passes_v2_token_callback_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StructuredOutputStub:
+        def with_structured_output(self, schema: Any, *, method: str) -> RunnableLambda:
+            assert schema is ActivityPlanProposal
+            assert method == "json_mode"
+
+            async def invoke(_: Any, config: dict[str, Any]) -> ActivityPlanProposal:
+                captured["marker"] = config.get("metadata", {}).get("token_scope_marker")
+                return _proposal()
+
+            return RunnableLambda(invoke)
+
+    async def fake_get_llm(*, model_type: str) -> _StructuredOutputStub:
+        assert model_type == "default"
+        return _StructuredOutputStub()
+
+    monkeypatch.setattr(activity_planner_module, "get_llm", fake_get_llm)
+    monkeypatch.setattr(
+        activity_planner_module,
+        "gateway_v2_token_callback_config",
+        lambda: {"metadata": {"token_scope_marker": "activity-plan"}},
+        raising=False,
+    )
+
+    result = await GatewayV2ActivityPlanGenerator().generate(
+        _context(),
+        recent_actions=(),
+        recent_failures=(),
+    )
+
+    assert result.goal_id == "plaza_social"
+    assert captured == {"marker": "activity-plan"}
 
 
 def _movement_recovery_proposal() -> ActivityPlanProposal:
@@ -370,16 +414,8 @@ async def test_ten_roles_use_scene_targets_and_stable_role_rotation() -> None:
             ).body_json
         )
 
-    executable_orders = [
-        tuple(step.skill_name for step in plan.steps if step.skill_name is not None)
-        for plan in plans
-    ]
-    move_steps = [
-        step
-        for plan in plans
-        for step in plan.steps
-        if step.skill_name == "move_to"
-    ]
+    executable_orders = [tuple(step.skill_name for step in plan.steps if step.skill_name is not None) for plan in plans]
+    move_steps = [step for plan in plans for step in plan.steps if step.skill_name == "move_to"]
 
     assert len(set(executable_orders)) == 10
     assert all(step.scene_target_id is not None for step in move_steps)
@@ -556,9 +592,7 @@ async def test_scene_change_replans_targetless_move_step_with_current_scene_targ
     assert result.plan.version == 2
     move_steps = [step for step in result.plan.steps if step.skill_name == "move_to"]
     assert move_steps
-    assert {step.scene_target_id for step in move_steps} == {
-        "scene:7:activity:wish_board:458"
-    }
+    assert {step.scene_target_id for step in move_steps} == {"scene:7:activity:wish_board:458"}
 
 
 @pytest.mark.asyncio
@@ -715,7 +749,15 @@ def _context(
                             "skillName": skill,
                             "schemaVersion": "v1",
                             "argumentStatus": "ready",
-                            "suggestedArgs": {},
+                            "suggestedArgs": (
+                                {"boardName": "wish-board-1", "wish": "Have a good day"}
+                                if skill == "wish_board_auto_schedule"
+                                else {"coffeeName": "latte"}
+                                if skill == "coffee_auto_schedule"
+                                else {"sceneId": 7, "chairId": 1}
+                                if skill in {"seat_sit", "seat_get_out"}
+                                else {}
+                            ),
                             "allowedArgs": (
                                 [
                                     {"path": "target.x"},
@@ -744,6 +786,18 @@ def _context(
                                 if skill == "shooting_auto_schedule"
                                 else [{"path": "score"}]
                                 if skill == "dance_auto_schedule"
+                                else [
+                                    {"path": "boardName"},
+                                    {"path": "wish"},
+                                ]
+                                if skill == "wish_board_auto_schedule"
+                                else [{"path": "coffeeName"}]
+                                if skill == "coffee_auto_schedule"
+                                else [
+                                    {"path": "sceneId"},
+                                    {"path": "chairId"},
+                                ]
+                                if skill in {"seat_sit", "seat_get_out"}
                                 else []
                             ),
                             "missingArgs": (
@@ -774,6 +828,18 @@ def _context(
                                 if skill == "shooting_auto_schedule"
                                 else [{"path": "score"}]
                                 if skill == "dance_auto_schedule"
+                                else [
+                                    {"path": "boardName"},
+                                    {"path": "wish"},
+                                ]
+                                if skill == "wish_board_auto_schedule"
+                                else [{"path": "coffeeName"}]
+                                if skill == "coffee_auto_schedule"
+                                else [
+                                    {"path": "sceneId"},
+                                    {"path": "chairId"},
+                                ]
+                                if skill in {"seat_sit", "seat_get_out"}
                                 else []
                             ),
                             "warnings": [],

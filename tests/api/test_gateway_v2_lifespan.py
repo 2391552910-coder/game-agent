@@ -332,6 +332,17 @@ class _LifecycleReadiness:
         self.operations.append("readiness:disable")
 
 
+@dataclass
+class _LifecycleTokenReporter:
+    operations: list[str]
+
+    async def start(self) -> None:
+        self.operations.append("token-reporter:start")
+
+    async def stop(self) -> None:
+        self.operations.append("token-reporter:stop")
+
+
 @pytest.mark.asyncio
 async def test_lifespan_starts_and_stops_dependencies_in_contract_order(_mock_settings) -> None:
     operations: list[str] = []
@@ -365,6 +376,10 @@ async def test_lifespan_starts_and_stops_dependencies_in_contract_order(_mock_se
             ),
             patch("src.api.main.build_gateway_v2_runtime", MagicMock(return_value=runtime)),
             patch(
+                "src.api.main.GatewayV2TokenUsageReporter",
+                MagicMock(return_value=_LifecycleTokenReporter(operations)),
+            ),
+            patch(
                 "src.api.main.warmup_gateway_v2_rag",
                 AsyncMock(side_effect=lambda: operations.append("rag:warmup")),
             ),
@@ -383,6 +398,7 @@ async def test_lifespan_starts_and_stops_dependencies_in_contract_order(_mock_se
         "redis:start",
         "v1:start",
         "rag:warmup",
+        "token-reporter:start",
         "event:start",
         "decision:start",
         "readiness:enable",
@@ -390,6 +406,7 @@ async def test_lifespan_starts_and_stops_dependencies_in_contract_order(_mock_se
         "readiness:disable",
         "event:drain",
         "decision:drain",
+        "token-reporter:stop",
         "rag:stop",
         "v1:stop",
         "redis:stop",

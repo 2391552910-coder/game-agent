@@ -1111,6 +1111,90 @@ async def test_accepted_response_first_then_skill_event_merges_one_call(session_
     }
 
 
+async def test_second_skill_call_id_for_one_decision_is_rejected(session_factory) -> None:
+    inbox = InboxRepository(session_factory)
+    await _admit(inbox, _event("single-call-source"))
+    source = await inbox.claim_next_event(worker_id="event-worker", claim_ttl_ms=30_000, max_attempts=3)
+    assert source is not None
+    context = build_gateway_v2_agent_context(source.event)
+    assert await inbox.persist_lease_context(source, context)
+    outbox = OutboxRepository(session_factory, decision_id_factory=lambda: "single-call-decision")
+    await outbox.plan_decision(
+        source,
+        context,
+        GatewayV2CallSkillAction.model_validate(
+            {
+                "action": "call_skill",
+                "skillName": "jump",
+                "schemaVersion": "v1",
+                "arguments": {},
+                "reason": "jump",
+            }
+        ),
+    )
+    assert await inbox.complete_event(
+        source,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    claimed = await outbox.claim_next_decision(
+        worker_id="decision-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert claimed is not None
+    assert await outbox.record_decision_response(
+        claimed,
+        DecisionClientResult(200, "accepted", "ok", "call-1"),
+    )
+
+    await _admit(
+        inbox,
+        _skill_event(
+            "single-call-started",
+            sequence=2,
+            event_type="skill_started",
+            decision_id="single-call-decision",
+        ),
+    )
+    started = await inbox.claim_next_event(worker_id="event-worker", claim_ttl_ms=30_000, max_attempts=3)
+    assert started is not None
+    assert (
+        await TerminalRepository(session_factory).record_skill_started(started)
+    ).disposition is MutationDisposition.APPLIED
+    assert await inbox.complete_event(
+        started,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    await _admit(
+        inbox,
+        _skill_event(
+            "single-call-finished-conflict",
+            sequence=3,
+            event_type="skill_finished",
+            decision_id="single-call-decision",
+            skill_call_id="call-2",
+        ),
+    )
+    finished = await inbox.claim_next_event(worker_id="event-worker", claim_ttl_ms=30_000, max_attempts=3)
+    assert finished is not None
+    result = await TerminalRepository(session_factory).record_skill_finished(finished)
+
+    assert result.disposition is MutationDisposition.CONFLICT
+    assert result.error_category == "skill_call_identity_conflict"
+    async with session_factory() as session:
+        count = await session.scalar(
+            sa.text("SELECT count(*) FROM llm_gateway_skill_calls WHERE decision_id='single-call-decision'")
+        )
+    assert count == 1
+
+
 @pytest.mark.parametrize(
     ("event_type", "expected_status"),
     [("skill_started", "started"), ("skill_finished", "succeeded")],
@@ -1865,6 +1949,91 @@ async def test_new_generation_started_increments_fence_once_and_supersedes_old_c
     assert (await _runtime(session_factory))["fence_version"] == 2
 
 
+async def test_new_generation_cancels_unsent_old_generation_decisions(session_factory) -> None:
+    inbox = InboxRepository(session_factory)
+    await _admit(inbox, _event("cancel-old-g1-start", generation=1))
+    g1 = await inbox.claim_next_event(worker_id="cancel-old-g1", claim_ttl_ms=30_000, max_attempts=3)
+    assert g1 is not None
+    await _complete_successfully(inbox, g1)
+    await _seed_decision(
+        session_factory,
+        cycle_id=g1.cycle_id,
+        source_event_id=g1.row_id,
+        decision_id="cancel-old-decision",
+        status="planned",
+    )
+
+    await _admit(inbox, _event("cancel-old-g2-start", generation=2))
+    g2 = await inbox.claim_next_event(worker_id="cancel-old-g2", claim_ttl_ms=30_000, max_attempts=3)
+    assert g2 is not None and g2.control_generation == 2
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT status, response_reason, error_category "
+                    "FROM llm_gateway_decisions WHERE decision_id='cancel-old-decision'"
+                )
+            )
+        ).mappings().one()
+    assert dict(row) == {
+        "status": "cancelled",
+        "response_reason": "generation_changed",
+        "error_category": "generation_changed",
+    }
+
+
+async def test_decision_worker_does_not_overlap_inflight_activity_for_one_cycle(session_factory) -> None:
+    inbox = InboxRepository(session_factory)
+    await _admit(inbox, _event("serialized-start"), _event("serialized-observation", sequence=2))
+    start = await inbox.claim_next_event(worker_id="serialized-event", claim_ttl_ms=30_000, max_attempts=3)
+    assert start is not None
+    context = build_gateway_v2_agent_context(start.event)
+    assert await inbox.persist_lease_context(start, context)
+    outbox = OutboxRepository(session_factory, decision_id_factory=lambda: "serialized-decision-1")
+    await outbox.plan_decision(start, context, GatewayV2CallSkillAction.model_validate(
+        {
+            "action": "call_skill",
+            "skillName": "jump",
+            "schemaVersion": "v1",
+            "arguments": {},
+            "reason": "jump",
+        }
+    ))
+    await _complete_successfully(inbox, start)
+    claimed = await outbox.claim_next_decision(worker_id="serialized-worker", claim_ttl_ms=30_000, max_attempts=3)
+    assert claimed is not None
+    assert await outbox.record_decision_response(
+        claimed,
+        DecisionClientResult(200, "accepted", "ok", "serialized-call-1"),
+    )
+
+    observation = await inbox.claim_next_event(
+        worker_id="serialized-event",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert observation is not None
+    observation_context = build_gateway_v2_agent_context(observation.event)
+    assert await inbox.persist_lease_context(observation, observation_context)
+    second_outbox = OutboxRepository(
+        session_factory,
+        decision_id_factory=lambda: "serialized-decision-2",
+    )
+    await second_outbox.plan_decision(
+        observation,
+        observation_context,
+        GatewayV2WaitAction(reason="wait while activity is active", waitMs=1_000),
+    )
+    await _complete_successfully(inbox, observation)
+
+    assert await second_outbox.claim_next_decision(
+        worker_id="serialized-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    ) is None
+
+
 async def test_future_non_started_event_does_not_activate_generation(session_factory) -> None:
     repository = InboxRepository(session_factory)
     await _admit(repository, _event("g1-start", generation=1))
@@ -2118,6 +2287,7 @@ async def test_old_generation_decision_rejected_recovers_after_new_generation_is
         session_factory,
         cycle_id=g1.cycle_id,
         source_event_id=g1.row_id,
+        action="wait",
         status="planned",
     )
 

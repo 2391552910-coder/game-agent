@@ -178,6 +178,15 @@ class TestRetrieveRagContext:
         assert any("RAG 检索失败" in e for e in result["errors"])
 
     @pytest.mark.asyncio
+    async def test_gateway_v2_rag_failure_is_degraded_without_blocking_errors(self):
+        with patch("src.core.agents.nodes.get_rag", AsyncMock(side_effect=Exception("RAG down"))):
+            result = await retrieve_rag_context_node(
+                _base_state(gateway_context={"eventId": "gateway-v2-test"})
+            )
+
+        assert result == {"rag_context": ""}
+
+    @pytest.mark.asyncio
     async def test_empty_snapshot(self):
         mock_rag = AsyncMock()
         mock_rag.aquery = AsyncMock(return_value="")

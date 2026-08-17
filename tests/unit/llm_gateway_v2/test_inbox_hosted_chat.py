@@ -116,23 +116,14 @@ def test_hosted_chat_manual_failure_does_not_mark_decision_cycle_manual() -> Non
     assert predicate("observation_updated") is True
 
 
-@pytest.mark.parametrize("cycle_status", ["pending", "active"])
-def test_hosted_chat_is_processable_only_during_live_cycle(cycle_status: str) -> None:
+@pytest.mark.parametrize("cycle_status", ["pending", "active", "stopped", "superseded", "manual"])
+def test_hosted_chat_is_processable_independently_of_decision_cycle(cycle_status: str) -> None:
     predicate = getattr(inbox_repository, "_hosted_chat_cycle_is_processable", None)
 
     assert predicate is not None
     assert predicate("chat_received", cycle_status) is True
-    assert predicate("observation_updated", cycle_status) is True
-
-
-@pytest.mark.parametrize("cycle_status", ["stopped", "superseded", "manual"])
-def test_hosted_chat_is_not_processable_after_cycle_ends(cycle_status: str) -> None:
-    predicate = getattr(inbox_repository, "_hosted_chat_cycle_is_processable", None)
-
-    assert predicate is not None
-    assert predicate("chat_received", cycle_status) is False
-    assert predicate("nearby_friend_chat_requested", cycle_status) is False
-    assert predicate("chat_send_result", cycle_status) is False
+    assert predicate("nearby_friend_chat_requested", cycle_status) is True
+    assert predicate("chat_send_result", cycle_status) is True
     assert predicate("observation_updated", cycle_status) is True
 
 

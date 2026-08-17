@@ -255,17 +255,51 @@ def _available_skills() -> list[dict[str, object]]:
 def _skill_hints() -> list[dict[str, object]]:
     hints: list[dict[str, object]] = []
     for skill in SKILLS:
-        move_paths = (
-            [{"path": f"target.{axis}", "type": "number"} for axis in ("x", "y", "z")] if skill == "move_to" else []
-        )
+        suggested_args: dict[str, object] = {}
+        argument_paths: list[dict[str, object]] = []
+        if skill == "move_to":
+            argument_paths = [{"path": f"target.{axis}", "type": "number"} for axis in ("x", "y", "z")]
+        elif skill == "dance_auto_schedule":
+            argument_paths = [{"path": "score"}]
+        elif skill == "darts_auto_schedule":
+            argument_paths = [
+                {"path": "score"},
+                {"path": "darts"},
+                {"path": "allowPurchaseWhenInsufficient"},
+            ]
+        elif skill == "shooting_auto_schedule":
+            argument_paths = [
+                {"path": "distance"},
+                {"path": "weapon"},
+                {"path": "posture"},
+                {"path": "score"},
+            ]
+        elif skill == "paper_plane_auto_schedule":
+            argument_paths = [
+                {"path": "planeName"},
+                {"path": "useTimeMs"},
+                {"path": "isComplete"},
+            ]
+        elif skill == "wish_board_auto_schedule":
+            suggested_args = {
+                "boardName": "wish-board-1",
+                "wish": "Have a good day",
+            }
+            argument_paths = [{"path": "boardName"}, {"path": "wish"}]
+        elif skill == "coffee_auto_schedule":
+            suggested_args = {"coffeeName": "latte"}
+            argument_paths = [{"path": "coffeeName"}]
+        elif skill == "seat_sit":
+            suggested_args = {"sceneId": PLAZA_SCENE_ID, "chairId": 1}
+            argument_paths = [{"path": "sceneId"}, {"path": "chairId"}]
         hints.append(
             {
                 "skillName": skill,
                 "schemaVersion": "v1",
-                "argumentStatus": "missing" if move_paths else "ready",
-                "suggestedArgs": {},
-                "allowedArgs": move_paths,
-                "missingArgs": move_paths,
+                "argumentStatus": "missing" if skill == "move_to" else "ready",
+                "suggestedArgs": suggested_args,
+                "allowedArgs": argument_paths,
+                "missingArgs": argument_paths,
                 "warnings": [],
                 "nextSteps": [],
             }
@@ -504,11 +538,7 @@ def _max_consecutive_skill_count(decisions: list[dict[str, Any]]) -> int:
 
 
 def _first_repeated_skill_context(decisions: list[dict[str, Any]]) -> dict[str, Any] | None:
-    skills = [
-        str(decision["skillName"])
-        for decision in decisions
-        if decision["action"] == "call_skill"
-    ]
+    skills = [str(decision["skillName"]) for decision in decisions if decision["action"] == "call_skill"]
     for index in range(1, len(skills)):
         if skills[index] == skills[index - 1]:
             return {
@@ -658,7 +688,7 @@ async def test_ten_roles_run_for_thirty_virtual_minutes_without_decision_degrada
             "roleId": role.role_id,
             "repeat": _first_repeated_skill_context(role.decisions),
         }
-        assert role_move_coordinates
+        assert role_move_coordinates, f"roleIndex={role.index} roleId={role.role_id} skills={','.join(skills)}"
         assert len(role_move_coordinates) == len(set(role_move_coordinates))
         per_role.append(
             {

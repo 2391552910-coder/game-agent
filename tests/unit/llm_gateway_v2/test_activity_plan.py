@@ -8,8 +8,28 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
     create_plaza_social_plan,
     materialize_activity_plan,
     record_step_terminal,
+    should_retry_activity_failure,
     validate_activity_plan,
 )
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "reason"),
+    [
+        ("darts_auto_schedule", "no_available_dart_pos"),
+        ("paper_plane_auto_schedule", "ttl_expired"),
+        ("paper_plane_auto_schedule", "upstream_timeout"),
+    ],
+)
+def test_capacity_and_long_activity_failures_do_not_immediately_retry(
+    skill_name: str,
+    reason: str,
+) -> None:
+    assert should_retry_activity_failure(skill_name, reason, retryable=True) is False
+
+
+def test_other_retryable_activity_failure_still_allows_one_bounded_retry() -> None:
+    assert should_retry_activity_failure("dance_auto_schedule", "temporary_error", retryable=True) is True
 
 
 def test_plaza_social_plan_starts_with_arrival_and_advances_through_phases() -> None:

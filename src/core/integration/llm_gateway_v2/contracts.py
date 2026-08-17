@@ -753,13 +753,12 @@ class ChatReceivedPayload(_WireModel):
 
     @field_validator("text")
     @classmethod
-    def normalize_text(cls, value: str | None) -> str | None:
+    def validate_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        stripped = value.strip()
-        if not stripped or len(stripped.encode("utf-16-le")) // 2 > 1000:
+        if not value.strip() or len(value.encode("utf-16-le")) // 2 > 1000:
             raise ValueError("text must be non-blank and at most 1000 UTF-16 code units")
-        return stripped
+        return value
 
     @model_validator(mode="after")
     def validate_supported_text(self) -> "ChatReceivedPayload":
@@ -1153,7 +1152,7 @@ class GatewayV2CallSkillDecision(_GatewayV2DecisionBase):
 
 class GatewayV2WaitDecision(_GatewayV2DecisionBase):
     action: Literal["wait"]
-    wait_ms: StrictPositiveInt = Field(
+    wait_ms: StrictNonNegativeInt = Field(
         default=10_000,
         validation_alias="waitMs",
         serialization_alias="waitMs",
@@ -1194,6 +1193,10 @@ class GatewayV2DecisionAccepted(_WireModel):
         validation_alias="decisionId",
         serialization_alias="decisionId",
     )
+    decision_lease_id: NonEmptyString128 = Field(
+        validation_alias="decisionLeaseId",
+        serialization_alias="decisionLeaseId",
+    )
     control_generation: StrictPositiveInt = Field(
         validation_alias="controlGeneration",
         serialization_alias="controlGeneration",
@@ -1228,6 +1231,10 @@ class GatewayV2DecisionRejected(_WireModel):
         validation_alias="decisionId",
         serialization_alias="decisionId",
     )
+    decision_lease_id: NonEmptyString128 | None = Field(
+        validation_alias="decisionLeaseId",
+        serialization_alias="decisionLeaseId",
+    )
     control_generation: StrictNonNegativeInt = Field(
         validation_alias="controlGeneration",
         serialization_alias="controlGeneration",
@@ -1255,12 +1262,12 @@ class GatewayV2DecisionRejected(_WireModel):
         validation_alias="blockedByActivity",
         serialization_alias="blockedByActivity",
     )
-    blocked_by_scene_id: NonEmptyString128 | None = Field(
+    blocked_by_scene_id: StrictNonNegativeInt | None = Field(
         default=None,
         validation_alias="blockedBySceneId",
         serialization_alias="blockedBySceneId",
     )
-    blocked_by_chair_id: NonEmptyString128 | None = Field(
+    blocked_by_chair_id: StrictNonNegativeInt | None = Field(
         default=None,
         validation_alias="blockedByChairId",
         serialization_alias="blockedByChairId",

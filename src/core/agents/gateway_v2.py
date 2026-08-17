@@ -29,6 +29,9 @@ from src.core.integration.llm_gateway_v2.decision_service import (
     select_gateway_v2_action,
 )
 from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
+from src.core.integration.llm_gateway_v2.token_usage import (
+    gateway_v2_token_callback_config,
+)
 from src.core.llm.factory import get_llm
 
 _SINGLE_CALL_TIMEOUT_SECONDS = 60
@@ -55,21 +58,16 @@ class GatewayV2AgentState(TypedDict, total=False):
     snapshot: dict[str, Any]
     gateway_context: dict[str, Any]
     rag_context: str
-    enriched_context: str
-    behavior_report: str
     reasoned_actions: Annotated[list[dict[str, Any]], operator.add]
     selected_action: dict[str, Any]
     errors: Annotated[list[str], operator.add]
     tracking_summary: str
     anomalies: Annotated[list[str], operator.add]
     abandoned_tracking_ids: Annotated[list[str], operator.add]
-    intent_result: dict[str, Any]
-    goal_evaluation_result: dict[str, Any]
     player_memory: dict[str, Any]
     activity_plan: dict[str, Any] | None
     recent_action_history: list[dict[str, Any]]
     recent_failure_history: list[dict[str, Any]]
-    current_phase: str | None
     current_step: dict[str, Any] | None
 
 
@@ -96,7 +94,6 @@ async def gateway_v2_action_reasoning_node(state: GatewayV2AgentState) -> Gatewa
         chain = prompt | structured_llm
         gateway_context_payload = context.prompt_payload()
         gateway_context_text = json.dumps(gateway_context_payload, ensure_ascii=False)
-        snapshot_text = json.dumps(state.get("snapshot", {}), ensure_ascii=False)
         rag_context = state.get("rag_context") or "No RAG context"
         skill_catalog_text = json.dumps(
             {
@@ -135,19 +132,10 @@ async def gateway_v2_action_reasoning_node(state: GatewayV2AgentState) -> Gatewa
         )
         prompt_values = {
             "gateway_context": gateway_context_text,
-            "behavior_report": state.get("behavior_report", ""),
-            "snapshot_text": snapshot_text,
             "rag_context": rag_context,
-            "enriched_context": state.get("enriched_context") or "No enriched context",
-            "intent_result": json.dumps(state.get("intent_result", {}), ensure_ascii=False),
-            "goal_evaluation_result": json.dumps(
-                state.get("goal_evaluation_result", {}),
-                ensure_ascii=False,
-            ),
             "activity_plan": activity_plan_text,
             "recent_action_history": recent_action_history_text,
             "recent_failure_history": recent_failure_history_text,
-            "current_phase": state.get("current_phase") or "No active phase",
             "current_step": current_step_text,
         }
         final_prompt_text = "\n\n".join(
@@ -187,8 +175,14 @@ async def gateway_v2_action_reasoning_node(state: GatewayV2AgentState) -> Gatewa
         raw_action_list: GatewayV2ActionList | None = None
         for attempt in range(1, _MAX_STRUCTURED_OUTPUT_ATTEMPTS + 1):
             try:
+                callback_config = gateway_v2_token_callback_config()
+                invocation = (
+                    chain.ainvoke(prompt_values)
+                    if callback_config is None
+                    else chain.ainvoke(prompt_values, config=callback_config)
+                )
                 raw_action_list = await asyncio.wait_for(
-                    chain.ainvoke(prompt_values),
+                    invocation,
                     timeout=_SINGLE_CALL_TIMEOUT_SECONDS,
                 )
                 break

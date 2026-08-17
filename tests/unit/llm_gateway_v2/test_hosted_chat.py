@@ -692,7 +692,15 @@ async def test_control_client_keeps_stable_body_and_request_id_on_transport_retr
         requests.append(request)
         if attempts == 1:
             raise httpx.ReadError("temporary")
-        return httpx.Response(202, json={"accepted": True, "chatMessageId": "message-1"})
+        return httpx.Response(
+            202,
+            json={
+                "traceId": "trace-chat-1",
+                "chatMessageId": "message-1",
+                "status": "accepted",
+                "acceptedAtMs": 1_000,
+            },
+        )
 
     client = HostedChatControlClient(
         base_url="http://gateway.local",
@@ -725,7 +733,15 @@ async def test_control_client_derives_chat_send_path_from_decision_url() -> None
 
     async def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
-        return httpx.Response(202, json={"accepted": True, "chatMessageId": "message-1"})
+        return httpx.Response(
+            202,
+            json={
+                "traceId": "trace-chat-2",
+                "chatMessageId": "message-1",
+                "status": "accepted",
+                "acceptedAtMs": 1_000,
+            },
+        )
 
     client = HostedChatControlClient(
         base_url="http://gateway.local/api/v1/hosting/llm/decision",
@@ -754,7 +770,15 @@ async def test_control_client_uses_service_supplied_request_id() -> None:
 
     async def handler(request: httpx.Request) -> httpx.Response:
         request_ids.append(request.headers["X-RequestId"])
-        return httpx.Response(202, json={"accepted": True, "chatMessageId": "message-1"})
+        return httpx.Response(
+            202,
+            json={
+                "traceId": "trace-chat-3",
+                "chatMessageId": "message-1",
+                "status": "accepted",
+                "acceptedAtMs": 1_000,
+            },
+        )
 
     client = HostedChatControlClient(
         base_url="http://gateway.local",
@@ -778,6 +802,20 @@ async def test_control_client_uses_service_supplied_request_id() -> None:
 
     assert result.request_id == "event-stable-id"
     assert request_ids == ["event-stable-id"]
+
+
+def test_send_request_preserves_content_whitespace_after_validation() -> None:
+    content = "  保留首尾空格\n保留换行  "
+
+    request = HostedChatSendRequest(
+        sessionId="session-1",
+        targetAvatarId="100",
+        targetRoleId="200",
+        chatType="friend",
+        content=content,
+    )
+
+    assert request.content == content
 
 
 @pytest.mark.asyncio

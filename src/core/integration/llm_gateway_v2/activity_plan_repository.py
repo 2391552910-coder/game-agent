@@ -20,6 +20,7 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
     complete_social_opportunity,
     record_step_started,
     record_step_terminal,
+    should_retry_activity_failure,
     validate_activity_plan,
 )
 from src.core.integration.llm_gateway_v2.competitive_activity import is_correctable_skill_failure
@@ -304,18 +305,25 @@ class ActivityPlanRepository:
         status = getattr(payload, "status", None)
         succeeded = status == "success"
         retryable = bool(getattr(payload, "retryable", False))
+        skill_name = str(getattr(payload, "skill_name", ""))
+        reason = str(getattr(payload, "reason", ""))
+        plan_retryable = should_retry_activity_failure(
+            skill_name,
+            reason,
+            retryable=retryable,
+        )
         corrected_decision_allowed = (
             not succeeded
             and getattr(payload, "lease", None) is not None
             and is_correctable_skill_failure(
-                str(getattr(payload, "skill_name", "")),
-                str(getattr(payload, "reason", "")),
+                skill_name,
+                reason,
             )
         )
         return await self._record_terminal_event(
             event,
             succeeded=succeeded,
-            retryable=retryable,
+            retryable=plan_retryable,
             corrected_decision_allowed=corrected_decision_allowed,
         )
 
