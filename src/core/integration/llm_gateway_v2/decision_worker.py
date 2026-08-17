@@ -406,14 +406,65 @@ class DecisionWorker:
 
     async def _maintain_claim(self, decision: ClaimedDecision) -> None:
         renewal_interval_seconds = max(self._claim_ttl_ms / 3_000, 0.001)
+        heartbeat_interval_seconds = min(
+            renewal_interval_seconds,
+            max(self._poll_interval_seconds, 0.001),
+            1.0,
+        )
+        loop = asyncio.get_running_loop()
+        next_renewal = loop.time() + renewal_interval_seconds
         while True:
-            await asyncio.sleep(renewal_interval_seconds)
-            renewed = await self._repository.renew_decision_claim(
+            await asyncio.sleep(
+                min(
+                    heartbeat_interval_seconds,
+                    max(next_renewal - loop.time(), 0.0),
+                )
+            )
+            self._status.heartbeat()
+            if loop.time() < next_renewal:
+                continue
+            renewed = await self._renew_decision_claim_with_heartbeat(
                 decision,
-                claim_ttl_ms=self._claim_ttl_ms,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                timeout_seconds=renewal_interval_seconds,
             )
             if not renewed:
                 return
+            self._status.heartbeat()
+            next_renewal = loop.time() + renewal_interval_seconds
+
+    async def _renew_decision_claim_with_heartbeat(
+        self,
+        decision: ClaimedDecision,
+        *,
+        heartbeat_interval_seconds: float,
+        timeout_seconds: float,
+    ) -> bool:
+        if timeout_seconds <= 0:
+            return False
+        renewal_task = asyncio.create_task(
+            self._repository.renew_decision_claim(
+                decision,
+                claim_ttl_ms=self._claim_ttl_ms,
+            ),
+            name=f"llm-gateway-v2-renew-decision-request-{decision.decision_id}",
+        )
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        try:
+            while True:
+                remaining_seconds = deadline - asyncio.get_running_loop().time()
+                if remaining_seconds <= 0:
+                    return False
+                done, _ = await asyncio.wait(
+                    {renewal_task},
+                    timeout=min(heartbeat_interval_seconds, remaining_seconds),
+                )
+                self._status.heartbeat()
+                if renewal_task in done:
+                    return renewal_task.result()
+        finally:
+            if not renewal_task.done():
+                await self._cancel_and_wait(renewal_task)
 
     @staticmethod
     async def _cancel_and_wait(*tasks: asyncio.Task[Any]) -> None:

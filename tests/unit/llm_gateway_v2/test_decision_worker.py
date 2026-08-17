@@ -12,6 +12,7 @@ from src.core.integration.llm_gateway_v2.decision_client import (
 )
 from src.core.integration.llm_gateway_v2.decision_worker import DecisionWorker
 from src.core.integration.llm_gateway_v2.outbox_repository import ClaimedDecision
+from src.core.integration.llm_gateway_v2.readiness import ReadinessService
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry
 
 
@@ -107,6 +108,29 @@ def _worker(repository: _Repository, client: _Client, *, claim_ttl_ms: int = 30_
         retry_base_ms=100,
         retry_max_ms=1_000,
         max_parallelism=1,
+    )
+
+
+async def _ready_probe() -> None:
+    return None
+
+
+def _capabilities_service(
+    event_status: WorkerStatusRegistry,
+    decision_status: WorkerStatusRegistry,
+) -> ReadinessService:
+    return ReadinessService(
+        database_probe=_ready_probe,
+        event_worker_status=event_status,
+        decision_worker_status=decision_status,
+        embedding_probe=_ready_probe,
+        rerank_probe=_ready_probe,
+        v2_enabled=True,
+        embedding_enabled=False,
+        rerank_enabled=False,
+        poll_interval_ms=100,
+        timeout_seconds=1,
+        cache_seconds=5,
     )
 
 
@@ -220,6 +244,52 @@ async def test_worker_lost_claim_cancels_in_flight_http() -> None:
     assert cancelled.is_set()
     assert repository.responses == []
     assert repository.failures == []
+
+
+async def test_long_gateway_callback_keeps_decision_worker_capabilities_ready() -> None:
+    claim = _claim(token="00000000-0000-0000-0000-000000000111")
+    repository = _Repository([claim])
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+    response = DecisionClientResult(200, "accepted", "ok", "call-1")
+
+    class _SlowClient:
+        async def send(self, *, action: str, raw_body: bytes) -> DecisionClientResult:
+            del action, raw_body
+            callback_started.set()
+            await release_callback.wait()
+            return response
+
+    event_status = WorkerStatusRegistry()
+    event_status.mark_running()
+    event_status.heartbeat()
+    decision_status = WorkerStatusRegistry()
+    worker = DecisionWorker(
+        repository=repository,
+        client=_SlowClient(),
+        status_registry=decision_status,
+        worker_id="decision-worker",
+        poll_interval_ms=10,
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+        max_parallelism=1,
+    )
+    decision_status.mark_running()
+    decision_status.heartbeat()
+    capabilities = _capabilities_service(event_status, decision_status)
+
+    task = asyncio.create_task(worker.run_once())
+    await callback_started.wait()
+    await asyncio.sleep(2.2)
+    event_status.heartbeat()
+
+    assert capabilities.gateway_v2_capabilities_status() == (True, "ok")
+    assert task.done() is False
+
+    release_callback.set()
+    assert await task == 1
 
 
 async def test_worker_updates_heartbeat_and_dead_letter_count_each_poll() -> None:
