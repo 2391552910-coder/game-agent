@@ -24,6 +24,7 @@ from src.core.integration.llm_gateway_v2.contracts import (
     GatewayV2ErrorDetail,
     build_gateway_v2_capabilities,
 )
+from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 from src.core.integration.llm_gateway_v2.event_service import (
     EventBatchInvalid,
     EventContentConflict,
@@ -69,6 +70,13 @@ async def accept_gateway_event_batch(
 def _error(status_code: int, code: str, message: str) -> JSONResponse:
     body = GatewayV2Error(error=GatewayV2ErrorDetail(code=code, message=message))
     return JSONResponse(status_code=status_code, content=body.model_dump(mode="json"))
+
+
+def _record_event_ack_latency(request: Request, started: float) -> None:
+    runtime = getattr(request.app.state, "gateway_v2_runtime", None)
+    metrics = getattr(runtime, "metrics", None)
+    if metrics is not None:
+        metrics.record_event_ack(elapsed_ms=(time.monotonic() - started) * 1_000)
 
 
 @router.get(
@@ -121,8 +129,8 @@ async def capabilities(request: Request) -> GatewayV2Capabilities | JSONResponse
 async def receive_events(
     request: Request,
 ) -> GatewayV2BatchAck | JSONResponse:
-    started = time.monotonic()
     raw_body = await request.body()
+    started = time.monotonic()
     try:
         app_id = verify_inbound_hmac(
             request.method,
@@ -155,6 +163,7 @@ async def receive_events(
 
     try:
         response = await accept_gateway_event_batch(identity, envelope)
+        _record_event_ack_latency(request, started)
         logger.info(
             "LLM Gateway v2 event HTTP response sent",
             extra={
@@ -172,16 +181,20 @@ async def receive_events(
         return _error(409, "event_content_conflict", "event content conflicts with stored event")
     except EventServiceUnavailable:
         return _error(503, "service_unavailable", "service unavailable")
-    except Exception:
+    except Exception as error:
         logger.error(
             "LLM Gateway v2 event admission failed",
             extra={
+                **safe_exception_fields(
+                    stage="event_admission",
+                    category="unexpected_error",
+                    error=error,
+                ),
                 "trace_id": envelope.trace_id,
                 "gateway_id": envelope.gateway_id,
                 "event_count": len(envelope.events),
                 "http_status": 500,
                 "elapsed_ms": (time.monotonic() - started) * 1_000,
             },
-            exc_info=True,
         )
         return _error(500, "internal_error", "internal error")

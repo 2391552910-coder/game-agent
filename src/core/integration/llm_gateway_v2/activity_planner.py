@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 from uuid import uuid4
@@ -24,7 +25,9 @@ from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanRepository,
     ActivityPlanSnapshot,
 )
+from src.core.integration.llm_gateway_v2.capacity import AgentCapacityExceededError, AgentCapacityLimiter
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCatalog,
     role_identity_from_snapshot,
@@ -135,13 +138,59 @@ class GatewayV2ActivityPlanGenerator:
         *,
         timeout_seconds: float = _PLAN_GENERATION_TIMEOUT_SECONDS,
         scene_catalog: SceneCatalog | None = None,
+        capacity_limiter: AgentCapacityLimiter | None = None,
+        metrics: GatewayV2RuntimeMetrics | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._timeout_seconds = timeout_seconds
         self._scene_catalog = scene_catalog
+        self._capacity_limiter = capacity_limiter
+        self._metrics = metrics
 
     async def generate(
+        self,
+        context: GatewayV2AgentContext,
+        *,
+        recent_actions: tuple[Mapping[str, Any], ...],
+        recent_failures: tuple[Mapping[str, Any], ...],
+    ) -> ActivityPlanProposal:
+        started = time.monotonic()
+        outcome = "cancelled"
+        try:
+            if self._capacity_limiter is None:
+                result = await self._generate(
+                    context,
+                    recent_actions=recent_actions,
+                    recent_failures=recent_failures,
+                )
+            else:
+                async with self._capacity_limiter.slot():
+                    result = await self._generate(
+                        context,
+                        recent_actions=recent_actions,
+                        recent_failures=recent_failures,
+                    )
+        except AgentCapacityExceededError:
+            outcome = "overloaded"
+            raise
+        except TimeoutError:
+            outcome = "timeout"
+            raise
+        except Exception:
+            outcome = "error"
+            raise
+        else:
+            outcome = "success"
+            return result
+        finally:
+            if self._metrics is not None:
+                self._metrics.record_agent_result(
+                    outcome,
+                    elapsed_ms=(time.monotonic() - started) * 1_000,
+                )
+
+    async def _generate(
         self,
         context: GatewayV2AgentContext,
         *,

@@ -36,6 +36,7 @@ from src.core.integration.llm_gateway_v2.outbox_repository import (
     DecisionPlanUnavailableError,
     OutboxRepository,
 )
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.terminal_repository import MutationDisposition, TerminalRepository
 from src.core.integration.llm_gateway_v2.worker_hooks import NoOpWorkerHooks
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry
@@ -675,6 +676,52 @@ async def test_lease_context_update_requires_live_claim_and_fence(session_factor
     assert cycle["latest_state_version"] == 2
     assert cycle["latest_decision_lease_id"] == "lease-session-1-1-2"
     assert cycle["latest_decision_context"]["eventId"] == "context-next"
+
+
+async def test_new_lease_cancels_old_decision_and_records_superseded_metric(session_factory) -> None:
+    metrics = GatewayV2RuntimeMetrics(worker_limits={"event": 1, "decision": 1})
+    repository = InboxRepository(session_factory, metrics=metrics)
+    await _admit(repository, _event("lease-start"))
+    first = await repository.claim_next_event(worker_id="worker-1", claim_ttl_ms=30_000, max_attempts=3)
+    assert first is not None
+    first_context = build_gateway_v2_agent_context(first.event)
+    assert await repository.persist_lease_context(first, first_context)
+    assert await repository.complete_event(
+        first,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    await _seed_decision(
+        session_factory,
+        cycle_id=first.cycle_id,
+        source_event_id=first.row_id,
+        decision_id="old-lease-decision",
+        decision_lease_id=first_context.decision_lease_id,
+        status="planned",
+    )
+
+    await _admit(repository, _event("lease-next", sequence=2))
+    second = await repository.claim_next_event(worker_id="worker-2", claim_ttl_ms=30_000, max_attempts=3)
+    assert second is not None
+    assert await repository.persist_lease_context(second, build_gateway_v2_agent_context(second.event))
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT status, response_reason, error_category FROM llm_gateway_decisions "
+                    "WHERE decision_id='old-lease-decision'"
+                )
+            )
+        ).mappings().one()
+    assert dict(row) == {
+        "status": "cancelled",
+        "response_reason": "decision_lease_changed",
+        "error_category": "decision_lease_changed",
+    }
+    assert metrics.snapshot().decision_superseded_total == 1
 
 
 async def test_planned_decision_reuses_exact_persisted_body_for_source_event(session_factory) -> None:
@@ -1850,17 +1897,24 @@ async def test_gap_blocks_later_sequence_and_partition_advances_in_order(session
     await _admit(repository, started)
     first = await repository.claim_next_event(worker_id="worker-1", claim_ttl_ms=30_000, max_attempts=3)
     assert first is not None and first.event_id == "event-1"
-    assert await repository.claim_next_event(worker_id="worker-2", claim_ttl_ms=30_000, max_attempts=3) is None
-
+    latest = await repository.claim_next_event(worker_id="worker-2", claim_ttl_ms=30_000, max_attempts=3)
+    assert latest is not None and latest.event_id == "event-2"
+    assert await repository.persist_lease_context(latest, build_gateway_v2_agent_context(latest.event))
     assert await repository.complete_event(
+        latest,
+        EventProcessResult("succeeded"),
+        max_attempts=3,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    assert not await repository.complete_event(
         first,
         EventProcessResult("succeeded"),
         max_attempts=3,
         retry_base_ms=100,
         retry_max_ms=1_000,
     )
-    second = await repository.claim_next_event(worker_id="worker-2", claim_ttl_ms=30_000, max_attempts=3)
-    assert second is not None and second.event_id == "event-2"
+    assert (await _cycle(session_factory, 1))["next_event_sequence"] == 3
 
 
 class _BarrierClaimRepository(InboxRepository):
@@ -2635,20 +2689,20 @@ async def test_terminal_can_be_claimed_while_same_cycle_skill_event_is_processin
     assert start is not None
     await _complete_successfully(repository, start)
 
-    started = await repository.claim_next_event(
-        worker_id="concurrent-skill-worker",
-        claim_ttl_ms=30_000,
-        max_attempts=3,
-    )
-    assert started is not None and started.event_id == "concurrent-started"
     finished = await repository.claim_next_event(
         worker_id="concurrent-terminal-worker",
         claim_ttl_ms=30_000,
         max_attempts=3,
     )
+    assert finished is not None and finished.event_id == "concurrent-finished"
+    started = await repository.claim_next_event(
+        worker_id="concurrent-skill-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
 
-    assert finished is not None
-    assert finished.event_id == "concurrent-finished"
+    assert started is not None
+    assert started.event_id == "concurrent-started"
 
 
 async def test_out_of_order_terminal_completion_advances_only_after_sequence_head_succeeds(
@@ -2675,20 +2729,6 @@ async def test_out_of_order_terminal_completion_advances_only_after_sequence_hea
         retry_max_ms=1_000,
     )
 
-    observation = await repository.claim_next_event(
-        worker_id="sequence-worker",
-        claim_ttl_ms=30_000,
-        max_attempts=3,
-    )
-    assert observation is not None and observation.event_id == "sequence-observation"
-    assert await repository.complete_event(
-        observation,
-        EventProcessResult("retryable_failed", error_stage="agent", error_category="timeout"),
-        max_attempts=3,
-        retry_base_ms=30_000,
-        retry_max_ms=30_000,
-    )
-
     rejected = await repository.claim_next_event(
         worker_id="terminal-worker",
         claim_ttl_ms=30_000,
@@ -2701,6 +2741,21 @@ async def test_out_of_order_terminal_completion_advances_only_after_sequence_hea
         max_attempts=3,
         retry_base_ms=100,
         retry_max_ms=1_000,
+    )
+    assert (await _cycle(session_factory, 1))["next_event_sequence"] == 2
+
+    observation = await repository.claim_next_event(
+        worker_id="sequence-worker",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert observation is not None and observation.event_id == "sequence-observation"
+    assert await repository.complete_event(
+        observation,
+        EventProcessResult("retryable_failed", error_stage="agent", error_category="timeout"),
+        max_attempts=3,
+        retry_base_ms=30_000,
+        retry_max_ms=30_000,
     )
     assert (await _cycle(session_factory, 1))["next_event_sequence"] == 2
 

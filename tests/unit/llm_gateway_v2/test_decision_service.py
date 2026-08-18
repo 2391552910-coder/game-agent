@@ -42,6 +42,7 @@ from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanBinding,
     ActivityPlanContext,
 )
+from src.core.integration.llm_gateway_v2.capacity import AgentCapacityExceededError, AgentCapacityLimiter
 from src.core.integration.llm_gateway_v2.contracts import parse_gateway_v2_event
 from src.core.integration.llm_gateway_v2.decision_service import (
     GatewayV2AgentExecutionError,
@@ -1369,6 +1370,45 @@ async def test_hung_agent_is_cancelled_at_the_configured_timeout() -> None:
     assert runner.cancelled is True
 
 
+async def test_second_agent_call_is_rejected_when_shared_capacity_is_full() -> None:
+    started = asyncio.Event()
+
+    class _CapacityBlockingRunner:
+        async def ainvoke(self, state: dict[str, Any]) -> dict[str, Any]:
+            del state
+            started.set()
+            await asyncio.Event().wait()
+            return {}
+
+    limiter = AgentCapacityLimiter(limit=1, acquire_timeout_seconds=0.01)
+    service = GatewayV2DecisionService(
+        runner=_CapacityBlockingRunner(),
+        timeout_seconds=10,
+        capacity_limiter=limiter,
+    )
+    first = asyncio.create_task(
+        service.decide(
+            build_gateway_v2_agent_context(_event()),
+            user_id="user-1",
+            tenant_id="tenant-1",
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    with pytest.raises(GatewayV2AgentExecutionError) as raised:
+        await service.decide(
+            build_gateway_v2_agent_context(_event()),
+            user_id="user-2",
+            tenant_id="tenant-1",
+        )
+
+    assert raised.value.category == "overloaded"
+    assert isinstance(raised.value.__cause__, AgentCapacityExceededError)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+
 @pytest.mark.parametrize(
     ("action", "expected_fields"),
     [
@@ -2385,6 +2425,51 @@ async def test_agent_timeout_plans_v2_wait_when_lease_allows_wait() -> None:
         "action": "wait",
         "waitMs": 1_000,
     }
+
+
+async def test_agent_overload_plans_v2_wait_when_lease_allows_wait() -> None:
+    repository = _PlanningRepository()
+    limiter = AgentCapacityLimiter(limit=1, acquire_timeout_seconds=0.01)
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(
+            runner=_BlockingRunner(),
+            timeout_seconds=10,
+            capacity_limiter=limiter,
+        ),
+        repository=repository,
+    )
+    claimed = _claimed_for_planner()
+
+    async with limiter.slot():
+        result = await asyncio.wait_for(
+            planner(claimed, build_gateway_v2_agent_context(claimed.event)),
+            timeout=1,
+        )
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.plans == 1
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+
+
+async def test_stale_queued_event_skips_agent_and_plans_wait_before_deadline() -> None:
+    runner = _Runner()
+    repository = _PlanningRepository()
+    claimed = _claimed_for_planner()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        decision_target_seconds=55,
+        now_ms=lambda: claimed.event.occurred_at_ms + 55_000,
+    )
+
+    result = await planner(claimed, build_gateway_v2_agent_context(claimed.event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert repository.stored.request_body_json["waitMs"] == 1_000
 
 
 async def test_agent_timeout_remains_retryable_when_lease_forbids_wait() -> None:

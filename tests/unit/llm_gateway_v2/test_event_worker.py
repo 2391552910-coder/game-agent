@@ -18,6 +18,7 @@ from src.core.integration.llm_gateway_v2.event_worker import (
     EventWorker,
     GenerationDisposition,
     classify_generation,
+    event_claim_renewal_interval_seconds,
 )
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry
 
@@ -270,6 +271,11 @@ def test_generation_transition_matrix(
     expected: GenerationDisposition,
 ) -> None:
     assert classify_generation(current, incoming, event_type, sequence) is expected
+
+
+def test_event_claim_renewal_checks_freshness_at_least_once_per_second() -> None:
+    assert event_claim_renewal_interval_seconds(30_000) == 1.0
+    assert event_claim_renewal_interval_seconds(150) == pytest.approx(0.05)
 
 
 @pytest.mark.parametrize(

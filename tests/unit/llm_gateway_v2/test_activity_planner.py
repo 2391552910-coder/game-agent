@@ -23,6 +23,7 @@ from src.core.integration.llm_gateway_v2.activity_planner import (
     ActivityPlanCoordinator,
     GatewayV2ActivityPlanGenerator,
 )
+from src.core.integration.llm_gateway_v2.capacity import AgentCapacityExceededError, AgentCapacityLimiter
 from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCatalog,
     SceneCoordinates,
@@ -165,6 +166,23 @@ async def test_model_plan_generation_passes_v2_token_callback_config(
 
     assert result.goal_id == "plaza_social"
     assert captured == {"marker": "activity-plan"}
+
+
+@pytest.mark.asyncio
+async def test_activity_plan_generation_uses_bounded_agent_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limiter = AgentCapacityLimiter(limit=1, acquire_timeout_seconds=0.01)
+    generator = GatewayV2ActivityPlanGenerator(capacity_limiter=limiter)
+
+    async def fail_if_model_is_called(*, model_type: str) -> Any:
+        raise AssertionError(f"model should not be called while capacity is full: {model_type}")
+
+    monkeypatch.setattr(activity_planner_module, "get_llm", fail_if_model_is_called)
+
+    async with limiter.slot():
+        with pytest.raises(AgentCapacityExceededError):
+            await generator.generate(_context(), recent_actions=(), recent_failures=())
 
 
 def _movement_recovery_proposal() -> ActivityPlanProposal:

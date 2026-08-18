@@ -12,6 +12,7 @@ from src.core.integration.llm_gateway_v2.decision_client import (
 )
 from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 from src.core.integration.llm_gateway_v2.outbox_repository import ClaimedDecision
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.worker_hooks import NO_OP_WORKER_HOOKS, WorkerHooks
 from src.core.integration.llm_gateway_v2.worker_status import (
     WorkerStatusRegistry,
@@ -19,6 +20,29 @@ from src.core.integration.llm_gateway_v2.worker_status import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CALLBACK_REJECTION_REASONS: tuple[str, ...] = (
+    "lease_not_found",
+    "lease_expired",
+    "generation_mismatch",
+    "state_version_mismatch",
+    "session_not_running",
+    "invalid_payload",
+)
+
+
+def callback_metric_outcome(response: DecisionClientResult) -> str:
+    if response.status != "rejected":
+        return response.status
+    reason = response.reason.strip().casefold().replace("-", "_").replace(" ", "_")
+    if "stale_control_generation" in reason or "generation_mismatch" in reason:
+        normalized = "generation_mismatch"
+    else:
+        normalized = next(
+            (candidate for candidate in _CALLBACK_REJECTION_REASONS if candidate in reason),
+            "other",
+        )
+    return f"rejected_{normalized}"
 
 
 def _decision_identity_fields(
@@ -97,6 +121,7 @@ class DecisionWorker:
         retry_max_ms: int,
         max_parallelism: int,
         hooks: WorkerHooks = NO_OP_WORKER_HOOKS,
+        metrics: GatewayV2RuntimeMetrics | None = None,
     ) -> None:
         self._validate_configuration(
             worker_id=worker_id,
@@ -118,6 +143,7 @@ class DecisionWorker:
         self._retry_max_ms = retry_max_ms
         self._max_parallelism = max_parallelism
         self._hooks = hooks
+        self._metrics = metrics
         self._stop_requested = asyncio.Event()
         self._drain_requested = asyncio.Event()
         self._started = asyncio.Event()
@@ -218,12 +244,26 @@ class DecisionWorker:
         self._status.heartbeat()
         dead_letter_count = await self._repository.count_decision_dead_letters()
         self._status.set_dead_letter_count(dead_letter_count)
+        if self._metrics is not None:
+            self._metrics.set_dead_letters("decision", dead_letter_count)
+            await self._refresh_queue_metrics()
         self._status.mark_successful_poll()
         if claimed:
             await asyncio.gather(*(self._process_one(decision) for decision in claimed))
         return len(claimed)
 
     async def _process_one(self, decision: ClaimedDecision) -> None:
+        if self._metrics is not None:
+            self._metrics.task_started("decision")
+        try:
+            await self._process_claimed_decision(decision)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._metrics is not None:
+                self._metrics.task_finished("decision")
+
+    async def _process_claimed_decision(self, decision: ClaimedDecision) -> str:
         http_started = time.monotonic()
         request_task = asyncio.create_task(
             self._send_decision(decision),
@@ -267,7 +307,12 @@ class DecisionWorker:
                         },
                     )
                 await self._cancel_and_wait(request_task)
-                return
+                if self._metrics is not None:
+                    self._metrics.record_callback_result(
+                        "claim_lost",
+                        elapsed_ms=(time.monotonic() - http_started) * 1_000,
+                    )
+                return "claim_lost"
 
             await self._cancel_and_wait(renewal_task)
             try:
@@ -286,7 +331,12 @@ class DecisionWorker:
                     },
                 )
                 await self._complete_failure(decision, error.category)
-                return
+                if self._metrics is not None:
+                    self._metrics.record_callback_result(
+                        "transport_error",
+                        elapsed_ms=(time.monotonic() - http_started) * 1_000,
+                    )
+                return "transport_error"
             except DecisionClientProtocolError as error:
                 logger.warning(
                     "LLM Gateway v2 decision HTTP failed",
@@ -301,9 +351,19 @@ class DecisionWorker:
                     },
                 )
                 await self._complete_failure(decision, error.category)
-                return
+                if self._metrics is not None:
+                    self._metrics.record_callback_result(
+                        "protocol_error",
+                        elapsed_ms=(time.monotonic() - http_started) * 1_000,
+                    )
+                return "protocol_error"
         except asyncio.CancelledError:
             await self._cancel_and_wait(request_task, renewal_task)
+            if self._metrics is not None:
+                self._metrics.record_callback_result(
+                    "cancelled",
+                    elapsed_ms=(time.monotonic() - http_started) * 1_000,
+                )
             raise
         except Exception as error:
             logger.error(
@@ -319,7 +379,12 @@ class DecisionWorker:
                     "worker_id": self._worker_id,
                 },
             )
-            return
+            if self._metrics is not None:
+                self._metrics.record_callback_result(
+                    "error",
+                    elapsed_ms=(time.monotonic() - http_started) * 1_000,
+                )
+            return "error"
 
         logger.info(
             "LLM Gateway v2 decision HTTP completed",
@@ -332,6 +397,11 @@ class DecisionWorker:
                 "worker_id": self._worker_id,
             },
         )
+        if self._metrics is not None:
+            self._metrics.record_callback_result(
+                callback_metric_outcome(response),
+                elapsed_ms=(time.monotonic() - http_started) * 1_000,
+            )
 
         commit_started = time.monotonic()
         try:
@@ -368,6 +438,25 @@ class DecisionWorker:
                     "worker_id": self._worker_id,
                 },
             )
+        return callback_metric_outcome(response)
+
+    async def _refresh_queue_metrics(self) -> None:
+        queue_reader = getattr(self._repository, "queue_metrics", None)
+        if not callable(queue_reader):
+            return
+        try:
+            queue = await queue_reader()
+        except Exception as error:
+            logger.warning(
+                "LLM Gateway v2 decision queue metrics refresh failed",
+                extra=safe_exception_fields(
+                    stage="metrics",
+                    category="queue_metrics_failed",
+                    error=error,
+                ),
+            )
+            return
+        self._metrics.set_queue("decision", queue)
 
     async def _send_decision(self, decision: ClaimedDecision) -> DecisionClientResult:
         await self._hooks.before_decision_http(decision.decision_id)

@@ -185,7 +185,7 @@ def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
     )
 
 
-def test_gateway_v2_runtime_wires_fixed_hosted_chat_without_model_or_auto_chat(
+def test_gateway_v2_runtime_wires_auto_chat_without_classifier(
     _mock_settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -197,8 +197,8 @@ def test_gateway_v2_runtime_wires_fixed_hosted_chat_without_model_or_auto_chat(
     _mock_settings.llm_gateway_control_app_secret = "control-secret"
     _mock_settings.llm_gateway_control_timeout_seconds = 10
     _mock_settings.llm_gateway_control_max_retries = 1
-    _mock_settings.auto_chat_base_url = None
-    _mock_settings.llm_gateway_hosted_chat_fixed_reply = "Gateway 固定回复"
+    _mock_settings.auto_chat_base_url = "http://auto-chat.local"
+    _mock_settings.auto_chat_timeout_seconds = 45
     _mock_settings.llm_gateway_hosted_chat_queue_size = 100
     _mock_settings.llm_gateway_hosted_chat_state_ttl_seconds = 300
     _mock_settings.llm_gateway_hosted_chat_max_state_entries = 10_000
@@ -208,12 +208,12 @@ def test_gateway_v2_runtime_wires_fixed_hosted_chat_without_model_or_auto_chat(
 
     service = runtime.event_worker._processor.hosted_chat_service
     assert isinstance(service, HostedChatService)
-    assert service._conversation_client is None
-    assert service._simple_router is None
-    assert service._fixed_reply == "Gateway 固定回复"
+    assert isinstance(service._conversation_client, AutoChatClient)
+    assert not hasattr(service, "_simple_router")
+    assert not hasattr(service, "_fixed_reply")
 
 
-def test_gateway_v2_runtime_uses_decision_identity_for_fixed_hosted_chat(
+def test_gateway_v2_runtime_uses_decision_identity_for_hosted_chat(
     _mock_settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -227,8 +227,8 @@ def test_gateway_v2_runtime_uses_decision_identity_for_fixed_hosted_chat(
     _mock_settings.llm_gateway_control_url = None
     _mock_settings.llm_gateway_control_app_id = None
     _mock_settings.llm_gateway_control_app_secret = None
-    _mock_settings.auto_chat_base_url = None
-    _mock_settings.llm_gateway_hosted_chat_fixed_reply = "Gateway 固定回复"
+    _mock_settings.auto_chat_base_url = "http://auto-chat.local"
+    _mock_settings.auto_chat_timeout_seconds = 45
     _mock_settings.llm_gateway_hosted_chat_queue_size = 100
     _mock_settings.llm_gateway_hosted_chat_state_ttl_seconds = 300
     _mock_settings.llm_gateway_hosted_chat_max_state_entries = 10_000

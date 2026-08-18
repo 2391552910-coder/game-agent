@@ -21,11 +21,6 @@ from src.core.integration.llm_gateway_v2.auto_chat import (
     AutoChatRetryableError,
 )
 from src.core.integration.llm_gateway_v2.canonical import canonical_json_bytes
-from src.core.integration.llm_gateway_v2.simple_chat import (
-    SimpleChatPermanentError,
-    SimpleChatRetryableError,
-    SimpleChatRoute,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -112,10 +107,6 @@ class HostedChatConversationClient(Protocol):
         event_id: str,
         question: str,
     ) -> AutoChatMessage: ...
-
-
-class HostedChatSimpleRouter(Protocol):
-    async def route(self, text: str) -> SimpleChatRoute: ...
 
 
 class HostedRoleIdentityResolver(Protocol):
@@ -245,8 +236,6 @@ class HostedChatService:
         conversation_client: HostedChatConversationClient | None,
         sender: HostedChatSender,
         identity_resolver: HostedRoleIdentityResolver | None = None,
-        simple_router: HostedChatSimpleRouter | None = None,
-        fixed_reply: str | None = None,
         max_queue_size: int = 100,
         state_ttl_seconds: float = 300.0,
         max_state_entries: int = 10_000,
@@ -258,17 +247,9 @@ class HostedChatService:
             or max_state_entries <= 0
         ):
             raise ValueError("hosted chat limits must be positive")
-        if fixed_reply is not None:
-            fixed_reply = fixed_reply.strip()
-            if not fixed_reply:
-                raise ValueError("fixed_reply must not be blank")
-            if len(fixed_reply.encode("utf-16-le")) // 2 > 1000:
-                raise ValueError("fixed_reply exceeds UTF-16 limit")
         self._conversation_client = conversation_client
         self._sender = sender
         self._identity_resolver = identity_resolver
-        self._simple_router = simple_router
-        self._fixed_reply = fixed_reply
         self._semaphore = asyncio.Semaphore(max_queue_size)
         self._max_queue_size = max_queue_size
         self._queued_count = 0
@@ -491,32 +472,7 @@ class HostedChatService:
         chat_type: HostedChatType,
         incoming_text: str | None,
     ) -> HostedChatSendRequest:
-        if self._fixed_reply is not None:
-            return HostedChatSendRequest(
-                sessionId=session_id,
-                targetAvatarId=target_avatar_id,
-                targetRoleId=target_role_id,
-                chatType=chat_type,
-                content=self._fixed_reply,
-            )
-        if self._simple_router is not None and incoming_text is not None:
-            try:
-                route = await self._simple_router.route(incoming_text)
-            except SimpleChatRetryableError as error:
-                raise HostedChatRetryableError(error.category) from None
-            except SimpleChatPermanentError as error:
-                raise HostedChatPermanentError(error.category) from None
-            if route.route == "simple":
-                return HostedChatSendRequest(
-                    sessionId=session_id,
-                    targetAvatarId=target_avatar_id,
-                    targetRoleId=target_role_id,
-                    chatType=chat_type,
-                    content=route.content,
-                )
-
-        if incoming_text is None:
-            raise HostedChatPermanentError("opening_fixed_reply_not_configured")
+        question = incoming_text if incoming_text is not None else "主动开场白"
         if self._conversation_client is None:
             raise HostedChatPermanentError("conversation_client_not_configured")
         if self._identity_resolver is None:
@@ -533,7 +489,7 @@ class HostedChatService:
                 speaker_role_id=speaker_role_id,
                 target_role_id=parsed_target_role_id,
                 event_id=event_id,
-                question=incoming_text,
+                question=question,
             )
         except AutoChatRetryableError as error:
             raise HostedChatRetryableError(error.category) from None

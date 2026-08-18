@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Protocol
 from uuid import uuid4
 
 from src.logging_config import configure_logging
@@ -35,6 +35,7 @@ from src.core.integration.llm_gateway_v2.activity_planner import (  # noqa: E402
     GatewayV2ActivityPlanGenerator,
 )
 from src.core.integration.llm_gateway_v2.auto_chat import AutoChatClient  # noqa: E402
+from src.core.integration.llm_gateway_v2.capacity import AgentCapacityLimiter  # noqa: E402
 from src.core.integration.llm_gateway_v2.decision_client import GatewayV2DecisionClient  # noqa: E402
 from src.core.integration.llm_gateway_v2.decision_service import (  # noqa: E402
     GatewayV2DecisionPlanner,
@@ -58,16 +59,18 @@ from src.core.integration.llm_gateway_v2.readiness import (  # noqa: E402
     ReadinessService,
     build_readiness_service,
 )
+from src.core.integration.llm_gateway_v2.runtime_metrics import (  # noqa: E402
+    GatewayV2RuntimeMetrics,
+    GatewayV2RuntimeMetricsReporter,
+)
 from src.core.integration.llm_gateway_v2.scene_catalog import (  # noqa: E402
     load_default_scene_catalog,
 )
-from src.core.integration.llm_gateway_v2.simple_chat import SimpleChatRouter  # noqa: E402
 from src.core.integration.llm_gateway_v2.terminal_repository import TerminalRepository  # noqa: E402
 from src.core.integration.llm_gateway_v2.token_usage import (  # noqa: E402
     GatewayV2TokenUsageReporter,
 )
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry  # noqa: E402
-from src.core.llm.factory import get_env_llm  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +106,10 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         "Runtime configuration: "
         "v1_enabled=%s v2_enabled=%s provider_source=%s provider=%s "
         "base_url=%s default_model=%s fast_model=%s "
-        "agent_timeout_seconds=%s decision_timeout_seconds=%s force_skills=%s",
+        "agent_timeout_seconds=%s decision_timeout_seconds=%s "
+        "event_parallelism=%s decision_parallelism=%s agent_concurrency=%s "
+        "agent_acquire_timeout_seconds=%s decision_target_seconds=%s "
+        "lease_ttl_ms=%s lease_safety_window_ms=%s force_skills=%s",
         getattr(runtime_settings, "llm_gateway_v1_enabled", False),
         getattr(runtime_settings, "llm_gateway_v2_enabled", False),
         getattr(runtime_settings, "llm_provider_source", "env"),
@@ -113,6 +119,13 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         getattr(runtime_settings, "openai_fast_model", ""),
         getattr(runtime_settings, "llm_gateway_v2_agent_timeout_seconds", ""),
         getattr(runtime_settings, "llm_gateway_decision_timeout_seconds", ""),
+        getattr(runtime_settings, "llm_gateway_v2_event_max_parallelism", ""),
+        getattr(runtime_settings, "llm_gateway_v2_decision_max_parallelism", ""),
+        getattr(runtime_settings, "llm_gateway_v2_agent_max_concurrency", ""),
+        getattr(runtime_settings, "llm_gateway_v2_agent_acquire_timeout_seconds", ""),
+        getattr(runtime_settings, "llm_gateway_v2_decision_target_seconds", ""),
+        getattr(runtime_settings, "llm_gateway_v2_lease_ttl_ms", ""),
+        getattr(runtime_settings, "llm_gateway_v2_lease_safety_window_ms", ""),
         ",".join(getattr(runtime_settings, "llm_gateway_v2_force_skills", ())) or "disabled",
     )
 
@@ -129,6 +142,8 @@ class ManagedGatewayV2Worker(Protocol):
 class GatewayV2Runtime:
     event_worker: ManagedGatewayV2Worker
     decision_worker: ManagedGatewayV2Worker
+    metrics_reporter: GatewayV2RuntimeMetricsReporter | None = None
+    metrics: GatewayV2RuntimeMetrics | None = None
 
 
 async def warmup_gateway_v2_rag() -> None:
@@ -176,48 +191,42 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             retryable=False,
         )
 
-    inbox_repository = InboxRepository()
-    outbox_repository = OutboxRepository()
+    agent_capacity = AgentCapacityLimiter(
+        limit=getattr(settings, "llm_gateway_v2_agent_max_concurrency", 16),
+        acquire_timeout_seconds=getattr(
+            settings,
+            "llm_gateway_v2_agent_acquire_timeout_seconds",
+            0.25,
+        ),
+    )
+    runtime_metrics = GatewayV2RuntimeMetrics(
+        worker_limits={
+            "event": settings.llm_gateway_v2_event_max_parallelism,
+            "decision": settings.llm_gateway_v2_decision_max_parallelism,
+        }
+    )
+    inbox_repository = InboxRepository(metrics=runtime_metrics)
+    outbox_repository = OutboxRepository(
+        lease_ttl_ms=getattr(settings, "llm_gateway_v2_lease_ttl_ms", 600_000),
+        lease_safety_window_ms=getattr(
+            settings,
+            "llm_gateway_v2_lease_safety_window_ms",
+            5_000,
+        ),
+        metrics=runtime_metrics,
+    )
     terminal_repository = TerminalRepository()
     activity_repository = ActivityPlanRepository()
     hosted_chat_service = None
     auto_chat_base_url = getattr(settings, "auto_chat_base_url", None)
-    fixed_chat_reply = getattr(settings, "llm_gateway_hosted_chat_fixed_reply", None)
-    fixed_chat_reply = fixed_chat_reply.strip() if isinstance(fixed_chat_reply, str) else None
-    hosted_chat_enabled = bool(fixed_chat_reply) or (
-        isinstance(auto_chat_base_url, str) and bool(auto_chat_base_url.strip())
-    )
+    hosted_chat_enabled = isinstance(auto_chat_base_url, str) and bool(auto_chat_base_url.strip())
     if hosted_chat_enabled:
-        simple_chat_timeout = getattr(settings, "llm_gateway_simple_chat_timeout_seconds", 3.0)
-        if not isinstance(simple_chat_timeout, (int, float)):
-            simple_chat_timeout = 3.0
         hosted_chat_service = HostedChatService(
-            conversation_client=(
-                None
-                if fixed_chat_reply
-                else AutoChatClient(
-                    base_url=auto_chat_base_url,
-                    timeout_seconds=getattr(settings, "auto_chat_timeout_seconds", 45.0),
-                )
+            conversation_client=AutoChatClient(
+                base_url=auto_chat_base_url,
+                timeout_seconds=getattr(settings, "auto_chat_timeout_seconds", 45.0),
             ),
             identity_resolver=inbox_repository,
-            simple_router=(
-                None
-                if fixed_chat_reply
-                else SimpleChatRouter(
-                    model_factory=lambda: cast(
-                        Any,
-                        get_env_llm(
-                            model_type="fast",
-                            temperature=0.1,
-                            timeout_seconds=simple_chat_timeout,
-                            max_retries=0,
-                        ),
-                    ),
-                    timeout_seconds=simple_chat_timeout,
-                )
-            ),
-            fixed_reply=fixed_chat_reply,
             sender=HostedChatControlClient(
                 base_url=decision_url,
                 app_id=decision_app_id,
@@ -233,16 +242,27 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
     decision_planner = GatewayV2DecisionPlanner(
         decision_service=GatewayV2DecisionService(
             timeout_seconds=settings.llm_gateway_v2_agent_timeout_seconds,
+            capacity_limiter=agent_capacity,
+            metrics=runtime_metrics,
         ),
         repository=outbox_repository,
         activity_coordinator=ActivityPlanCoordinator(
             repository=activity_repository,
-            generator=GatewayV2ActivityPlanGenerator(scene_catalog=scene_catalog),
+            generator=GatewayV2ActivityPlanGenerator(
+                scene_catalog=scene_catalog,
+                capacity_limiter=agent_capacity,
+                metrics=runtime_metrics,
+            ),
             step_authorizer=gateway_v2_activity_skill_is_permitted,
             scene_catalog=scene_catalog,
         ),
         scene_catalog=scene_catalog,
         force_skills=settings.llm_gateway_v2_force_skills,
+        decision_target_seconds=getattr(
+            settings,
+            "llm_gateway_v2_decision_target_seconds",
+            55.0,
+        ),
     )
     event_dispatcher = GatewayV2EventDispatcher(
         context_repository=inbox_repository,
@@ -264,6 +284,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
         retry_base_ms=settings.llm_gateway_v2_retry_base_ms,
         retry_max_ms=settings.llm_gateway_v2_retry_max_ms,
         max_parallelism=settings.llm_gateway_v2_event_max_parallelism,
+        metrics=runtime_metrics,
     )
     decision_client = GatewayV2DecisionClient(
         decision_url=decision_url,
@@ -282,8 +303,22 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
         retry_base_ms=settings.llm_gateway_v2_retry_base_ms,
         retry_max_ms=settings.llm_gateway_v2_retry_max_ms,
         max_parallelism=settings.llm_gateway_v2_decision_max_parallelism,
+        metrics=runtime_metrics,
     )
-    return GatewayV2Runtime(event_worker=event_worker, decision_worker=decision_worker)
+    return GatewayV2Runtime(
+        event_worker=event_worker,
+        decision_worker=decision_worker,
+        metrics_reporter=GatewayV2RuntimeMetricsReporter(
+            metrics=runtime_metrics,
+            agent_capacity=agent_capacity,
+            interval_seconds=getattr(
+                settings,
+                "llm_gateway_v2_metrics_log_interval_seconds",
+                10.0,
+            ),
+        ),
+        metrics=runtime_metrics,
+    )
 
 
 async def _drain_worker_before_deadline(
@@ -337,6 +372,8 @@ async def shutdown_gateway_v2_runtime(
         deadline=deadline,
         worker_kind="decision",
     )
+    if runtime.metrics_reporter is not None:
+        await runtime.metrics_reporter.stop()
 
 
 @asynccontextmanager
@@ -375,6 +412,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.gateway_v2_runtime = gateway_v2_runtime
             await gateway_v2_runtime.event_worker.start()
             await gateway_v2_runtime.decision_worker.start()
+            if gateway_v2_runtime.metrics_reporter is not None:
+                await gateway_v2_runtime.metrics_reporter.start()
         service.enable()
         logger.info("所有服务初始化完成")
         yield

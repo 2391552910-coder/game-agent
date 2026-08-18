@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID
 
 import pytest
@@ -137,6 +137,8 @@ async def _post(client, payload: dict, request_id: str = "request-1"):
 
 @pytest.mark.asyncio
 async def test_valid_signed_batch_returns_exact_ack_without_tenant_api_key(client, _mock_settings) -> None:
+    from src.api.main import app
+
     _configure(_mock_settings)
     ack = GatewayV2BatchAck.model_validate(
         {
@@ -146,17 +148,25 @@ async def test_valid_signed_batch_returns_exact_ack_without_tenant_api_key(clien
             "duplicateEventIds": [],
         }
     )
-    with patch(
-        "src.api.routes.gateway_v2.accept_gateway_event_batch",
-        AsyncMock(return_value=ack),
-    ) as accept:
-        response = await _post(client, _payload())
+    metrics = SimpleNamespace(record_event_ack=Mock())
+    original_runtime = getattr(app.state, "gateway_v2_runtime", None)
+    app.state.gateway_v2_runtime = SimpleNamespace(metrics=metrics)
+    try:
+        with patch(
+            "src.api.routes.gateway_v2.accept_gateway_event_batch",
+            AsyncMock(return_value=ack),
+        ) as accept:
+            response = await _post(client, _payload())
+    finally:
+        app.state.gateway_v2_runtime = original_runtime
 
     assert response.status_code == 200
     assert response.json() == ack.model_dump()
     identity, envelope = accept.await_args.args
     assert identity == InboundGatewayIdentity(APP_ID, GATEWAY_ID, TENANT_ID)
     assert envelope.trace_id == "trace-1"
+    metrics.record_event_ack.assert_called_once()
+    assert metrics.record_event_ack.call_args.kwargs["elapsed_ms"] >= 0
 
 
 @pytest.mark.asyncio
@@ -205,7 +215,8 @@ async def test_event_ack_and_capabilities_do_not_synchronously_depend_on_agent(
         }
     )
     readiness = SimpleNamespace(
-        snapshot=AsyncMock(return_value=SimpleNamespace(status="ready"))
+        snapshot=AsyncMock(return_value=SimpleNamespace(status="ready")),
+        gateway_v2_capabilities_status=Mock(return_value=(True, "ready")),
     )
     original_readiness = app.state.readiness_service
     if agent_behavior == "timeout":

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Protocol, cast
@@ -23,6 +24,7 @@ from src.core.integration.llm_gateway_v2.activity_plan_repository import (
 )
 from src.core.integration.llm_gateway_v2.activity_planner import ActivityPlanCoordinator
 from src.core.integration.llm_gateway_v2.canonical import canonical_json_bytes
+from src.core.integration.llm_gateway_v2.capacity import AgentCapacityExceededError, AgentCapacityLimiter
 from src.core.integration.llm_gateway_v2.competitive_activity import (
     build_dance_arguments,
     build_darts_arguments,
@@ -48,6 +50,7 @@ from src.core.integration.llm_gateway_v2.paper_plane import (
     build_paper_plane_arguments,
     paper_plane_arguments_seed,
 )
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCatalog,
     scene_id_from_snapshot,
@@ -475,6 +478,15 @@ def _defer_unresolvable_activity_step(
     return None
 
 
+def _decision_deadline_fallback(context: GatewayV2AgentContext) -> GatewayV2AgentAction | None:
+    reason = "Decision event exceeded the internal response target"
+    if "wait" in context.allowed_decision_actions:
+        return GatewayV2WaitAction(reason=reason, waitMs=1_000)
+    if "no_op" in context.allowed_decision_actions:
+        return GatewayV2NoOpAction(reason=reason)
+    return None
+
+
 def _forced_test_skill_action(
     event: ClaimedGatewayEvent,
     context: GatewayV2AgentContext,
@@ -584,6 +596,8 @@ class GatewayV2DecisionService:
         *,
         runner: GatewayV2AgentRunner | None = None,
         timeout_seconds: float = 30.0,
+        capacity_limiter: AgentCapacityLimiter | None = None,
+        metrics: GatewayV2RuntimeMetrics | None = None,
     ) -> None:
         if not isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
@@ -593,6 +607,8 @@ class GatewayV2DecisionService:
             runner = cast(GatewayV2AgentRunner, build_gateway_v2_decision_graph().compile())
         self._runner: GatewayV2AgentRunner = runner
         self._timeout_seconds = timeout_seconds
+        self._capacity_limiter = capacity_limiter
+        self._metrics = metrics
 
     async def decide(
         self,
@@ -633,15 +649,33 @@ class GatewayV2DecisionService:
             ),
             "current_step": current_step,
         }
+        async def invoke_runner() -> Mapping[str, Any]:
+            if self._capacity_limiter is None:
+                return await self._runner.ainvoke(initial_state)
+            async with self._capacity_limiter.slot():
+                return await self._runner.ainvoke(initial_state)
+
+        agent_started = time.monotonic()
+        agent_outcome = "cancelled"
         try:
-            result = await asyncio.wait_for(
-                self._runner.ainvoke(initial_state),
-                timeout=self._timeout_seconds,
-            )
+            result = await asyncio.wait_for(invoke_runner(), timeout=self._timeout_seconds)
+        except AgentCapacityExceededError as error:
+            agent_outcome = "overloaded"
+            raise GatewayV2AgentExecutionError("overloaded") from error
         except TimeoutError:
+            agent_outcome = "timeout"
             raise GatewayV2AgentExecutionError("timeout") from None
         except Exception:
+            agent_outcome = "error"
             raise GatewayV2AgentExecutionError("execution_failed") from None
+        else:
+            agent_outcome = "success"
+        finally:
+            if self._metrics is not None:
+                self._metrics.record_agent_result(
+                    agent_outcome,
+                    elapsed_ms=(time.monotonic() - agent_started) * 1_000,
+                )
 
         if result.get("errors"):
             raise GatewayV2AgentExecutionError("node_error")
@@ -735,6 +769,12 @@ class GatewayV2DecisionPlanner:
     scene_catalog: SceneCatalog | None = None
     force_skills: tuple[str, ...] = ()
     token_usage_tracker: GatewayV2TokenUsageTracker = gateway_v2_token_usage_tracker
+    decision_target_seconds: float | None = None
+    now_ms: Callable[[], int] = lambda: int(time.time() * 1_000)
+
+    def __post_init__(self) -> None:
+        if self.decision_target_seconds is not None and self.decision_target_seconds <= 0:
+            raise ValueError("decision_target_seconds must be positive")
 
     async def __call__(
         self,
@@ -784,12 +824,37 @@ class GatewayV2DecisionPlanner:
                     error_stage="chat",
                     error_category="conversation_lease_not_supported",
                 )
-            activity_context = None
-            if not self.force_skills and self.activity_coordinator is not None:
-                activity_context = await self.activity_coordinator.prepare(event, context)
-            action: GatewayV2AgentAction | None = _initial_room_transition_action(
-                context
+            deadline_reached = (
+                self.decision_target_seconds is not None
+                and self.now_ms() - event.event.occurred_at_ms
+                >= self.decision_target_seconds * 1_000
             )
+            activity_context = None
+            if (
+                not deadline_reached
+                and not self.force_skills
+                and self.activity_coordinator is not None
+            ):
+                activity_context = await self.activity_coordinator.prepare(event, context)
+            action: GatewayV2AgentAction | None
+            if deadline_reached:
+                action = _decision_deadline_fallback(context)
+                if action is None:
+                    raise GatewayV2AgentExecutionError("deadline_exceeded")
+                logger.warning(
+                    "LLM Gateway v2 queued event exceeded decision target; planning fallback",
+                    extra={
+                        "event_id": event.event_id,
+                        "trace_id": event.trace_id,
+                        "session_id": context.session_id,
+                        "control_generation": context.control_generation,
+                        "decision_lease_id": context.decision_lease_id,
+                        "state_version": context.state_version,
+                        "event_age_ms": self.now_ms() - event.event.occurred_at_ms,
+                    },
+                )
+            else:
+                action = _initial_room_transition_action(context)
             if action is None and self.force_skills:
                 action = _forced_test_skill_action(event, context, self.force_skills)
             elif activity_context is not None:
@@ -815,10 +880,16 @@ class GatewayV2DecisionPlanner:
                         activity_context=activity_context,
                     )
                 except GatewayV2AgentExecutionError as error:
-                    if error.category != "timeout" or "wait" not in context.allowed_decision_actions:
+                    if (
+                        error.category not in {"timeout", "overloaded", "deadline_exceeded"}
+                        or "wait" not in context.allowed_decision_actions
+                    ):
                         raise
                     logger.warning(
-                        "LLM Gateway v2 Agent timed out; planning lease-authorized wait decision",
+                        (
+                            "LLM Gateway v2 Agent unavailable before decision deadline; "
+                            "planning lease-authorized wait decision"
+                        ),
                         extra={
                             "event_id": event.event_id,
                             "trace_id": event.trace_id,

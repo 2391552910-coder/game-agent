@@ -10,9 +10,10 @@ from src.core.integration.llm_gateway_v2.decision_client import (
     DecisionClientResult,
     DecisionClientTransportError,
 )
-from src.core.integration.llm_gateway_v2.decision_worker import DecisionWorker
+from src.core.integration.llm_gateway_v2.decision_worker import DecisionWorker, callback_metric_outcome
 from src.core.integration.llm_gateway_v2.outbox_repository import ClaimedDecision
 from src.core.integration.llm_gateway_v2.readiness import ReadinessService
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry
 
 
@@ -96,7 +97,13 @@ class _Client:
         return outcome
 
 
-def _worker(repository: _Repository, client: _Client, *, claim_ttl_ms: int = 30_000) -> DecisionWorker:
+def _worker(
+    repository: _Repository,
+    client: _Client,
+    *,
+    claim_ttl_ms: int = 30_000,
+    metrics: GatewayV2RuntimeMetrics | None = None,
+) -> DecisionWorker:
     return DecisionWorker(
         repository=repository,
         client=client,
@@ -108,11 +115,22 @@ def _worker(repository: _Repository, client: _Client, *, claim_ttl_ms: int = 30_
         retry_base_ms=100,
         retry_max_ms=1_000,
         max_parallelism=1,
+        metrics=metrics,
     )
 
 
 async def _ready_probe() -> None:
     return None
+
+
+def test_callback_metric_outcome_uses_fixed_rejection_reasons() -> None:
+    assert callback_metric_outcome(DecisionClientResult(409, "rejected", "lease_not_found", None)) == (
+        "rejected_lease_not_found"
+    )
+    assert callback_metric_outcome(DecisionClientResult(409, "rejected", "unexpected detail", None)) == (
+        "rejected_other"
+    )
+    assert callback_metric_outcome(DecisionClientResult(200, "accepted", "ok", "call-1")) == "accepted"
 
 
 def _capabilities_service(
@@ -144,6 +162,23 @@ async def test_worker_records_body_first_accepted_response() -> None:
 
     assert repository.responses == [(claim, response)]
     assert repository.failures == []
+
+
+async def test_callback_latency_is_recorded_before_response_database_commit() -> None:
+    metrics = GatewayV2RuntimeMetrics(worker_limits={"event": 1, "decision": 1})
+
+    class _BoundaryRepository(_Repository):
+        async def record_decision_response(self, decision, response):
+            assert metrics.snapshot().callback_latency.count == 1
+            return await super().record_decision_response(decision, response)
+
+    claim = _claim(token="00000000-0000-0000-0000-000000000111")
+    repository = _BoundaryRepository([claim])
+    response = DecisionClientResult(200, "accepted", "ok", "call-1")
+
+    assert await _worker(repository, _Client([response]), metrics=metrics).run_once() == 1
+    assert repository.responses == [(claim, response)]
+    assert metrics.snapshot().callback_outcomes == {"accepted": 1}
 
 
 async def test_worker_logs_full_decision_identity_and_gateway_response(

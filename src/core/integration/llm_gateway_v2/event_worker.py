@@ -12,6 +12,7 @@ from uuid import UUID
 
 from src.core.integration.llm_gateway_v2.contracts import GatewayV2Event
 from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.worker_hooks import NO_OP_WORKER_HOOKS, WorkerHooks
 from src.core.integration.llm_gateway_v2.worker_status import (
     WorkerStatusRegistry,
@@ -21,6 +22,12 @@ from src.core.integration.llm_gateway_v2.worker_status import (
 logger = logging.getLogger(__name__)
 
 ProcessOutcome = Literal["succeeded", "retryable_failed", "manual"]
+
+
+def event_claim_renewal_interval_seconds(claim_ttl_ms: int) -> float:
+    if claim_ttl_ms <= 0:
+        raise ValueError("claim_ttl_ms must be positive")
+    return min(max(claim_ttl_ms / 3_000, 0.001), 1.0)
 
 
 class GenerationDisposition(StrEnum):
@@ -131,6 +138,7 @@ class EventWorker:
         retry_max_ms: int,
         max_parallelism: int,
         hooks: WorkerHooks = NO_OP_WORKER_HOOKS,
+        metrics: GatewayV2RuntimeMetrics | None = None,
     ) -> None:
         self._validate_configuration(
             worker_id=worker_id,
@@ -152,6 +160,7 @@ class EventWorker:
         self._retry_max_ms = retry_max_ms
         self._max_parallelism = max_parallelism
         self._hooks = hooks
+        self._metrics = metrics
         self._stop_requested = asyncio.Event()
         self._drain_requested = asyncio.Event()
         self._started = asyncio.Event()
@@ -247,6 +256,9 @@ class EventWorker:
         self._status.heartbeat()
         dead_letter_count = await self._repository.count_dead_letters()
         self._status.set_dead_letter_count(dead_letter_count)
+        if self._metrics is not None:
+            self._metrics.set_dead_letters("event", dead_letter_count)
+            await self._refresh_queue_metrics()
         self._status.mark_successful_poll()
 
         if claimed:
@@ -254,6 +266,15 @@ class EventWorker:
         return len(claimed)
 
     async def _process_one(self, event: ClaimedGatewayEvent) -> None:
+        if self._metrics is not None:
+            self._metrics.task_started("event")
+        try:
+            await self._process_claimed_event(event)
+        finally:
+            if self._metrics is not None:
+                self._metrics.task_finished("event")
+
+    async def _process_claimed_event(self, event: ClaimedGatewayEvent) -> None:
         processing_started = time.monotonic()
         processor_task: asyncio.Task[EventProcessResult] = asyncio.create_task(
             self._invoke_processor(event),
@@ -389,13 +410,31 @@ class EventWorker:
                 },
             )
 
+    async def _refresh_queue_metrics(self) -> None:
+        queue_reader = getattr(self._repository, "queue_metrics", None)
+        if not callable(queue_reader):
+            return
+        try:
+            queue = await queue_reader()
+        except Exception as error:
+            logger.warning(
+                "LLM Gateway v2 event queue metrics refresh failed",
+                extra=safe_exception_fields(
+                    stage="metrics",
+                    category="queue_metrics_failed",
+                    error=error,
+                ),
+            )
+            return
+        self._metrics.set_queue("event", queue)
+
     async def _invoke_processor(self, event: ClaimedGatewayEvent) -> EventProcessResult:
         await self._hooks.before_agent(event.event_id)
         return await self._processor(event)
 
     async def _maintain_claim(self, event: ClaimedGatewayEvent) -> None:
         claim_ttl_seconds = max(self._claim_ttl_ms / 1_000, 0.001)
-        renewal_interval_seconds = max(self._claim_ttl_ms / 3_000, 0.001)
+        renewal_interval_seconds = event_claim_renewal_interval_seconds(self._claim_ttl_ms)
         heartbeat_interval_seconds = min(
             renewal_interval_seconds,
             max(self._poll_interval_seconds, 0.001),

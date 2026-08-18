@@ -203,7 +203,6 @@ def test_production_missing_required_setting_fails(tmp_path: Path, missing_name:
 
 def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_GATEWAY_V1_ENABLED", raising=False)
-    monkeypatch.delenv("LLM_GATEWAY_HOSTED_CHAT_FIXED_REPLY", raising=False)
     config = Settings(_env_file=None, **REQUIRED_SETTINGS)
 
     assert config.llm_gateway_v1_enabled is False
@@ -226,8 +225,25 @@ def test_v2_defaults_and_v1_defaults_are_independent(monkeypatch: pytest.MonkeyP
     assert config.auto_chat_base_url is None
     assert config.auto_chat_timeout_seconds == 45.0
     assert not hasattr(config, "auto_chat_deadline_safety_seconds")
-    assert config.llm_gateway_simple_chat_timeout_seconds == 3.0
-    assert config.llm_gateway_hosted_chat_fixed_reply is None
+    assert config.llm_gateway_v2_event_max_parallelism == 32
+    assert config.llm_gateway_v2_decision_max_parallelism == 16
+    assert config.llm_gateway_v2_agent_max_concurrency == 16
+    assert config.llm_gateway_v2_agent_acquire_timeout_seconds == 0.25
+    assert config.llm_gateway_v2_decision_target_seconds == 55.0
+    assert config.llm_gateway_v2_lease_ttl_ms == 600_000
+    assert config.llm_gateway_v2_lease_safety_window_ms == 5_000
+    assert config.llm_gateway_v2_metrics_log_interval_seconds == 10.0
+
+
+def test_v2_internal_decision_target_fits_inside_gateway_lease() -> None:
+    with pytest.raises(ValueError, match="decision_target"):
+        Settings(
+            _env_file=None,
+            **REQUIRED_SETTINGS,
+            llm_gateway_v2_decision_target_seconds=55,
+            llm_gateway_v2_lease_ttl_ms=60_000,
+            llm_gateway_v2_lease_safety_window_ms=5_000,
+        )
 
 
 def test_v2_force_skills_accepts_comma_separated_env_value() -> None:
@@ -265,22 +281,10 @@ def test_auto_chat_configuration_accepts_internal_service_url() -> None:
         **REQUIRED_SETTINGS,
         auto_chat_base_url="http://192.168.1.50:8000/",
         auto_chat_timeout_seconds=40,
-        llm_gateway_simple_chat_timeout_seconds=2.5,
     )
 
     assert config.auto_chat_base_url == "http://192.168.1.50:8000/"
     assert config.auto_chat_timeout_seconds == 40
-    assert config.llm_gateway_simple_chat_timeout_seconds == 2.5
-
-
-def test_hosted_chat_fixed_reply_configuration_is_available() -> None:
-    config = Settings(
-        _env_file=None,
-        **REQUIRED_SETTINGS,
-        llm_gateway_hosted_chat_fixed_reply="Gateway 固定回复",
-    )
-
-    assert config.llm_gateway_hosted_chat_fixed_reply == "Gateway 固定回复"
 
 
 @pytest.mark.parametrize(
@@ -288,8 +292,6 @@ def test_hosted_chat_fixed_reply_configuration_is_available() -> None:
     [
         ("auto_chat_timeout_seconds", 0),
         ("auto_chat_timeout_seconds", 61),
-        ("llm_gateway_simple_chat_timeout_seconds", 0),
-        ("llm_gateway_simple_chat_timeout_seconds", 3.1),
     ],
 )
 def test_auto_chat_numeric_limits(field_name: str, invalid_value: int) -> None:

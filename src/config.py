@@ -106,7 +106,6 @@ class Settings(BaseSettings):
     llm_gateway_decision_app_secret: str | None = Field(default=None)
     llm_gateway_decision_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     llm_gateway_decision_max_retries: int = Field(default=1, ge=0, le=5)
-    llm_gateway_simple_chat_timeout_seconds: float = Field(default=3.0, gt=0, le=3.0)
     llm_gateway_control_url: str | None = Field(default=None)
     llm_gateway_control_app_id: str | None = Field(default=None)
     llm_gateway_control_app_secret: str | None = Field(default=None)
@@ -115,8 +114,6 @@ class Settings(BaseSettings):
     llm_gateway_hosted_chat_queue_size: int = Field(default=100, ge=1, le=10_000)
     llm_gateway_hosted_chat_state_ttl_seconds: int = Field(default=300, ge=30, le=86_400)
     llm_gateway_hosted_chat_max_state_entries: int = Field(default=10_000, ge=1, le=1_000_000)
-    # Gateway 流程联调时使用；配置后被动聊天直接发送固定正文，不调用模型或对话端。
-    llm_gateway_hosted_chat_fixed_reply: str | None = Field(default=None, max_length=1000)
     llm_gateway_event_worker_enabled: bool = Field(default=True)
     llm_gateway_event_stream_key: str = Field(default="llm-gateway:events")
     llm_gateway_event_consumer_group: str = Field(default="myagent2")
@@ -132,6 +129,11 @@ class Settings(BaseSettings):
     llm_gateway_v2_retry_max_ms: int = Field(default=300_000, ge=1, le=3_600_000)
     llm_gateway_v2_claim_ttl_ms: int = Field(default=30_000, ge=1, le=3_600_000)
     llm_gateway_v2_agent_timeout_seconds: float = Field(default=60.0, gt=0, le=300.0)
+    llm_gateway_v2_agent_max_concurrency: int = Field(default=16, ge=1, le=256)
+    llm_gateway_v2_agent_acquire_timeout_seconds: float = Field(default=0.25, gt=0, le=60.0)
+    llm_gateway_v2_decision_target_seconds: float = Field(default=55.0, gt=0, le=300.0)
+    llm_gateway_v2_lease_ttl_ms: int = Field(default=600_000, ge=1_000, le=86_400_000)
+    llm_gateway_v2_lease_safety_window_ms: int = Field(default=5_000, ge=0, le=3_600_000)
     llm_gateway_v2_force_skills: Annotated[tuple[str, ...], NoDecode] = Field(default=())
     llm_gateway_v2_rag_mode: Literal["naive", "hybrid", "mix"] = "naive"
     llm_gateway_v2_rag_top_k: int = Field(default=10, ge=1, le=200)
@@ -141,8 +143,9 @@ class Settings(BaseSettings):
     llm_gateway_v2_rag_max_total_tokens: int = Field(default=6_000, ge=512, le=30_000)
     llm_gateway_v2_rag_context_max_tokens: int = Field(default=6_000, ge=256, le=30_000)
     llm_gateway_v2_poll_ms: int = Field(default=250, ge=1, le=60_000)
-    llm_gateway_v2_event_max_parallelism: int = Field(default=4, ge=1, le=64)
-    llm_gateway_v2_decision_max_parallelism: int = Field(default=4, ge=1, le=64)
+    llm_gateway_v2_event_max_parallelism: int = Field(default=32, ge=1, le=256)
+    llm_gateway_v2_decision_max_parallelism: int = Field(default=16, ge=1, le=256)
+    llm_gateway_v2_metrics_log_interval_seconds: float = Field(default=10.0, gt=0, le=3_600.0)
     llm_gateway_v2_shutdown_grace_seconds: int = Field(default=10, ge=1, le=300)
     llm_gateway_v2_readiness_timeout_seconds: int = Field(default=3, ge=1, le=60)
     llm_gateway_v2_readiness_cache_seconds: int = Field(default=5, ge=1, le=300)
@@ -176,6 +179,18 @@ class Settings(BaseSettings):
     def validate_llm_gateway_v2(self) -> "Settings":
         if self.llm_gateway_v2_retry_base_ms > self.llm_gateway_v2_retry_max_ms:
             raise ValueError("llm_gateway_v2_retry_base_ms must not exceed llm_gateway_v2_retry_max_ms")
+        if self.llm_gateway_v2_lease_safety_window_ms >= self.llm_gateway_v2_lease_ttl_ms:
+            raise ValueError(
+                "llm_gateway_v2_lease_safety_window_ms must be less than llm_gateway_v2_lease_ttl_ms"
+            )
+        decision_target_ms = self.llm_gateway_v2_decision_target_seconds * 1_000
+        if (
+            decision_target_ms + self.llm_gateway_v2_lease_safety_window_ms
+            >= self.llm_gateway_v2_lease_ttl_ms
+        ):
+            raise ValueError(
+                "llm_gateway_v2_decision_target_seconds plus the safety window must be less than the lease TTL"
+            )
 
         if not self.llm_gateway_v2_enabled:
             return self

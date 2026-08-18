@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.infrastructure.db import async_session_factory
 from src.core.integration.llm_gateway_v2.contracts import DecisionRejectedEvent, SessionStoppedEvent
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics, QueueMetrics
 from src.core.integration.llm_gateway_v2.terminal_effect_service import TerminalEffectService
 from src.core.integration.llm_gateway_v2.terminal_repository import MutationDisposition, MutationResult
 
@@ -140,6 +141,21 @@ def session_stop_skill_status(action: str, reason: str) -> str:
     if action == "stop_hosting" and reason == "stop_hosting_requested":
         return "succeeded"
     return "cancelled"
+
+
+def decision_lease_deadline_ms(
+    *,
+    occurred_at_ms: int,
+    lease_ttl_ms: int,
+    safety_window_ms: int,
+) -> int:
+    if occurred_at_ms < 0:
+        raise ValueError("occurred_at_ms must be non-negative")
+    if lease_ttl_ms <= 0:
+        raise ValueError("lease_ttl_ms must be positive")
+    if safety_window_ms < 0 or safety_window_ms >= lease_ttl_ms:
+        raise ValueError("safety_window_ms must be non-negative and less than lease_ttl_ms")
+    return occurred_at_ms + lease_ttl_ms - safety_window_ms
 
 
 class _SessionFactory(Protocol):
@@ -471,6 +487,20 @@ _COUNT_DECISION_DEAD_LETTERS = sa.text(
     """
 )
 
+_SELECT_DECISION_QUEUE_METRICS = sa.text(
+    """
+    SELECT
+        count(*) AS depth,
+        COALESCE(
+            extract(epoch FROM (clock_timestamp() - min(created_at))),
+            0
+        ) AS oldest_age_seconds
+    FROM llm_gateway_decisions
+    WHERE status IN ('planned', 'retryable_failed')
+      AND next_attempt_at <= clock_timestamp()
+    """
+)
+
 _LOCK_RESPONSE_SKILL_CALL = sa.text(
     """
     SELECT id, decision_row_id, decision_id, skill_call_id, skill_name, status
@@ -663,14 +693,30 @@ _COMPLETE_STOP_EVENT = sa.text(
     """
 )
 
+_SUPERSEDE_STOPPED_CYCLE_EVENTS = sa.text(
+    """
+    UPDATE llm_gateway_events
+    SET status = 'superseded',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    WHERE cycle_id = :cycle_id
+      AND id <> :stop_event_id
+      AND status IN ('pending', 'processing', 'retryable_failed')
+    """
+)
+
 _CLOSE_CYCLE = sa.text(
     """
     UPDATE llm_gateway_control_cycles
-    SET next_event_sequence = next_event_sequence + 1,
+    SET next_event_sequence = GREATEST(next_event_sequence, :event_sequence + 1),
         status = 'stopped',
         stopped_at = clock_timestamp(),
         updated_at = clock_timestamp()
-    WHERE id = :cycle_id AND next_event_sequence = :event_sequence
+    WHERE id = :cycle_id AND status IN ('pending', 'active')
     RETURNING id
     """
 )
@@ -694,10 +740,25 @@ class OutboxRepository:
         *,
         effect_service: TerminalEffectService | None = None,
         decision_id_factory: Callable[[], str] | None = None,
+        lease_ttl_ms: int | None = None,
+        lease_safety_window_ms: int = 0,
+        metrics: GatewayV2RuntimeMetrics | None = None,
     ) -> None:
+        if lease_ttl_ms is None:
+            if lease_safety_window_ms != 0:
+                raise ValueError("lease_safety_window_ms requires lease_ttl_ms")
+        else:
+            decision_lease_deadline_ms(
+                occurred_at_ms=0,
+                lease_ttl_ms=lease_ttl_ms,
+                safety_window_ms=lease_safety_window_ms,
+            )
         self._session_factory = session_factory
         self._effect_service = effect_service or TerminalEffectService()
         self._decision_id_factory = decision_id_factory or (lambda: str(uuid4()))
+        self._lease_ttl_ms = lease_ttl_ms
+        self._lease_safety_window_ms = lease_safety_window_ms
+        self._metrics = metrics
 
     async def find_by_source_event(self, event: ClaimedGatewayEvent) -> PlannedDecision | None:
         try:
@@ -817,7 +878,15 @@ class OutboxRepository:
                                 "decision_lease_id": context.decision_lease_id,
                                 "control_generation": event.control_generation,
                                 "state_version": context.state_version,
-                                "lease_expires_at_ms": None,
+                                "lease_expires_at_ms": (
+                                    None
+                                    if self._lease_ttl_ms is None
+                                    else decision_lease_deadline_ms(
+                                        occurred_at_ms=event.event.occurred_at_ms,
+                                        lease_ttl_ms=self._lease_ttl_ms,
+                                        safety_window_ms=self._lease_safety_window_ms,
+                                    )
+                                ),
                                 "action": action.action,
                                 "request_body_json": frozen.body_json,
                                 "request_body_bytes": frozen.body_bytes,
@@ -888,10 +957,12 @@ class OutboxRepository:
                     return None
                 error_category = self._decision_fence_error(candidate)
                 if error_category is not None:
-                    await session.execute(
+                    cancelled = await session.execute(
                         _CANCEL_LOCKED_DECISION,
                         {"row_id": candidate["row_id"], "error_category": error_category},
                     )
+                    if self._metrics is not None and cancelled.scalar_one_or_none() is not None:
+                        self._metrics.record_decision_superseded()
                     continue
 
                 claim_token = uuid4()
@@ -961,7 +1032,10 @@ class OutboxRepository:
                     _CANCEL_LOCKED_DECISION,
                     {"row_id": decision.row_id, "error_category": fence_error},
                 )
-                return cancelled.scalar_one_or_none() is not None
+                cancelled_id = cancelled.scalar_one_or_none()
+                if self._metrics is not None and cancelled_id is not None:
+                    self._metrics.record_decision_superseded()
+                return cancelled_id is not None
 
             parameters = {
                 "row_id": decision.row_id,
@@ -1122,6 +1196,14 @@ class OutboxRepository:
             count = await session.scalar(_COUNT_DECISION_DEAD_LETTERS)
         return int(count or 0)
 
+    async def queue_metrics(self) -> QueueMetrics:
+        async with self._session_factory() as session:
+            row = (await session.execute(_SELECT_DECISION_QUEUE_METRICS)).mappings().one()
+        return QueueMetrics(
+            depth=int(row["depth"] or 0),
+            oldest_age_seconds=float(row["oldest_age_seconds"] or 0.0),
+        )
+
     async def merge_decision_rejected(self, claimed: ClaimedGatewayEvent) -> MutationResult:
         event = claimed.event
         if not isinstance(event, DecisionRejectedEvent):
@@ -1174,7 +1256,9 @@ class OutboxRepository:
             if locked is None or not self._is_current_claim(locked, claimed):
                 return MutationResult(MutationDisposition.FENCED, "claim_lost")
 
-            await session.execute(_CANCEL_UNSENT_DECISIONS, {"cycle_id": claimed.cycle_id})
+            cancelled = await session.execute(_CANCEL_UNSENT_DECISIONS, {"cycle_id": claimed.cycle_id})
+            if self._metrics is not None and cancelled.rowcount > 0:
+                self._metrics.record_decision_superseded(cancelled.rowcount)
             calls_result = await session.execute(_LOCK_OPEN_CALLS, {"cycle_id": claimed.cycle_id})
             calls = list(calls_result.mappings())
             successful_stop_calls = [
@@ -1227,6 +1311,10 @@ class OutboxRepository:
                     "claim_token": claimed.claim_token,
                     "claimed_fence_version": claimed.claimed_fence_version,
                 },
+            )
+            await session.execute(
+                _SUPERSEDE_STOPPED_CYCLE_EVENTS,
+                {"cycle_id": claimed.cycle_id, "stop_event_id": claimed.row_id},
             )
             closed = await session.execute(
                 _CLOSE_CYCLE,

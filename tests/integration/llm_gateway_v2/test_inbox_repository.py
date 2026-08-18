@@ -22,6 +22,7 @@ from src.core.integration.llm_gateway_v2.contracts import (
     GatewayV2Event,
     parse_gateway_v2_event,
 )
+from src.core.integration.llm_gateway_v2.decision_service import build_gateway_v2_agent_context
 from src.core.integration.llm_gateway_v2.event_service import EventService
 from src.core.integration.llm_gateway_v2.event_worker import EventProcessResult
 from src.core.integration.llm_gateway_v2.inbox_repository import (
@@ -106,6 +107,89 @@ def _chat_event(event_id: str = "chat-event-1", *, sequence: int = 2) -> Gateway
                 "supported": True,
                 "text": "你好",
                 "serverTimeMs": 1_700_000_000_000 + sequence,
+            },
+        }
+    )
+
+
+def _skill_finished_event(event_id: str = "event-finished", *, sequence: int = 2) -> GatewayV2Event:
+    session_id = "session-1"
+    lease = {
+        "sessionId": session_id,
+        "controlGeneration": 1,
+        "decisionLeaseId": "lease-2",
+        "stateVersion": 2,
+        "leaseKind": "observation",
+        "allowedActions": ["wait"],
+        "allowedSkillName": None,
+        "allowedSkillNames": [],
+        "parentSkillName": None,
+    }
+    return parse_gateway_v2_event(
+        {
+            "eventId": event_id,
+            "eventType": "skill_finished",
+            "sessionId": session_id,
+            "controlGeneration": 1,
+            "eventSequence": sequence,
+            "stateVersion": 2,
+            "decisionLeaseId": "lease-2",
+            "occurredAtMs": 1_700_000_000_000 + sequence,
+            "payload": {
+                "decisionId": "decision-1",
+                "skillCallId": "call-1",
+                "skillName": "jump",
+                "status": "success",
+                "reason": "completed",
+                "failureCategory": None,
+                "retryable": False,
+                "startedAtMs": 1_700_000_000_000,
+                "finishedAtMs": 1_700_000_000_001,
+                "lease": lease,
+                "decisionContext": {
+                    "session": {"status": "active"},
+                    "availableSkills": [],
+                    "skillArgumentHints": [],
+                    "lastSkillResult": {"status": "success"},
+                },
+            },
+        }
+    )
+
+
+def _observation_event(event_id: str, *, sequence: int) -> GatewayV2Event:
+    session_id = "session-1"
+    lease_id = f"lease-{sequence}"
+    lease = {
+        "sessionId": session_id,
+        "controlGeneration": 1,
+        "decisionLeaseId": lease_id,
+        "stateVersion": sequence,
+        "leaseKind": "observation",
+        "allowedActions": ["wait"],
+        "allowedSkillName": None,
+        "allowedSkillNames": [],
+        "parentSkillName": None,
+    }
+    return parse_gateway_v2_event(
+        {
+            "eventId": event_id,
+            "eventType": "observation_updated",
+            "sessionId": session_id,
+            "controlGeneration": 1,
+            "eventSequence": sequence,
+            "stateVersion": sequence,
+            "decisionLeaseId": lease_id,
+            "occurredAtMs": 1_700_000_000_000 + sequence,
+            "payload": {
+                "reason": "state_changed",
+                "lease": lease,
+                "decisionContext": {
+                    "session": {"status": "active", "stateVersion": sequence},
+                    "availableSkills": [],
+                    "skillArgumentHints": [],
+                    "lastSkillResult": None,
+                },
             },
         }
     )
@@ -327,6 +411,141 @@ async def test_batch_internal_content_conflict_fails_before_database(session_fac
 
     assert caught.value.event_id == "event-1"
     assert await _counts(session_factory) == (0, 0, 0)
+
+
+async def test_session_stopped_preempts_slow_event_and_invalidates_old_claim(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await repository.accept_event_batch(
+        IDENTITY,
+        "trace-stop-priority",
+        (_event("event-start"), _event("event-stop", sequence=2)),
+    )
+
+    started = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert started is not None
+    assert started.event_type == "session_started"
+
+    stopped = await repository.claim_next_event(
+        worker_id="worker-2",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert stopped is not None
+    assert stopped.event_type == "session_stopped"
+    assert await repository.complete_event(
+        stopped,
+        EventProcessResult("succeeded"),
+        max_attempts=5,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    assert not await repository.renew_event_claim(started, claim_ttl_ms=30_000)
+    async with session_factory() as session:
+        started_status = await session.scalar(
+            sa.text("SELECT status FROM llm_gateway_events WHERE event_id = 'event-start'")
+        )
+    assert started_status == "superseded"
+
+
+async def test_new_terminal_lease_supersedes_older_inflight_event(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    started_event = _event("event-start")
+    finished_event = _skill_finished_event()
+    await repository.accept_event_batch(
+        IDENTITY,
+        "trace-new-lease",
+        (started_event, finished_event),
+    )
+
+    started = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert started is not None
+    assert await repository.persist_lease_context(
+        started,
+        build_gateway_v2_agent_context(started.event),
+    )
+
+    finished = await repository.claim_next_event(
+        worker_id="worker-2",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert finished is not None
+    assert finished.event_type == "skill_finished"
+    assert await repository.persist_lease_context(
+        finished,
+        build_gateway_v2_agent_context(finished.event),
+    )
+
+    assert not await repository.renew_event_claim(started, claim_ttl_ms=30_000)
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT status FROM llm_gateway_events WHERE event_id = 'event-start'"
+                )
+            )
+        ).scalar_one()
+    assert row == "superseded"
+
+
+async def test_latest_observation_coalesces_older_model_work(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await repository.accept_event_batch(
+        IDENTITY,
+        "trace-observation-coalesce",
+        (
+            _event("event-start"),
+            _observation_event("event-observation-2", sequence=2),
+            _observation_event("event-observation-3", sequence=3),
+        ),
+    )
+    started = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert started is not None
+    assert await repository.persist_lease_context(
+        started,
+        build_gateway_v2_agent_context(started.event),
+    )
+
+    latest = await repository.claim_next_event(
+        worker_id="worker-2",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert latest is not None
+    assert latest.event_id == "event-observation-3"
+    assert await repository.persist_lease_context(
+        latest,
+        build_gateway_v2_agent_context(latest.event),
+    )
+
+    async with session_factory() as session:
+        statuses = dict(
+            (
+                await session.execute(
+                    sa.text(
+                        "SELECT event_id, status FROM llm_gateway_events "
+                        "WHERE event_id IN ('event-start', 'event-observation-2')"
+                    )
+                )
+            ).all()
+        )
+    assert statuses == {
+        "event-start": "superseded",
+        "event-observation-2": "superseded",
+    }
 
 
 async def test_persisted_content_conflict_rolls_back_other_new_events(session_factory) -> None:

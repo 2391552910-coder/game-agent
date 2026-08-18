@@ -127,6 +127,11 @@ def _mock_settings():
     mock.llm_gateway_v2_retry_max_ms = 300_000
     mock.llm_gateway_v2_claim_ttl_ms = 30_000
     mock.llm_gateway_v2_agent_timeout_seconds = 30.0
+    mock.llm_gateway_v2_agent_max_concurrency = 16
+    mock.llm_gateway_v2_agent_acquire_timeout_seconds = 0.25
+    mock.llm_gateway_v2_decision_target_seconds = 55.0
+    mock.llm_gateway_v2_lease_ttl_ms = 600_000
+    mock.llm_gateway_v2_lease_safety_window_ms = 5_000
     mock.llm_gateway_v2_rag_mode = "naive"
     mock.llm_gateway_v2_rag_top_k = 10
     mock.llm_gateway_v2_rag_chunk_top_k = 10
@@ -137,6 +142,7 @@ def _mock_settings():
     mock.llm_gateway_v2_poll_ms = 250
     mock.llm_gateway_v2_event_max_parallelism = 4
     mock.llm_gateway_v2_decision_max_parallelism = 4
+    mock.llm_gateway_v2_metrics_log_interval_seconds = 10.0
     mock.llm_gateway_v2_shutdown_grace_seconds = 10
     mock.llm_gateway_v2_readiness_timeout_seconds = 3
     mock.llm_gateway_v2_readiness_cache_seconds = 5

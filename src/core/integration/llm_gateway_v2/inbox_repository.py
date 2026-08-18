@@ -25,6 +25,7 @@ from src.core.integration.llm_gateway_v2.event_worker import (
     GenerationDisposition,
     classify_generation,
 )
+from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics, QueueMetrics
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,8 @@ _LOCK_CLAIM_CANDIDATE = sa.text(
               'skill_started', 'skill_finished', 'decision_rejected',
               'chat_received', 'nearby_friend_chat_requested', 'chat_send_result'
           )
+          OR (e.event_type = 'session_stopped' AND c.status = 'active')
+          OR (e.event_type = 'observation_updated' AND c.status = 'active')
       )
       AND e.attempt_count < :max_attempts
       AND (
@@ -214,6 +217,19 @@ _LOCK_CLAIM_CANDIDATE = sa.text(
       )
     ORDER BY
         e.control_generation DESC,
+        CASE
+            WHEN c.status <> 'active' THEN 10
+            WHEN e.event_type = 'session_stopped' THEN 0
+            WHEN e.event_type = 'skill_finished' THEN 1
+            WHEN e.event_type = 'decision_rejected' THEN 2
+            WHEN e.event_type = 'skill_started' THEN 3
+            WHEN e.event_type IN (
+                'chat_received', 'nearby_friend_chat_requested', 'chat_send_result'
+            ) THEN 4
+            WHEN e.event_type = 'observation_updated' THEN 5
+            ELSE 6
+        END,
+        CASE WHEN e.event_type = 'observation_updated' THEN e.event_sequence END DESC NULLS LAST,
         CASE WHEN e.event_sequence = c.next_event_sequence THEN 0 ELSE 1 END,
         e.received_at,
         e.id
@@ -459,8 +475,11 @@ _SKIP_COMPLETED_CONVERGENCE_EVENTS = sa.text(
         JOIN llm_gateway_events AS e
           ON e.cycle_id = :cycle_id
          AND e.event_sequence = positions.next_event_sequence
-        WHERE e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
-          AND e.status IN ('succeeded', 'dead_letter', 'manual', 'superseded')
+        WHERE e.status = 'superseded'
+           OR (
+               e.event_type IN ('skill_started', 'skill_finished', 'decision_rejected')
+               AND e.status IN ('succeeded', 'dead_letter', 'manual')
+           )
     )
     UPDATE llm_gateway_control_cycles
     SET next_event_sequence = (
@@ -486,11 +505,27 @@ _ADVANCE_STALE_CYCLE = sa.text(
 _STOP_CURRENT_CYCLE = sa.text(
     """
     UPDATE llm_gateway_control_cycles
-    SET next_event_sequence = next_event_sequence + 1,
+    SET next_event_sequence = GREATEST(next_event_sequence, :event_sequence + 1),
         status = 'stopped',
         stopped_at = clock_timestamp(),
         updated_at = clock_timestamp()
-    WHERE id = :cycle_id AND next_event_sequence = :event_sequence
+    WHERE id = :cycle_id AND status IN ('pending', 'active')
+    """
+)
+
+_SUPERSEDE_OPEN_CYCLE_EVENTS = sa.text(
+    """
+    UPDATE llm_gateway_events
+    SET status = 'superseded',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    WHERE cycle_id = :cycle_id
+      AND id <> :stop_event_id
+      AND status IN ('pending', 'processing', 'retryable_failed')
     """
 )
 
@@ -576,6 +611,14 @@ _RENEW_EVENT_CLAIM = sa.text(
                   c.status IN ('pending', 'active')
                   AND s.current_generation = e.control_generation
                   AND s.fence_version = e.claimed_fence_version
+                  AND (
+                      c.latest_decision_lease_id IS NULL
+                      OR e.event_body ->> 'decisionLeaseId' IS NULL
+                      OR (
+                          c.latest_decision_lease_id = e.event_body ->> 'decisionLeaseId'
+                          AND c.latest_state_version = (e.event_body ->> 'stateVersion')::bigint
+                      )
+                  )
               )
               OR (
                   c.status = 'superseded'
@@ -593,6 +636,20 @@ _COUNT_DEAD_LETTERS = sa.text(
     SELECT count(*)
     FROM llm_gateway_events
     WHERE status = 'dead_letter'
+    """
+)
+
+_SELECT_EVENT_QUEUE_METRICS = sa.text(
+    """
+    SELECT
+        count(*) AS depth,
+        COALESCE(
+            extract(epoch FROM (clock_timestamp() - min(received_at))),
+            0
+        ) AS oldest_age_seconds
+    FROM llm_gateway_events
+    WHERE status IN ('pending', 'retryable_failed')
+      AND next_attempt_at <= clock_timestamp()
     """
 )
 
@@ -616,6 +673,58 @@ _PERSIST_LEASE_CONTEXT = sa.text(
     RETURNING c.id
     """
 ).bindparams(sa.bindparam("decision_context", type_=JSONB))
+
+_SUPERSEDE_OLDER_LEASE_EVENTS = sa.text(
+    """
+    UPDATE llm_gateway_events
+    SET status = 'superseded',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    WHERE cycle_id = :cycle_id
+      AND id <> :row_id
+      AND event_sequence < :event_sequence
+      AND status IN ('pending', 'processing', 'retryable_failed')
+      AND event_type IN ('session_started', 'observation_updated')
+      AND event_body ->> 'decisionLeaseId' IS NOT NULL
+      AND (
+          event_body ->> 'decisionLeaseId' <> :decision_lease_id
+          OR (event_body ->> 'stateVersion')::bigint <> :state_version
+      )
+    """
+)
+
+_CANCEL_OLDER_LEASE_DECISIONS = sa.text(
+    """
+    UPDATE llm_gateway_decisions
+    SET status = 'cancelled',
+        response_status = 'cancelled',
+        response_reason = CASE
+            WHEN decision_lease_id <> :decision_lease_id THEN 'decision_lease_changed'
+            ELSE 'state_version_changed'
+        END,
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        error_stage = 'fence',
+        error_category = CASE
+            WHEN decision_lease_id <> :decision_lease_id THEN 'decision_lease_changed'
+            ELSE 'state_version_changed'
+        END,
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    WHERE cycle_id = :cycle_id
+      AND status IN ('planned', 'sending', 'retryable_failed')
+      AND (
+          decision_lease_id <> :decision_lease_id
+          OR state_version <> :state_version
+      )
+    """
+)
 
 
 def _sqlstate(error: BaseException) -> str | None:
@@ -695,8 +804,14 @@ def _hosted_chat_cycle_is_processable(event_type: str, cycle_status: str) -> boo
 
 
 class InboxRepository:
-    def __init__(self, session_factory: _SessionFactory | Callable[[], AsyncSession] = async_session_factory) -> None:
+    def __init__(
+        self,
+        session_factory: _SessionFactory | Callable[[], AsyncSession] = async_session_factory,
+        *,
+        metrics: GatewayV2RuntimeMetrics | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._metrics = metrics
 
     async def resolve_role_id(self, gateway_id: str, session_id: str) -> str | None:
         async with self._session_factory() as session:
@@ -847,7 +962,7 @@ class InboxRepository:
                             "control_generation": candidate["control_generation"],
                         },
                     )
-                    await session.execute(
+                    cancelled = await session.execute(
                         _CANCEL_SUPERSEDED_DECISIONS,
                         {
                             "runtime_session_id": candidate["runtime_session_id"],
@@ -855,6 +970,8 @@ class InboxRepository:
                             "control_generation": candidate["control_generation"],
                         },
                     )
+                    if self._metrics is not None and cancelled.rowcount > 0:
+                        self._metrics.record_decision_superseded(cancelled.rowcount)
                     await session.execute(_ACTIVATE_CYCLE, {"cycle_id": candidate["cycle_id"]})
                 elif (
                     disposition is GenerationDisposition.CURRENT
@@ -1035,7 +1152,33 @@ class InboxRepository:
                     "claimed_fence_version": event.claimed_fence_version,
                 },
             )
-            return result.scalar_one_or_none() is not None
+            if result.scalar_one_or_none() is None:
+                return False
+            cancelled = await session.execute(
+                _CANCEL_OLDER_LEASE_DECISIONS,
+                {
+                    "cycle_id": event.cycle_id,
+                    "state_version": context.state_version,
+                    "decision_lease_id": context.decision_lease_id,
+                },
+            )
+            if self._metrics is not None and cancelled.rowcount > 0:
+                self._metrics.record_decision_superseded(cancelled.rowcount)
+            await session.execute(
+                _SUPERSEDE_OLDER_LEASE_EVENTS,
+                {
+                    "cycle_id": event.cycle_id,
+                    "row_id": event.row_id,
+                    "event_sequence": event.event_sequence,
+                    "state_version": context.state_version,
+                    "decision_lease_id": context.decision_lease_id,
+                },
+            )
+            await session.execute(
+                _SKIP_COMPLETED_CONVERGENCE_EVENTS,
+                {"cycle_id": event.cycle_id},
+            )
+            return True
 
     async def sweep_expired_claims(self, *, max_attempts: int) -> int:
         if max_attempts <= 0:
@@ -1100,6 +1243,14 @@ class InboxRepository:
             count = await session.scalar(_COUNT_DEAD_LETTERS)
         return int(count or 0)
 
+    async def queue_metrics(self) -> QueueMetrics:
+        async with self._session_factory() as session:
+            row = (await session.execute(_SELECT_EVENT_QUEUE_METRICS)).mappings().one()
+        return QueueMetrics(
+            depth=int(row["depth"] or 0),
+            oldest_age_seconds=float(row["oldest_age_seconds"] or 0.0),
+        )
+
     async def _after_claim_candidate_lock(self, candidate: RowMapping | None) -> None:
         del candidate
         return None
@@ -1134,6 +1285,10 @@ class InboxRepository:
             )
             await self._skip_completed_convergence_events(session, row)
             return
+        await session.execute(
+            _SUPERSEDE_OPEN_CYCLE_EVENTS,
+            {"cycle_id": event.cycle_id, "stop_event_id": event.row_id},
+        )
         await session.execute(
             _STOP_CURRENT_CYCLE,
             {"cycle_id": event.cycle_id, "event_sequence": event.event_sequence},
