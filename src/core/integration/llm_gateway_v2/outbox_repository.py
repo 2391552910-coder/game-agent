@@ -18,6 +18,11 @@ from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent
 from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics, QueueMetrics
 from src.core.integration.llm_gateway_v2.terminal_effect_service import TerminalEffectService
 from src.core.integration.llm_gateway_v2.terminal_repository import MutationDisposition, MutationResult
+from src.core.integration.llm_gateway_v2.transaction import (
+    acquire_cycle_advisory_lock,
+    is_retryable_transaction_error,
+    retry_database_mutation,
+)
 
 if TYPE_CHECKING:
     from src.core.agents.gateway_v2_models import GatewayV2AgentAction, GatewayV2AgentContext
@@ -260,6 +265,44 @@ _MARK_PLAN_MANUAL = sa.text(
     """
 )
 
+_SELECT_CLAIM_CYCLE = sa.text(
+    """
+    SELECT d.cycle_id
+    FROM llm_gateway_decisions AS d
+    JOIN llm_gateway_control_cycles AS c ON c.id = d.cycle_id
+    JOIN llm_gateway_sessions AS s ON s.id = c.runtime_session_id
+    JOIN llm_gateway_events AS source_event ON source_event.id = d.source_event_id
+    WHERE d.attempt_count < :max_attempts
+      AND NOT EXISTS (
+          SELECT 1
+          FROM llm_gateway_decisions AS in_flight
+          WHERE in_flight.cycle_id = d.cycle_id
+            AND in_flight.id <> d.id
+            AND in_flight.status = 'sending'
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM llm_gateway_skill_calls AS active_call
+          WHERE active_call.decision_row_id IN (
+              SELECT active_decision.id
+              FROM llm_gateway_decisions AS active_decision
+              WHERE active_decision.cycle_id = d.cycle_id
+          )
+            AND active_call.status IN ('pending', 'started')
+      )
+      AND (
+          (d.status IN ('planned', 'retryable_failed') AND d.next_attempt_at <= clock_timestamp())
+          OR (
+              d.status = 'sending'
+              AND d.lock_until IS NOT NULL
+              AND d.lock_until <= clock_timestamp()
+          )
+      )
+    ORDER BY d.next_attempt_at, d.created_at, d.id
+    LIMIT 1
+    """
+)
+
 _LOCK_DECISION_CANDIDATE = sa.text(
     """
     SELECT
@@ -290,7 +333,8 @@ _LOCK_DECISION_CANDIDATE = sa.text(
     JOIN llm_gateway_control_cycles AS c ON c.id = d.cycle_id
     JOIN llm_gateway_sessions AS s ON s.id = c.runtime_session_id
     JOIN llm_gateway_events AS source_event ON source_event.id = d.source_event_id
-    WHERE d.attempt_count < :max_attempts
+    WHERE d.cycle_id = :cycle_id
+      AND d.attempt_count < :max_attempts
       AND NOT EXISTS (
           SELECT 1
           FROM llm_gateway_decisions AS in_flight
@@ -772,6 +816,7 @@ class OutboxRepository:
         except SQLAlchemyError:
             raise DecisionPlanUnavailableError from None
 
+    @retry_database_mutation
     async def plan_decision(
         self,
         event: ClaimedGatewayEvent,
@@ -786,6 +831,7 @@ class OutboxRepository:
         planned: PlannedDecision | None = None
         try:
             async with self._session_factory() as session, session.begin():
+                await acquire_cycle_advisory_lock(session, event.cycle_id)
                 locked_result = await session.execute(
                     _LOCK_PLAN_SOURCE,
                     {"source_event_id": event.row_id},
@@ -925,7 +971,9 @@ class OutboxRepository:
             if existing is not None:
                 return existing
             raise DecisionPlanConflictError("decision_unique_constraint") from None
-        except (SQLAlchemyError, OSError, TimeoutError):
+        except (SQLAlchemyError, OSError, TimeoutError) as error:
+            if is_retryable_transaction_error(error):
+                raise
             raise DecisionPlanUnavailableError from None
 
         if conflict_category is not None:
@@ -934,6 +982,7 @@ class OutboxRepository:
             raise DecisionPlanUnavailableError
         return planned
 
+    @retry_database_mutation
     async def claim_next_decision(
         self,
         *,
@@ -948,9 +997,16 @@ class OutboxRepository:
 
         async with self._session_factory() as session, session.begin():
             while True:
+                cycle_id = await session.scalar(
+                    _SELECT_CLAIM_CYCLE,
+                    {"max_attempts": max_attempts},
+                )
+                if cycle_id is None:
+                    return None
+                await acquire_cycle_advisory_lock(session, cycle_id)
                 candidate_result = await session.execute(
                     _LOCK_DECISION_CANDIDATE,
-                    {"max_attempts": max_attempts},
+                    {"max_attempts": max_attempts, "cycle_id": cycle_id},
                 )
                 candidate = candidate_result.mappings().one_or_none()
                 if candidate is None:
@@ -987,6 +1043,7 @@ class OutboxRepository:
                     continue
                 return self._claimed_decision(candidate, claimed)
 
+    @retry_database_mutation
     async def renew_decision_claim(
         self,
         decision: ClaimedDecision,
@@ -996,6 +1053,7 @@ class OutboxRepository:
         if claim_ttl_ms <= 0:
             raise ValueError("claim_ttl_ms must be positive")
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, decision.cycle_id)
             renewed = await session.execute(
                 _RENEW_DECISION_CLAIM,
                 {
@@ -1007,6 +1065,7 @@ class OutboxRepository:
             )
             return renewed.scalar_one_or_none() is not None
 
+    @retry_database_mutation
     async def complete_decision_failure(
         self,
         decision: ClaimedDecision,
@@ -1023,6 +1082,7 @@ class OutboxRepository:
             raise ValueError("retry_base_ms must not exceed retry_max_ms")
 
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, decision.cycle_id)
             locked = await self._lock_claimed_decision(session, decision)
             if locked is None:
                 return False
@@ -1055,6 +1115,7 @@ class OutboxRepository:
                 )
             return completed.scalar_one_or_none() is not None
 
+    @retry_database_mutation
     async def record_decision_response(
         self,
         decision: ClaimedDecision,
@@ -1066,6 +1127,7 @@ class OutboxRepository:
             raise TypeError("response must be DecisionClientResult")
 
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, decision.cycle_id)
             locked = await self._lock_claimed_decision(session, decision)
             if locked is None:
                 return False
@@ -1204,11 +1266,13 @@ class OutboxRepository:
             oldest_age_seconds=float(row["oldest_age_seconds"] or 0.0),
         )
 
+    @retry_database_mutation
     async def merge_decision_rejected(self, claimed: ClaimedGatewayEvent) -> MutationResult:
         event = claimed.event
         if not isinstance(event, DecisionRejectedEvent):
             raise ValueError("decision_rejected event is required")
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, claimed.cycle_id)
             result = await session.execute(
                 _LOCK_DECISION_FOR_REJECTION,
                 {
@@ -1239,11 +1303,13 @@ class OutboxRepository:
             )
             return MutationResult(resolution.disposition, resolution.error_category)
 
+    @retry_database_mutation
     async def close_generation(self, claimed: ClaimedGatewayEvent) -> MutationResult:
         event = claimed.event
         if not isinstance(event, SessionStoppedEvent):
             raise ValueError("session_stopped event is required")
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, claimed.cycle_id)
             locked_result = await session.execute(
                 _LOCK_STOP_CLAIM,
                 {

@@ -18,6 +18,10 @@ from src.core.integration.llm_gateway_v2.contracts import (
 )
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent
 from src.core.integration.llm_gateway_v2.terminal_effect_service import TerminalEffectService
+from src.core.integration.llm_gateway_v2.transaction import (
+    acquire_cycle_advisory_lock,
+    retry_database_mutation,
+)
 
 
 class MutationDisposition(StrEnum):
@@ -236,11 +240,13 @@ class TerminalRepository:
         self._session_factory = session_factory
         self._effect_service = effect_service or TerminalEffectService()
 
+    @retry_database_mutation
     async def record_skill_started(self, claimed: ClaimedGatewayEvent) -> MutationResult:
         event = claimed.event
         if not isinstance(event, SkillStartedEvent):
             raise ValueError("skill_started event is required")
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, claimed.cycle_id)
             decision = await self._lock_decision(session, claimed.gateway_id, event.payload.decision_id)
             if decision is None:
                 return MutationResult(MutationDisposition.MISSING, "missing_decision")
@@ -291,12 +297,14 @@ class TerminalRepository:
                 return MutationResult(MutationDisposition.IDEMPOTENT)
             return MutationResult(MutationDisposition.CONFLICT, "skill_call_state_conflict")
 
+    @retry_database_mutation
     async def record_skill_finished(self, claimed: ClaimedGatewayEvent) -> MutationResult:
         event = claimed.event
         if not isinstance(event, SkillFinishedEvent):
             raise ValueError("skill_finished event is required")
         incoming = normalize_skill_terminal(event.payload.terminal).with_terminal_event_id(event.event_id)
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, claimed.cycle_id)
             decision = await self._lock_decision(session, claimed.gateway_id, event.payload.decision_id)
             if decision is None:
                 return MutationResult(MutationDisposition.MISSING, "missing_decision")

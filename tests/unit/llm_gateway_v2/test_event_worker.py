@@ -370,6 +370,41 @@ async def test_long_processor_refreshes_heartbeat_before_first_claim_renewal() -
     assert registry.snapshot().heartbeat_monotonic > 2.0
 
 
+async def test_watchdog_refreshes_heartbeat_while_poll_maintenance_is_blocked() -> None:
+    class BlockingSweepRepository(FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(deque([None]))
+            self.sweep_started = asyncio.Event()
+            self.sweep_release = asyncio.Event()
+
+        async def sweep_expired_claims(self, *, max_attempts: int) -> int:
+            del max_attempts
+            self.sweep_started.set()
+            await self.sweep_release.wait()
+            return 0
+
+    repository = BlockingSweepRepository()
+    registry = WorkerStatusRegistry()
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        del event
+        return EventProcessResult("succeeded")
+
+    worker = _worker(repository, processor, status=registry)
+
+    await worker.start()
+    await asyncio.wait_for(repository.sweep_started.wait(), timeout=0.2)
+    before = registry.snapshot().heartbeat_monotonic
+    await asyncio.sleep(0.12)
+    after = registry.snapshot().heartbeat_monotonic
+
+    repository.sweep_release.set()
+    await worker.stop()
+
+    assert before is not None
+    assert after is not None
+    assert after > before
+
+
 async def test_heartbeat_continues_while_claim_renewal_is_pending() -> None:
     class BlockingRenewalRepository(FakeRepository):
         def __init__(self) -> None:

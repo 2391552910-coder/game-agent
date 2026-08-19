@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.integration.llm_gateway_v2.outbox_repository import decision_lease_deadline_ms
+from src.core.integration.llm_gateway_v2.outbox_repository import (
+    _LOCK_DECISION_CANDIDATE,
+    decision_lease_deadline_ms,
+)
 
 
 def test_decision_lease_deadline_reserves_safety_window() -> None:
@@ -11,6 +14,12 @@ def test_decision_lease_deadline_reserves_safety_window() -> None:
         lease_ttl_ms=600_000,
         safety_window_ms=5_000,
     ) == 1_700_000_595_000
+
+
+def test_decision_claim_query_is_scoped_to_the_locked_cycle() -> None:
+    query = _LOCK_DECISION_CANDIDATE.text
+
+    assert "d.cycle_id = :cycle_id" in query
 
 
 @pytest.mark.parametrize(

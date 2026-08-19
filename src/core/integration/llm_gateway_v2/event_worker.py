@@ -165,6 +165,10 @@ class EventWorker:
         self._drain_requested = asyncio.Event()
         self._started = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self._maintenance_task: asyncio.Task[None] | None = None
+        self._heartbeat_interval_seconds = min(max(self._poll_interval_seconds / 2, 0.05), 0.5)
+        self._maintenance_interval_seconds = max(self._poll_interval_seconds * 10, 1.0)
 
     @staticmethod
     def _validate_configuration(
@@ -231,14 +235,11 @@ class EventWorker:
         self._loop_task = None
         self._status.mark_stopped()
 
-    async def run_once(self) -> int:
+    async def run_once(self, *, include_maintenance: bool = True) -> int:
         self._status.heartbeat()
-        swept_count = await self._repository.sweep_expired_claims(max_attempts=self._max_attempts)
-        if swept_count:
-            logger.warning(
-                "LLM Gateway v2 exhausted claims moved to dead letter",
-                extra={"swept_count": swept_count},
-            )
+        self._status.mark_poll_started()
+        if include_maintenance:
+            await self._run_maintenance_once()
 
         claimed: list[ClaimedGatewayEvent] = []
         for _ in range(self._max_parallelism):
@@ -252,18 +253,28 @@ class EventWorker:
             if event is None:
                 break
             claimed.append(event)
+            self._status.mark_progress()
 
         self._status.heartbeat()
+        self._status.mark_successful_poll()
+
+        if claimed:
+            await asyncio.gather(*(self._process_one(event) for event in claimed))
+        self._status.mark_poll_completed()
+        return len(claimed)
+
+    async def _run_maintenance_once(self) -> None:
+        swept_count = await self._repository.sweep_expired_claims(max_attempts=self._max_attempts)
+        if swept_count:
+            logger.warning(
+                "LLM Gateway v2 exhausted claims moved to dead letter",
+                extra={"swept_count": swept_count},
+            )
         dead_letter_count = await self._repository.count_dead_letters()
         self._status.set_dead_letter_count(dead_letter_count)
         if self._metrics is not None:
             self._metrics.set_dead_letters("event", dead_letter_count)
             await self._refresh_queue_metrics()
-        self._status.mark_successful_poll()
-
-        if claimed:
-            await asyncio.gather(*(self._process_one(event) for event in claimed))
-        return len(claimed)
 
     async def _process_one(self, event: ClaimedGatewayEvent) -> None:
         if self._metrics is not None:
@@ -273,6 +284,7 @@ class EventWorker:
         finally:
             if self._metrics is not None:
                 self._metrics.task_finished("event")
+            self._status.mark_progress()
 
     async def _process_claimed_event(self, event: ClaimedGatewayEvent) -> None:
         processing_started = time.monotonic()
@@ -516,11 +528,19 @@ class EventWorker:
     async def _run_loop(self) -> None:
         self._status.mark_running()
         self._status.heartbeat()
+        self._watchdog_task = asyncio.create_task(
+            self._heartbeat_watchdog(),
+            name=f"llm-gateway-v2-heartbeat-{self._worker_id}",
+        )
+        self._maintenance_task = asyncio.create_task(
+            self._maintenance_loop(),
+            name=f"llm-gateway-v2-maintenance-{self._worker_id}",
+        )
         self._started.set()
         try:
             while not self._stop_requested.is_set():
                 try:
-                    await self.run_once()
+                    await self.run_once(include_maintenance=False)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -543,5 +563,58 @@ class EventWorker:
                 except TimeoutError:
                     continue
         finally:
+            await self._cancel_background_tasks()
             self._started.set()
             self._status.mark_stopped()
+
+    async def _heartbeat_watchdog(self) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(
+                    self._stop_requested.wait(),
+                    timeout=self._heartbeat_interval_seconds,
+                )
+            except TimeoutError:
+                self._status.heartbeat()
+            else:
+                return
+
+    async def _maintenance_loop(self) -> None:
+        first_run = True
+        while True:
+            if first_run:
+                first_run = False
+            else:
+                try:
+                    await asyncio.wait_for(
+                        self._stop_requested.wait(),
+                        timeout=self._maintenance_interval_seconds,
+                    )
+                except TimeoutError:
+                    pass
+                else:
+                    return
+            try:
+                await self._run_maintenance_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._status.mark_database_error()
+                logger.warning(
+                    "LLM Gateway v2 event maintenance failed",
+                    extra=safe_exception_fields(
+                        stage="database",
+                        category="maintenance_failed",
+                        error=error,
+                    ),
+                )
+
+    async def _cancel_background_tasks(self) -> None:
+        tasks = tuple(task for task in (self._watchdog_task, self._maintenance_task) if task is not None)
+        self._watchdog_task = None
+        self._maintenance_task = None
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)

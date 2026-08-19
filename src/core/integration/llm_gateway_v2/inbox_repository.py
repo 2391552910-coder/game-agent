@@ -26,6 +26,11 @@ from src.core.integration.llm_gateway_v2.event_worker import (
     classify_generation,
 )
 from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics, QueueMetrics
+from src.core.integration.llm_gateway_v2.transaction import (
+    acquire_cycle_advisory_lock,
+    is_retryable_transaction_error,
+    retry_database_mutation,
+)
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,54 @@ _INSERT_EVENT = sa.text(
     """
 ).bindparams(sa.bindparam("event_body", type_=JSONB))
 
+_SELECT_CLAIM_CYCLE = sa.text(
+    """
+    SELECT e.cycle_id
+    FROM llm_gateway_events AS e
+    JOIN llm_gateway_control_cycles AS c ON c.id = e.cycle_id
+    WHERE (
+          (
+              c.status IN ('pending', 'active', 'superseded')
+              AND e.event_sequence = c.next_event_sequence
+          )
+          OR e.event_type IN (
+              'skill_started', 'skill_finished', 'decision_rejected',
+              'chat_received', 'nearby_friend_chat_requested', 'chat_send_result'
+          )
+          OR (e.event_type = 'session_stopped' AND c.status = 'active')
+          OR (e.event_type = 'observation_updated' AND c.status = 'active')
+      )
+      AND e.attempt_count < :max_attempts
+      AND (
+          (e.status IN ('pending', 'retryable_failed') AND e.next_attempt_at <= clock_timestamp())
+          OR (
+              e.status = 'processing'
+              AND e.lock_until IS NOT NULL
+              AND e.lock_until <= clock_timestamp()
+          )
+      )
+    ORDER BY
+        e.control_generation DESC,
+        CASE
+            WHEN c.status <> 'active' THEN 10
+            WHEN e.event_type = 'session_stopped' THEN 0
+            WHEN e.event_type = 'skill_finished' THEN 1
+            WHEN e.event_type = 'decision_rejected' THEN 2
+            WHEN e.event_type = 'skill_started' THEN 3
+            WHEN e.event_type IN (
+                'chat_received', 'nearby_friend_chat_requested', 'chat_send_result'
+            ) THEN 4
+            WHEN e.event_type = 'observation_updated' THEN 5
+            ELSE 6
+        END,
+        CASE WHEN e.event_type = 'observation_updated' THEN e.event_sequence END DESC NULLS LAST,
+        CASE WHEN e.event_sequence = c.next_event_sequence THEN 0 ELSE 1 END,
+        e.received_at,
+        e.id
+    LIMIT 1
+    """
+)
+
 _LOCK_CLAIM_CANDIDATE = sa.text(
     """
     SELECT
@@ -194,7 +247,8 @@ _LOCK_CLAIM_CANDIDATE = sa.text(
     FROM llm_gateway_events AS e
     JOIN llm_gateway_control_cycles AS c ON c.id = e.cycle_id
     JOIN llm_gateway_sessions AS s ON s.id = c.runtime_session_id
-    WHERE (
+    WHERE e.cycle_id = :cycle_id
+      AND (
           (
               c.status IN ('pending', 'active', 'superseded')
               AND e.event_sequence = c.next_event_sequence
@@ -821,6 +875,7 @@ class InboxRepository:
             )
         return str(role_id) if role_id is not None else None
 
+    @retry_database_mutation
     async def accept_event_batch(
         self,
         identity: InboundGatewayIdentity,
@@ -876,16 +931,21 @@ class InboxRepository:
                 except EventAdmissionUnavailable:
                     await self._rollback_quietly(session)
                     raise
-                except (SQLAlchemyError, OSError, TimeoutError):
+                except (SQLAlchemyError, OSError, TimeoutError) as error:
                     await self._rollback_quietly(session)
+                    if is_retryable_transaction_error(error):
+                        raise EventAdmissionUnavailable from error
                     raise EventAdmissionUnavailable from None
         except (EventAdmissionConflict, EventAdmissionUnavailable):
             raise
-        except (SQLAlchemyError, OSError, TimeoutError):
+        except (SQLAlchemyError, OSError, TimeoutError) as error:
+            if is_retryable_transaction_error(error):
+                raise EventAdmissionUnavailable from error
             raise EventAdmissionUnavailable from None
 
         return BatchAcceptance(tuple(received), tuple(duplicates))
 
+    @retry_database_mutation
     async def claim_next_event(
         self,
         *,
@@ -902,9 +962,16 @@ class InboxRepository:
 
         while True:
             async with self._session_factory() as session, session.begin():
+                cycle_id = await session.scalar(
+                    _SELECT_CLAIM_CYCLE,
+                    {"max_attempts": max_attempts},
+                )
+                if cycle_id is None:
+                    return None
+                await acquire_cycle_advisory_lock(session, cycle_id)
                 candidate_result = await session.execute(
                     _LOCK_CLAIM_CANDIDATE,
-                    {"max_attempts": max_attempts},
+                    {"max_attempts": max_attempts, "cycle_id": cycle_id},
                 )
                 candidate = candidate_result.mappings().one_or_none()
                 await self._after_claim_candidate_lock(candidate)
@@ -1009,6 +1076,7 @@ class InboxRepository:
                     ),
                 )
 
+    @retry_database_mutation
     async def renew_event_claim(
         self,
         event: ClaimedGatewayEvent,
@@ -1018,6 +1086,7 @@ class InboxRepository:
         if claim_ttl_ms <= 0:
             raise ValueError("claim_ttl_ms must be positive")
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, event.cycle_id)
             result = await session.execute(
                 _RENEW_EVENT_CLAIM,
                 {
@@ -1029,6 +1098,7 @@ class InboxRepository:
             )
             return result.scalar_one_or_none() is not None
 
+    @retry_database_mutation
     async def complete_event(
         self,
         event: ClaimedGatewayEvent,
@@ -1046,6 +1116,7 @@ class InboxRepository:
             raise ValueError("retry_base_ms must not exceed retry_max_ms")
 
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, event.cycle_id)
             locked_result = await session.execute(
                 _LOCK_CLAIM_FOR_COMPLETION,
                 {
@@ -1127,6 +1198,7 @@ class InboxRepository:
             await self._skip_completed_convergence_events(session, locked)
             return True
 
+    @retry_database_mutation
     async def persist_lease_context(
         self,
         event: ClaimedGatewayEvent,
@@ -1140,6 +1212,7 @@ class InboxRepository:
         ):
             raise ValueError("decision context does not match claimed event")
         async with self._session_factory() as session, session.begin():
+            await acquire_cycle_advisory_lock(session, event.cycle_id)
             result = await session.execute(
                 _PERSIST_LEASE_CONTEXT,
                 {

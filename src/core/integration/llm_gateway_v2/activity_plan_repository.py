@@ -25,6 +25,11 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
 )
 from src.core.integration.llm_gateway_v2.competitive_activity import is_correctable_skill_failure
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent
+from src.core.integration.llm_gateway_v2.transaction import (
+    acquire_cycle_advisory_lock,
+    is_retryable_transaction_error,
+    retry_database_mutation,
+)
 
 
 class ActivityPlanUnavailableError(RuntimeError):
@@ -238,6 +243,8 @@ class ActivityPlanRepository:
         except ActivityPlanUnavailableError:
             raise
         except (ActivityPlanValidationError, SQLAlchemyError, OSError) as error:
+            if is_retryable_transaction_error(error):
+                raise
             logger.error(
                 "Activity plan load failed",
                 extra={"error_type": type(error).__name__},
@@ -245,6 +252,7 @@ class ActivityPlanRepository:
             )
             raise ActivityPlanUnavailableError from error
 
+    @retry_database_mutation
     async def prepare(
         self,
         event: ClaimedGatewayEvent,
@@ -254,6 +262,7 @@ class ActivityPlanRepository:
     ) -> ActivityPlanContext:
         try:
             async with self._session_factory() as session, session.begin():
+                await acquire_cycle_advisory_lock(session, event.cycle_id)
                 row = await self._lock_cycle(session, event)
                 self._validate_claim(row, event)
                 plan = self._load_plan(row)
@@ -290,6 +299,8 @@ class ActivityPlanRepository:
         except ActivityPlanUnavailableError:
             raise
         except (ActivityPlanValidationError, SQLAlchemyError, OSError) as error:
+            if is_retryable_transaction_error(error):
+                raise
             logger.error(
                 "Activity plan prepare failed",
                 extra={"error_type": type(error).__name__},
@@ -348,6 +359,7 @@ class ActivityPlanRepository:
     async def complete_passive_step(self, event: ClaimedGatewayEvent) -> bool:
         return await self._complete_passive_step(event)
 
+    @retry_database_mutation
     async def _complete_passive_step(
         self,
         event: ClaimedGatewayEvent,
@@ -356,6 +368,7 @@ class ActivityPlanRepository:
     ) -> bool:
         try:
             async with self._session_factory() as session, session.begin():
+                await acquire_cycle_advisory_lock(session, event.cycle_id)
                 row = await self._lock_cycle(session, event)
                 self._validate_claim(row, event)
                 plan = self._load_plan(row)
@@ -371,11 +384,15 @@ class ActivityPlanRepository:
                     await self._write_hosted_chat_state(session, event, updated)
                 return True
         except (ActivityPlanValidationError, SQLAlchemyError, OSError) as error:
+            if is_retryable_transaction_error(error):
+                raise
             raise ActivityPlanUnavailableError from error
 
+    @retry_database_mutation
     async def close(self, event: ClaimedGatewayEvent) -> bool:
         try:
             async with self._session_factory() as session, session.begin():
+                await acquire_cycle_advisory_lock(session, event.cycle_id)
                 row = await self._lock_cycle(session, event)
                 self._validate_claim(row, event)
                 plan = self._load_plan(row)
@@ -385,8 +402,11 @@ class ActivityPlanRepository:
                 await self._write_state(session, event, updated)
                 return True
         except (ActivityPlanValidationError, SQLAlchemyError, OSError) as error:
+            if is_retryable_transaction_error(error):
+                raise
             raise ActivityPlanUnavailableError from error
 
+    @retry_database_mutation
     async def _record_terminal_event(
         self,
         event: ClaimedGatewayEvent,
@@ -398,6 +418,7 @@ class ActivityPlanRepository:
     ) -> bool:
         try:
             async with self._session_factory() as session, session.begin():
+                await acquire_cycle_advisory_lock(session, event.cycle_id)
                 row = await self._lock_cycle(session, event)
                 self._validate_claim(row, event)
                 plan = self._load_plan(row)
@@ -428,6 +449,8 @@ class ActivityPlanRepository:
                 await self._write_state(session, event, updated)
                 return True
         except (ActivityPlanValidationError, SQLAlchemyError, OSError) as error:
+            if is_retryable_transaction_error(error):
+                raise
             raise ActivityPlanUnavailableError from error
 
     @staticmethod

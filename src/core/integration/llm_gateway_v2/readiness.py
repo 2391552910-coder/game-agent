@@ -222,7 +222,6 @@ class ReadinessService:
 
         if not self._v2_enabled or not self._enabled:
             return False, "service_unavailable"
-        now = self._monotonic()
         for worker_name, registry in (
             ("eventWorker", self._event_worker_status),
             ("decisionWorker", self._decision_worker_status),
@@ -230,10 +229,6 @@ class ReadinessService:
             snapshot = registry.snapshot()
             if snapshot.state != "running":
                 return False, f"{worker_name}_not_running"
-            if snapshot.heartbeat_monotonic is None:
-                return False, f"{worker_name}_heartbeat_missing"
-            if now - snapshot.heartbeat_monotonic > self._worker_fresh_seconds:
-                return False, f"{worker_name}_heartbeat_stale"
         return True, "ok"
 
     def invalidate(self) -> None:

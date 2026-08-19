@@ -15,6 +15,10 @@ class WorkerStatusSnapshot:
     last_successful_poll_monotonic: float | None
     dead_letter_count: int
     degraded: bool
+    poll_started_monotonic: float | None = None
+    poll_completed_monotonic: float | None = None
+    last_progress_monotonic: float | None = None
+    last_database_error_monotonic: float | None = None
 
 
 class WorkerStatusRegistry:
@@ -29,6 +33,10 @@ class WorkerStatusRegistry:
         self._heartbeat_monotonic: float | None = None
         self._last_successful_poll_monotonic: float | None = None
         self._dead_letter_count = 0
+        self._poll_started_monotonic: float | None = None
+        self._poll_completed_monotonic: float | None = None
+        self._last_progress_monotonic: float | None = None
+        self._last_database_error_monotonic: float | None = None
 
     def mark_running(self) -> None:
         self._set_state("running")
@@ -54,8 +62,30 @@ class WorkerStatusRegistry:
     def heartbeat(self) -> None:
         self._heartbeat_monotonic = self._monotonic()
 
+    def mark_poll_started(self) -> None:
+        self._poll_started_monotonic = (
+            self._heartbeat_monotonic if self._heartbeat_monotonic is not None else self._monotonic()
+        )
+
+    def mark_poll_completed(self) -> None:
+        self._poll_completed_monotonic = (
+            self._last_successful_poll_monotonic
+            if self._last_successful_poll_monotonic is not None
+            else self._heartbeat_monotonic
+        )
+
+    def mark_progress(self) -> None:
+        self._last_progress_monotonic = (
+            self._heartbeat_monotonic if self._heartbeat_monotonic is not None else self._monotonic()
+        )
+
+    def mark_database_error(self) -> None:
+        self._last_database_error_monotonic = self._monotonic()
+
     def mark_successful_poll(self) -> None:
-        self._last_successful_poll_monotonic = self._monotonic()
+        now = self._monotonic()
+        self._last_successful_poll_monotonic = now
+        self._poll_completed_monotonic = now
 
     def set_dead_letter_count(self, count: int) -> None:
         if count < 0:
@@ -69,4 +99,8 @@ class WorkerStatusRegistry:
             last_successful_poll_monotonic=self._last_successful_poll_monotonic,
             dead_letter_count=self._dead_letter_count,
             degraded=self._dead_letter_count > 0,
+            poll_started_monotonic=self._poll_started_monotonic,
+            poll_completed_monotonic=self._poll_completed_monotonic,
+            last_progress_monotonic=self._last_progress_monotonic,
+            last_database_error_monotonic=self._last_database_error_monotonic,
         )
