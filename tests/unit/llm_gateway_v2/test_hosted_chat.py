@@ -109,7 +109,7 @@ async def test_nearby_friend_request_calls_auto_chat_with_opening_question() -> 
 
     await service.handle_nearby_friend_request("gateway-1", event)
 
-    assert conversation_client.calls == [(100, 200, "opening-1", "主动开场白")]
+    assert conversation_client.calls == [(100, 200, "opening-1", "你好")]
     assert [request.content for request in sender.requests] == ["你好，很高兴见到你。"]
 
 

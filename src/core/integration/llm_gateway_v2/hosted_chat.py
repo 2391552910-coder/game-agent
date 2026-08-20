@@ -472,7 +472,7 @@ class HostedChatService:
         chat_type: HostedChatType,
         incoming_text: str | None,
     ) -> HostedChatSendRequest:
-        question = incoming_text if incoming_text is not None else "主动开场白"
+        question = incoming_text if incoming_text is not None else "你好"
         if self._conversation_client is None:
             raise HostedChatPermanentError("conversation_client_not_configured")
         if self._identity_resolver is None:
