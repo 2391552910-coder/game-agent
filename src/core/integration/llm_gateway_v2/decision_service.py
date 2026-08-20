@@ -78,6 +78,19 @@ _REQUIRED_ACTIVITY_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "seat_get_out": ("sceneId", "chairId"),
 }
 
+_LOCAL_FALLBACK_SKILL_ORDER: tuple[str, ...] = (
+    "dance_auto_schedule",
+    "hot_air_balloon_auto_schedule",
+    "coffee_auto_schedule",
+    "darts_auto_schedule",
+    "shooting_auto_schedule",
+    "paper_plane_auto_schedule",
+    "draw_lots_auto_schedule",
+    "wish_board_auto_schedule",
+    "helicopter_auto_schedule",
+    "elevator_auto_schedule",
+)
+
 
 class GatewayV2DecisionSelectionError(Exception):
     def __init__(self) -> None:
@@ -481,9 +494,66 @@ def _defer_unresolvable_activity_step(
 def _decision_deadline_fallback(context: GatewayV2AgentContext) -> GatewayV2AgentAction | None:
     reason = "Decision event exceeded the internal response target"
     if "wait" in context.allowed_decision_actions:
-        return GatewayV2WaitAction(reason=reason, waitMs=1_000)
+        return GatewayV2WaitAction(reason=reason, waitMs=_staggered_wait_ms(context))
     if "no_op" in context.allowed_decision_actions:
         return GatewayV2NoOpAction(reason=reason)
+    return None
+
+
+def _stable_context_bucket(context: GatewayV2AgentContext) -> int:
+    account_id = _snapshot_value(context.session_snapshot, "AccountId", "accountId")
+    identity = account_id if isinstance(account_id, str) and account_id.strip() else context.session_id
+    material = (
+        f"{identity}|{context.session_id}|{context.control_generation}|"
+        f"{context.state_version}"
+    )
+    return int.from_bytes(hashlib.sha256(material.encode("utf-8")).digest()[:8], "big")
+
+
+def _staggered_wait_ms(context: GatewayV2AgentContext) -> int:
+    return 5_000 + _stable_context_bucket(context) % 25_001
+
+
+def _lease_authorized_local_activity_action(
+    context: GatewayV2AgentContext,
+    *,
+    reason: str,
+) -> GatewayV2CallSkillAction | None:
+    if context.lease_kind != "observation" or "call_skill" not in context.allowed_decision_actions:
+        return None
+
+    published = {
+        (skill.skill_name, skill.schema_version)
+        for skill in context.available_skills
+    }
+    last_skill_name = _snapshot_value(
+        context.session_snapshot,
+        "LastSkillName",
+        "lastSkillName",
+    )
+    candidates = [
+        (skill_name, schema_version)
+        for skill_name in _LOCAL_FALLBACK_SKILL_ORDER
+        for schema_version in ("v1",)
+        if (skill_name, schema_version) in published
+        and not (
+            isinstance(last_skill_name, str)
+            and skill_name.casefold() == last_skill_name.casefold()
+        )
+    ]
+    if not candidates:
+        return None
+
+    offset = _stable_context_bucket(context) % len(candidates)
+    for skill_name, schema_version in candidates[offset:] + candidates[:offset]:
+        action = _gateway_v2_activity_skill_action(
+            context,
+            skill_name,
+            schema_version,
+            reason=reason,
+        )
+        if action is not None:
+            return action
     return None
 
 
@@ -829,16 +899,59 @@ class GatewayV2DecisionPlanner:
                 and self.now_ms() - event.event.occurred_at_ms
                 >= self.decision_target_seconds * 1_000
             )
+            action: GatewayV2AgentAction | None = None
+            if not deadline_reached:
+                action = _initial_room_transition_action(context)
             activity_context = None
             if (
+                action is not None
+                and not self.force_skills
+                and self.activity_coordinator is not None
+            ):
+                prepare_deterministic = getattr(
+                    self.activity_coordinator,
+                    "prepare_deterministic",
+                    None,
+                )
+                if callable(prepare_deterministic):
+                    activity_context = await prepare_deterministic(event, context)
+            if (
+                deadline_reached
+                and action is None
+                and not self.force_skills
+                and self.activity_coordinator is not None
+            ):
+                activity_context = await self.activity_coordinator.resume(event, context)
+            if (
                 not deadline_reached
+                and action is None
                 and not self.force_skills
                 and self.activity_coordinator is not None
             ):
                 activity_context = await self.activity_coordinator.prepare(event, context)
-            action: GatewayV2AgentAction | None
-            if deadline_reached:
-                action = _decision_deadline_fallback(context)
+            if action is None and self.force_skills:
+                action = _forced_test_skill_action(event, context, self.force_skills)
+            if action is None and activity_context is not None:
+                planned_action = _planned_activity_action(
+                    context,
+                    activity_context,
+                    scene_catalog=self.scene_catalog,
+                )
+                if planned_action is not None:
+                    action = planned_action
+                elif activity_context.plan.current_step().skill_name is not None:
+                    action = _defer_unresolvable_activity_step(context)
+                    if action is None:
+                        raise GatewayV2AgentExecutionError(
+                            "activity_step_unresolvable"
+                        )
+            if action is None and deadline_reached:
+                action = _lease_authorized_local_activity_action(
+                    context,
+                    reason="Continue with a lease-authorized local activity after queue delay",
+                )
+                if action is None:
+                    action = _decision_deadline_fallback(context)
                 if action is None:
                     raise GatewayV2AgentExecutionError("deadline_exceeded")
                 logger.warning(
@@ -853,24 +966,6 @@ class GatewayV2DecisionPlanner:
                         "event_age_ms": self.now_ms() - event.event.occurred_at_ms,
                     },
                 )
-            else:
-                action = _initial_room_transition_action(context)
-            if action is None and self.force_skills:
-                action = _forced_test_skill_action(event, context, self.force_skills)
-            elif activity_context is not None:
-                planned_action = _planned_activity_action(
-                    context,
-                    activity_context,
-                    scene_catalog=self.scene_catalog,
-                )
-                if planned_action is not None:
-                    action = planned_action
-                elif activity_context.plan.current_step().skill_name is not None:
-                    action = _defer_unresolvable_activity_step(context)
-                    if action is None:
-                        raise GatewayV2AgentExecutionError(
-                            "activity_step_unresolvable"
-                        )
             if action is None:
                 try:
                     action = await self.decision_service.decide(
@@ -880,15 +975,21 @@ class GatewayV2DecisionPlanner:
                         activity_context=activity_context,
                     )
                 except GatewayV2AgentExecutionError as error:
-                    if (
-                        error.category not in {"timeout", "overloaded", "deadline_exceeded"}
-                        or "wait" not in context.allowed_decision_actions
-                    ):
+                    if error.category not in {"timeout", "overloaded", "deadline_exceeded"}:
+                        raise
+                    action = _lease_authorized_local_activity_action(
+                        context,
+                        reason=(
+                            "Continue with a lease-authorized local activity while "
+                            "model capacity is saturated"
+                        ),
+                    )
+                    if action is None and "wait" not in context.allowed_decision_actions:
                         raise
                     logger.warning(
                         (
                             "LLM Gateway v2 Agent unavailable before decision deadline; "
-                            "planning lease-authorized wait decision"
+                            "planning lease-authorized fallback decision"
                         ),
                         extra={
                             "event_id": event.event_id,
@@ -900,10 +1001,11 @@ class GatewayV2DecisionPlanner:
                             "error_category": error.category,
                         },
                     )
-                    action = GatewayV2WaitAction(
-                        reason="Agent timed out; defer decision within the current lease",
-                        waitMs=1_000,
-                    )
+                    if action is None:
+                        action = GatewayV2WaitAction(
+                            reason="Agent unavailable; defer decision within the current lease",
+                            waitMs=_staggered_wait_ms(context),
+                        )
             elif isinstance(action, GatewayV2CallSkillAction):
                 logger.info(
                     "LLM Gateway v2 deterministic skill selected",

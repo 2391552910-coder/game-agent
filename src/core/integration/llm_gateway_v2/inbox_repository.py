@@ -30,6 +30,7 @@ from src.core.integration.llm_gateway_v2.transaction import (
     acquire_cycle_advisory_lock,
     is_retryable_transaction_error,
     retry_database_mutation,
+    try_acquire_cycle_advisory_lock,
 )
 
 
@@ -201,6 +202,16 @@ _SELECT_CLAIM_CYCLE = sa.text(
           )
       )
     ORDER BY
+        CASE
+            WHEN c.status = 'pending'
+             AND e.event_type IN ('observation_updated', 'session_stopped') THEN 0
+            WHEN c.status = 'pending'
+             AND e.event_type = 'session_started'
+             AND e.event_sequence = 1 THEN 1
+            WHEN c.status = 'active' THEN 2
+            WHEN c.status = 'superseded' THEN 3
+            ELSE 4
+        END,
         e.control_generation DESC,
         CASE
             WHEN c.status <> 'active' THEN 10
@@ -218,7 +229,7 @@ _SELECT_CLAIM_CYCLE = sa.text(
         CASE WHEN e.event_sequence = c.next_event_sequence THEN 0 ELSE 1 END,
         e.received_at,
         e.id
-    LIMIT 1
+    LIMIT 256
     """
 )
 
@@ -270,6 +281,16 @@ _LOCK_CLAIM_CANDIDATE = sa.text(
           )
       )
     ORDER BY
+        CASE
+            WHEN c.status = 'pending'
+             AND e.event_type IN ('observation_updated', 'session_stopped') THEN 0
+            WHEN c.status = 'pending'
+             AND e.event_type = 'session_started'
+             AND e.event_sequence = 1 THEN 1
+            WHEN c.status = 'active' THEN 2
+            WHEN c.status = 'superseded' THEN 3
+            ELSE 4
+        END,
         e.control_generation DESC,
         CASE
             WHEN c.status <> 'active' THEN 10
@@ -607,6 +628,35 @@ _MARK_UNCLAIMED_EVENT_MANUAL = sa.text(
     """
 )
 
+_CLEANUP_CLOSED_CYCLE_EVENTS = sa.text(
+    """
+    UPDATE llm_gateway_events AS e
+    SET status = CASE WHEN c.status = 'manual' THEN 'manual' ELSE 'superseded' END,
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        error_stage = 'worker',
+        error_category = 'closed_cycle_pending',
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    FROM llm_gateway_control_cycles AS c
+    WHERE e.cycle_id = c.id
+      AND (
+          c.status IN ('stopped', 'manual')
+          OR (
+              c.status = 'superseded'
+              AND e.event_type IN ('session_started', 'observation_updated', 'session_stopped')
+          )
+      )
+      AND (
+          e.status IN ('pending', 'retryable_failed')
+          OR (c.status IN ('stopped', 'manual') AND e.status = 'processing')
+      )
+    RETURNING e.id
+    """
+)
+
 _STOP_CURRENT_RUNTIME = sa.text(
     """
     UPDATE llm_gateway_sessions
@@ -702,8 +752,32 @@ _SELECT_EVENT_QUEUE_METRICS = sa.text(
             0
         ) AS oldest_age_seconds
     FROM llm_gateway_events
-    WHERE status IN ('pending', 'retryable_failed')
-      AND next_attempt_at <= clock_timestamp()
+    JOIN llm_gateway_control_cycles AS c ON c.id = llm_gateway_events.cycle_id
+    WHERE c.status IN ('pending', 'active', 'superseded')
+      AND (
+          (
+              c.status IN ('pending', 'active', 'superseded')
+              AND llm_gateway_events.event_sequence = c.next_event_sequence
+          )
+          OR llm_gateway_events.event_type IN (
+              'skill_started', 'skill_finished', 'decision_rejected',
+              'chat_received', 'nearby_friend_chat_requested', 'chat_send_result'
+          )
+          OR (llm_gateway_events.event_type = 'session_stopped' AND c.status = 'active')
+          OR (llm_gateway_events.event_type = 'observation_updated' AND c.status = 'active')
+      )
+      AND (
+          (
+              llm_gateway_events.status IN ('pending', 'retryable_failed')
+              AND llm_gateway_events.next_attempt_at <= clock_timestamp()
+          )
+          OR (
+              llm_gateway_events.status = 'processing'
+              AND llm_gateway_events.lock_until IS NOT NULL
+              AND llm_gateway_events.lock_until <= clock_timestamp()
+          )
+      )
+      AND llm_gateway_events.attempt_count < :max_attempts
     """
 )
 
@@ -962,13 +1036,20 @@ class InboxRepository:
 
         while True:
             async with self._session_factory() as session, session.begin():
-                cycle_id = await session.scalar(
-                    _SELECT_CLAIM_CYCLE,
-                    {"max_attempts": max_attempts},
-                )
+                cycle_ids = (
+                    await session.execute(
+                        _SELECT_CLAIM_CYCLE,
+                        {"max_attempts": max_attempts},
+                    )
+                ).scalars().all()
+                cycle_id = None
+                for candidate_cycle_id in cycle_ids:
+                    if await try_acquire_cycle_advisory_lock(session, candidate_cycle_id):
+                        cycle_id = candidate_cycle_id
+                        break
                 if cycle_id is None:
+                    await self._after_claim_candidate_lock(None)
                     return None
-                await acquire_cycle_advisory_lock(session, cycle_id)
                 candidate_result = await session.execute(
                     _LOCK_CLAIM_CANDIDATE,
                     {"max_attempts": max_attempts, "cycle_id": cycle_id},
@@ -1257,6 +1338,7 @@ class InboxRepository:
         if max_attempts <= 0:
             raise ValueError("max_attempts must be positive")
         async with self._session_factory() as session, session.begin():
+            await session.execute(_CLEANUP_CLOSED_CYCLE_EVENTS)
             dead_letter_count = 0
             while True:
                 result = await session.execute(
@@ -1316,9 +1398,16 @@ class InboxRepository:
             count = await session.scalar(_COUNT_DEAD_LETTERS)
         return int(count or 0)
 
-    async def queue_metrics(self) -> QueueMetrics:
+    async def queue_metrics(self, *, max_attempts: int = 5) -> QueueMetrics:
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
         async with self._session_factory() as session:
-            row = (await session.execute(_SELECT_EVENT_QUEUE_METRICS)).mappings().one()
+            row = (
+                await session.execute(
+                    _SELECT_EVENT_QUEUE_METRICS,
+                    {"max_attempts": max_attempts},
+                )
+            ).mappings().one()
         return QueueMetrics(
             depth=int(row["depth"] or 0),
             oldest_age_seconds=float(row["oldest_age_seconds"] or 0.0),

@@ -100,6 +100,7 @@ def _claimed(
 class FakeRepository:
     claims: deque[ClaimedGatewayEvent | None]
     completions: list[tuple[ClaimedGatewayEvent, EventProcessResult]] = field(default_factory=list)
+    claimed_event_ids: list[str] = field(default_factory=list)
     sweep_result: int = 0
     dead_letter_count: int = 0
     completion_error: Exception | None = None
@@ -116,7 +117,10 @@ class FakeRepository:
         max_attempts: int,
     ) -> ClaimedGatewayEvent | None:
         del worker_id, claim_ttl_ms, max_attempts
-        return self.claims.popleft() if self.claims else None
+        event = self.claims.popleft() if self.claims else None
+        if event is not None:
+            self.claimed_event_ids.append(event.event_id)
+        return event
 
     async def complete_event(
         self,
@@ -189,6 +193,34 @@ async def test_gap_blocks_later_sequence() -> None:
     assert claimed_count == 0
     assert processed == []
     assert repository.completions == []
+
+
+async def test_worker_refills_completed_slots_without_waiting_for_slow_batch_member() -> None:
+    first = _claimed(event_id="event-1")
+    second = _claimed(event_id="event-2")
+    third = _claimed(event_id="event-3")
+    repository = FakeRepository(deque([first, second, third, None]))
+    first_release = asyncio.Event()
+
+    async def processor(event: ClaimedGatewayEvent) -> EventProcessResult:
+        if event.event_id == "event-1":
+            await first_release.wait()
+        else:
+            await asyncio.sleep(0.01)
+        return EventProcessResult("succeeded")
+
+    running = asyncio.create_task(_worker(repository, processor, max_parallelism=2).run_once())
+    try:
+        async def wait_for_third_claim() -> None:
+            while "event-3" not in repository.claimed_event_ids:
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(wait_for_third_claim(), timeout=0.2)
+    finally:
+        first_release.set()
+
+    assert await asyncio.wait_for(running, timeout=1) == 3
+    assert repository.claimed_event_ids == ["event-1", "event-2", "event-3"]
 
 
 async def test_worker_logs_event_processing_and_completion_elapsed_times(caplog) -> None:
@@ -327,7 +359,7 @@ async def test_long_processor_renews_claim_until_completion() -> None:
 
 
 async def test_long_processor_refreshes_worker_heartbeat_during_claim_renewal() -> None:
-    ticks = iter(float(value) for value in range(1, 20))
+    ticks = iter(float(value) for value in range(1, 100))
     registry = WorkerStatusRegistry(monotonic=lambda: next(ticks))
     repository = FakeRepository(deque([_claimed(lock_ttl_ms=150), None]))
 

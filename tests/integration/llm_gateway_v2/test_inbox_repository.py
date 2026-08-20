@@ -157,8 +157,12 @@ def _skill_finished_event(event_id: str = "event-finished", *, sequence: int = 2
     )
 
 
-def _observation_event(event_id: str, *, sequence: int) -> GatewayV2Event:
-    session_id = "session-1"
+def _observation_event(
+    event_id: str,
+    *,
+    sequence: int,
+    session_id: str = "session-1",
+) -> GatewayV2Event:
     lease_id = f"lease-{sequence}"
     lease = {
         "sessionId": session_id,
@@ -253,6 +257,127 @@ async def test_new_duplicate_mixed_batch_and_retry_are_durable(session_factory) 
     async with session_factory() as session:
         assert await session.scalar(sa.text("SELECT status FROM llm_gateway_control_cycles")) == "pending"
         assert await session.scalar(sa.text("SELECT status FROM llm_gateway_events LIMIT 1")) == "pending"
+
+
+async def test_new_session_start_is_not_starved_by_historical_active_observation(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await repository.accept_event_batch(
+        IDENTITY,
+        "trace-old-session",
+        (_event("old-start", session_id="old-session"),),
+    )
+    old_start = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert old_start is not None
+    assert await repository.complete_event(
+        old_start,
+        EventProcessResult("succeeded"),
+        max_attempts=5,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+
+    await repository.accept_event_batch(
+        IDENTITY,
+        "trace-mixed-backlog",
+        (
+            _observation_event("old-observation", sequence=2, session_id="old-session"),
+            _event("new-start", session_id="new-session"),
+        ),
+    )
+
+    claimed = await repository.claim_next_event(
+        worker_id="worker-2",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+
+    assert claimed is not None
+    assert claimed.event_id == "new-start"
+
+
+async def test_manual_cycle_pending_events_are_cleaned_and_excluded_from_queue(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await repository.accept_event_batch(
+        IDENTITY,
+        "trace-manual-cleanup",
+        (_event("manual-start"), _observation_event("manual-observation", sequence=2)),
+    )
+    started = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert started is not None
+    assert await repository.complete_event(
+        started,
+        EventProcessResult("manual", error_stage="agent", error_category="unsupported"),
+        max_attempts=5,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    async with session_factory() as session:
+        await session.execute(
+            sa.text(
+                "UPDATE llm_gateway_events "
+                "SET status='processing', attempt_count=1, lock_until=clock_timestamp() + interval '1 hour' "
+                "WHERE event_id='manual-observation'"
+            )
+        )
+        await session.commit()
+
+    assert await repository.sweep_expired_claims(max_attempts=5) == 0
+    queue = await repository.queue_metrics()
+    async with session_factory() as session:
+        observation_status = await session.scalar(
+            sa.text("SELECT status FROM llm_gateway_events WHERE event_id='manual-observation'")
+        )
+
+    assert observation_status == "manual"
+    assert queue.depth == 0
+
+
+async def test_superseded_cycle_convergence_events_are_cleaned_and_excluded_from_queue(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await repository.accept_event_batch(
+        IDENTITY,
+        "trace-superseded-cleanup",
+        (_event("superseded-start"), _observation_event("superseded-observation", sequence=2)),
+    )
+    started = await repository.claim_next_event(
+        worker_id="worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert started is not None
+    assert await repository.complete_event(
+        started,
+        EventProcessResult("succeeded"),
+        max_attempts=5,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    async with session_factory() as session:
+        await session.execute(
+            sa.text("UPDATE llm_gateway_control_cycles SET status='superseded'")
+        )
+        await session.commit()
+
+    assert await repository.sweep_expired_claims(max_attempts=5) == 0
+    queue = await repository.queue_metrics(max_attempts=5)
+    async with session_factory() as session:
+        observation_status = await session.scalar(
+            sa.text(
+                "SELECT status FROM llm_gateway_events "
+                "WHERE event_id='superseded-observation'"
+            )
+        )
+
+    assert observation_status == "superseded"
+    assert queue.depth == 0
 
 
 async def test_standalone_hosted_chat_event_is_admitted_without_a_control_cycle(session_factory) -> None:

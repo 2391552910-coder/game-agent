@@ -241,27 +241,56 @@ class EventWorker:
         if include_maintenance:
             await self._run_maintenance_once()
 
-        claimed: list[ClaimedGatewayEvent] = []
-        for _ in range(self._max_parallelism):
-            if self._drain_requested.is_set() or self._stop_requested.is_set():
-                break
-            event = await self._repository.claim_next_event(
-                worker_id=self._worker_id,
-                claim_ttl_ms=self._claim_ttl_ms,
-                max_attempts=self._max_attempts,
-            )
-            if event is None:
-                break
-            claimed.append(event)
-            self._status.mark_progress()
+        active_tasks: set[asyncio.Task[None]] = set()
+        claimed_count = 0
+        try:
+            while True:
+                completed = {task for task in active_tasks if task.done()}
+                if completed:
+                    await asyncio.gather(*completed)
+                    active_tasks.difference_update(completed)
 
-        self._status.heartbeat()
-        self._status.mark_successful_poll()
+                while (
+                    len(active_tasks) < self._max_parallelism
+                    and not self._drain_requested.is_set()
+                    and not self._stop_requested.is_set()
+                ):
+                    event = await self._repository.claim_next_event(
+                        worker_id=self._worker_id,
+                        claim_ttl_ms=self._claim_ttl_ms,
+                        max_attempts=self._max_attempts,
+                    )
+                    if event is None:
+                        break
+                    active_tasks.add(
+                        asyncio.create_task(
+                            self._process_one(event),
+                            name=f"llm-gateway-v2-process-slot-{event.event_id}",
+                        )
+                    )
+                    claimed_count += 1
+                    self._status.mark_progress()
 
-        if claimed:
-            await asyncio.gather(*(self._process_one(event) for event in claimed))
-        self._status.mark_poll_completed()
-        return len(claimed)
+                    completed = {task for task in active_tasks if task.done()}
+                    if completed:
+                        await asyncio.gather(*completed)
+                        active_tasks.difference_update(completed)
+
+                self._status.heartbeat()
+                self._status.mark_successful_poll()
+                if not active_tasks:
+                    break
+
+                completed, _ = await asyncio.wait(
+                    active_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                await asyncio.gather(*completed)
+                active_tasks.difference_update(completed)
+        finally:
+            await self._cancel_and_wait(*active_tasks)
+            self._status.mark_poll_completed()
+        return claimed_count
 
     async def _run_maintenance_once(self) -> None:
         swept_count = await self._repository.sweep_expired_claims(max_attempts=self._max_attempts)
@@ -427,7 +456,7 @@ class EventWorker:
         if not callable(queue_reader):
             return
         try:
-            queue = await queue_reader()
+            queue = await queue_reader(max_attempts=self._max_attempts)
         except Exception as error:
             logger.warning(
                 "LLM Gateway v2 event queue metrics refresh failed",

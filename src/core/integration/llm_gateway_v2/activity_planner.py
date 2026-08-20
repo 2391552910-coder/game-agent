@@ -263,6 +263,69 @@ class ActivityPlanCoordinator:
         self._step_authorizer = step_authorizer or _catalog_step_is_permitted
         self._scene_catalog = scene_catalog
 
+    async def resume(
+        self,
+        event: ClaimedGatewayEvent,
+        context: GatewayV2AgentContext,
+    ) -> ActivityPlanContext | None:
+        snapshot = await self._repository.load(event)
+        if (
+            snapshot.plan is None
+            or snapshot.plan.status != "active"
+            or not _current_step_is_executable(
+                snapshot.plan,
+                context,
+                self._step_authorizer,
+            )
+            or not _current_step_is_resolvable(
+                snapshot.plan,
+                context,
+                self._scene_catalog,
+            )
+        ):
+            return None
+        return await self._repository.prepare(event, context, proposed_plan=None)
+
+    async def prepare_deterministic(
+        self,
+        event: ClaimedGatewayEvent,
+        context: GatewayV2AgentContext,
+    ) -> ActivityPlanContext | None:
+        snapshot = await self._repository.load(event)
+        if (
+            snapshot.plan is not None
+            and snapshot.plan.status == "active"
+            and _current_step_is_executable(
+                snapshot.plan,
+                context,
+                self._step_authorizer,
+            )
+            and _current_step_is_resolvable(
+                snapshot.plan,
+                context,
+                self._scene_catalog,
+            )
+        ):
+            return await self._repository.prepare(event, context, proposed_plan=None)
+
+        version = max(
+            snapshot.version,
+            0 if snapshot.plan is None else snapshot.plan.version,
+        ) + 1
+        plan_id = self._plan_id_factory()
+        try:
+            plan = _safe_fallback_plan(
+                context,
+                plan_id,
+                version,
+                step_authorizer=self._step_authorizer,
+                scene_catalog=self._scene_catalog,
+                recent_actions=snapshot.recent_actions,
+            )
+        except ActivityPlanValidationError:
+            return None
+        return await self._repository.prepare(event, context, proposed_plan=plan)
+
     async def prepare(
         self,
         event: ClaimedGatewayEvent,

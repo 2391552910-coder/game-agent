@@ -17,6 +17,9 @@ TransactionOperation = Callable[[Any], Awaitable[T]]
 _CYCLE_ADVISORY_LOCK = sa.text(
     "SELECT pg_advisory_xact_lock(hashtextextended(:cycle_lock_key, 0))"
 )
+_TRY_CYCLE_ADVISORY_LOCK = sa.text(
+    "SELECT pg_try_advisory_xact_lock(hashtextextended(:cycle_lock_key, 0))"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +54,14 @@ async def acquire_cycle_advisory_lock(session: Any, cycle_id: UUID | str) -> Non
         _CYCLE_ADVISORY_LOCK,
         {"cycle_lock_key": str(cycle_id)},
     )
+
+
+async def try_acquire_cycle_advisory_lock(session: Any, cycle_id: UUID | str) -> bool:
+    acquired = await session.scalar(
+        _TRY_CYCLE_ADVISORY_LOCK,
+        {"cycle_lock_key": str(cycle_id)},
+    )
+    return bool(acquired)
 
 
 def retry_database_mutation(function: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:

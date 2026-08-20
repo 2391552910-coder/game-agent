@@ -1543,6 +1543,21 @@ class _ActivityCoordinator:
 
 
 @dataclass
+class _DeterministicActivityCoordinator:
+    context: ActivityPlanContext
+    calls: int = 0
+
+    async def prepare_deterministic(self, event, context) -> ActivityPlanContext:
+        del event, context
+        self.calls += 1
+        return self.context
+
+    async def prepare(self, event, context) -> ActivityPlanContext:
+        del event, context
+        raise AssertionError("deterministic Lobby bootstrap must not call the model planner")
+
+
+@dataclass
 class _TokenRecordingDecisionService:
     async def decide(self, context, *, user_id, tenant_id, activity_context=None):
         del context, user_id, tenant_id, activity_context
@@ -2265,6 +2280,114 @@ async def test_lobby_observation_bootstraps_scene_tornado_for_running_session() 
     assert repository.stored.request_body_json["skillName"] == "scene_tornado"
 
 
+async def test_lobby_transition_does_not_prepare_activity_plan_first() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "scene_tornado", "schemaVersion": "v1"},
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": name,
+                "schemaVersion": "v1",
+                "allowedArgs": [],
+                "missingArgs": [],
+            }
+            for name in ("scene_tornado", "dance_auto_schedule")
+        ],
+        allowed_skill_names=[],
+    )
+    payload["decisionContext"]["session"].update(
+        {
+            "SceneId": 1,
+            "SceneName": "Lobby",
+            "NavigationAvailable": False,
+            "SkillExecuting": False,
+            "LastSkillName": None,
+        }
+    )
+
+    class _ActivityPlanMustNotRun:
+        async def prepare(self, event, context):
+            del event, context
+            raise AssertionError("Lobby transition must not prepare an activity plan")
+
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=_Runner(result={})),
+        repository=repository,
+        activity_coordinator=_ActivityPlanMustNotRun(),
+    )
+
+    result = await planner(
+        _claimed_for_planner(_event(lease=payload)),
+        build_gateway_v2_agent_context(_event(lease=payload)),
+    )
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["skillName"] == "scene_tornado"
+
+
+async def test_lobby_transition_binds_deterministic_plan_for_next_skill() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "scene_tornado", "schemaVersion": "v1"},
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "coffee_auto_schedule", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": name,
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"] if name == "dance_auto_schedule" else [],
+                "missingArgs": ["score"] if name == "dance_auto_schedule" else [],
+            }
+            for name in (
+                "scene_tornado",
+                "dance_auto_schedule",
+                "coffee_auto_schedule",
+            )
+        ],
+        allowed_skill_names=[],
+    )
+    payload["decisionContext"]["session"].update(
+        {
+            "SceneId": 1,
+            "SceneName": "Lobby",
+            "NavigationAvailable": False,
+            "SkillExecuting": False,
+            "LastSkillName": None,
+        }
+    )
+    plan = create_plaza_social_plan("plan-lobby-bootstrap")
+    activity_context = ActivityPlanContext(
+        plan=plan,
+        binding=ActivityPlanBinding("plan-lobby-bootstrap", 1, "arrival", "arrival"),
+        recent_actions=(),
+        recent_failures=(),
+    )
+    coordinator = _DeterministicActivityCoordinator(activity_context)
+    repository = _PlanningRepository()
+    event = _event(lease=payload)
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=_Runner(result={})),
+        repository=repository,
+        activity_coordinator=coordinator,
+    )
+
+    result = await planner(
+        _claimed_for_planner(event),
+        build_gateway_v2_agent_context(event),
+    )
+
+    assert result == EventProcessResult("succeeded")
+    assert coordinator.calls == 1
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["skillName"] == "scene_tornado"
+    assert repository.activity_bindings == [activity_context.binding]
+
+
 async def test_lobby_does_not_repeat_scene_tornado_after_last_attempt() -> None:
     payload = _lease(
         available_skills=[{"skillName": "scene_tornado", "schemaVersion": "v1"}],
@@ -2394,7 +2517,7 @@ async def test_agent_failures_become_durable_worker_retries(
     assert planner.repository.plans == 0
 
 
-async def test_agent_timeout_plans_v2_wait_when_lease_allows_wait() -> None:
+async def test_agent_timeout_staggers_wait_when_only_low_value_skill_is_available() -> None:
     repository = _PlanningRepository()
     planner = GatewayV2DecisionPlanner(
         decision_service=GatewayV2DecisionService(
@@ -2413,21 +2536,53 @@ async def test_agent_timeout_plans_v2_wait_when_lease_allows_wait() -> None:
     assert result == EventProcessResult("succeeded")
     assert repository.plans == 1
     assert repository.stored is not None
-    assert repository.stored.request_body_json == {
-        "traceId": "trace-1",
-        "contractVersion": "llm-gateway-http-v2",
-        "sessionId": "session-1",
-        "decisionId": "decision-stable-1",
-        "decisionLeaseId": "lease-1",
-        "stateVersion": 7,
-        "controlGeneration": 3,
-        "ttlMs": 30_000,
-        "action": "wait",
-        "waitMs": 1_000,
-    }
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert 5_000 <= repository.stored.request_body_json["waitMs"] <= 30_000
 
 
-async def test_agent_overload_plans_v2_wait_when_lease_allows_wait() -> None:
+async def test_agent_timeout_staggers_wait_when_no_local_skill_is_authorized() -> None:
+    payload = _lease(
+        allowed_actions=["wait", "no_op"],
+        available_skills=[],
+        hints=[],
+        allowed_skill_names=[],
+    )
+    event = _event(lease=payload)
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(
+            runner=_BlockingRunner(),
+            timeout_seconds=0.01,
+        ),
+        repository=repository,
+    )
+
+    result = await asyncio.wait_for(
+        planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event)),
+        timeout=1,
+    )
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert 5_000 <= repository.stored.request_body_json["waitMs"] <= 30_000
+
+
+async def test_agent_overload_plans_lease_authorized_local_skill_before_wait() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            }
+        ],
+    )
+    event = _event(lease=payload)
     repository = _PlanningRepository()
     limiter = AgentCapacityLimiter(limit=1, acquire_timeout_seconds=0.01)
     planner = GatewayV2DecisionPlanner(
@@ -2438,21 +2593,117 @@ async def test_agent_overload_plans_v2_wait_when_lease_allows_wait() -> None:
         ),
         repository=repository,
     )
-    claimed = _claimed_for_planner()
-
     async with limiter.slot():
         result = await asyncio.wait_for(
-            planner(claimed, build_gateway_v2_agent_context(claimed.event)),
+            planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event)),
             timeout=1,
         )
 
     assert result == EventProcessResult("succeeded")
     assert repository.plans == 1
     assert repository.stored is not None
-    assert repository.stored.request_body_json["action"] == "wait"
+    assert repository.stored.request_body_json["action"] == "call_skill"
+    assert repository.stored.request_body_json["skillName"] == "dance_auto_schedule"
+    assert 70 <= repository.stored.request_body_json["arguments"]["score"] <= 120
 
 
-async def test_stale_queued_event_skips_agent_and_plans_wait_before_deadline() -> None:
+async def test_agent_overload_uses_local_skill_when_wait_is_not_authorized() -> None:
+    payload = _lease(
+        allowed_actions=["call_skill"],
+        available_skills=[
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            }
+        ],
+    )
+    event = _event(lease=payload)
+    repository = _PlanningRepository()
+    limiter = AgentCapacityLimiter(limit=1, acquire_timeout_seconds=0.01)
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(
+            runner=_BlockingRunner(),
+            timeout_seconds=10,
+            capacity_limiter=limiter,
+        ),
+        repository=repository,
+    )
+
+    async with limiter.slot():
+        result = await asyncio.wait_for(
+            planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event)),
+            timeout=1,
+        )
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "call_skill"
+    assert repository.stored.request_body_json["skillName"] == "dance_auto_schedule"
+
+
+async def test_stale_event_resumes_existing_activity_step_before_deadline_fallback() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            }
+        ],
+    )
+    event = _event(lease=payload)
+    plan = record_step_terminal(
+        create_plaza_social_plan("plan-stale-event"),
+        "arrival",
+        succeeded=True,
+    )
+    activity_context = ActivityPlanContext(
+        plan=plan,
+        binding=ActivityPlanBinding("plan-stale-event", 1, "dance", "activity"),
+        recent_actions=(),
+        recent_failures=(),
+    )
+
+    class _ResumableActivityCoordinator:
+        async def resume(self, claimed, context):
+            del claimed, context
+            return activity_context
+
+        async def prepare(self, claimed, context):
+            del claimed, context
+            raise AssertionError("stale events must not generate a new activity plan")
+
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    claimed = _claimed_for_planner(event)
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        activity_coordinator=_ResumableActivityCoordinator(),
+        decision_target_seconds=55,
+        now_ms=lambda: event.occurred_at_ms + 55_000,
+    )
+
+    result = await planner(claimed, build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "call_skill"
+    assert repository.stored.request_body_json["skillName"] == "dance_auto_schedule"
+    assert repository.activity_bindings == [activity_context.binding]
+
+
+async def test_stale_queued_event_skips_agent_and_plans_local_skill_before_wait() -> None:
     runner = _Runner()
     repository = _PlanningRepository()
     claimed = _claimed_for_planner()
@@ -2469,7 +2720,7 @@ async def test_stale_queued_event_skips_agent_and_plans_wait_before_deadline() -
     assert runner.calls == 0
     assert repository.stored is not None
     assert repository.stored.request_body_json["action"] == "wait"
-    assert repository.stored.request_body_json["waitMs"] == 1_000
+    assert 5_000 <= repository.stored.request_body_json["waitMs"] <= 30_000
 
 
 async def test_agent_timeout_remains_retryable_when_lease_forbids_wait() -> None:
