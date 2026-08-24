@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from contextlib import suppress
@@ -65,7 +66,11 @@ class GatewayV2RuntimeMetricsSnapshot:
     agent_latency: LatencySnapshot
     callback_latency: LatencySnapshot
     event_ack_latency: LatencySnapshot
+    event_admission_outcomes: dict[str, int]
+    event_admission_latency: LatencySnapshot
     decision_superseded_total: int
+    activity_capacity_reserved: dict[str, int]
+    activity_capacity_full: dict[str, int]
 
 
 class _LatencyHistogram:
@@ -122,7 +127,11 @@ class GatewayV2RuntimeMetrics:
         self._agent_latency = _LatencyHistogram()
         self._callback_latency = _LatencyHistogram()
         self._event_ack_latency = _LatencyHistogram()
+        self._event_admission_outcomes: dict[str, int] = {}
+        self._event_admission_latency = _LatencyHistogram()
         self._decision_superseded_total = 0
+        self._activity_capacity_reserved: dict[str, int] = {}
+        self._activity_capacity_full: dict[str, int] = {}
 
     def task_started(self, worker_type: str) -> None:
         with self._lock:
@@ -169,11 +178,26 @@ class GatewayV2RuntimeMetrics:
         with self._lock:
             self._event_ack_latency.observe(elapsed_ms)
 
+    def record_event_admission(self, outcome: str, *, elapsed_ms: float) -> None:
+        if not outcome:
+            raise ValueError("outcome must not be empty")
+        with self._lock:
+            self._event_admission_outcomes[outcome] = (
+                self._event_admission_outcomes.get(outcome, 0) + 1
+            )
+            self._event_admission_latency.observe(elapsed_ms)
+
     def record_decision_superseded(self, count: int = 1) -> None:
         if count <= 0:
             raise ValueError("superseded count must be positive")
         with self._lock:
             self._decision_superseded_total += count
+
+    def record_activity_capacity_reserved(self, skill_name: str) -> None:
+        self._record_activity_capacity(self._activity_capacity_reserved, skill_name)
+
+    def record_activity_capacity_full(self, skill_name: str) -> None:
+        self._record_activity_capacity(self._activity_capacity_full, skill_name)
 
     def snapshot(self) -> GatewayV2RuntimeMetricsSnapshot:
         with self._lock:
@@ -188,7 +212,11 @@ class GatewayV2RuntimeMetrics:
                 agent_latency=self._agent_latency.snapshot(),
                 callback_latency=self._callback_latency.snapshot(),
                 event_ack_latency=self._event_ack_latency.snapshot(),
+                event_admission_outcomes=dict(self._event_admission_outcomes),
+                event_admission_latency=self._event_admission_latency.snapshot(),
                 decision_superseded_total=self._decision_superseded_total,
+                activity_capacity_reserved=dict(self._activity_capacity_reserved),
+                activity_capacity_full=dict(self._activity_capacity_full),
             )
 
     def log_snapshot(self, *, agent_capacity: AgentCapacitySnapshot) -> None:
@@ -200,6 +228,11 @@ class GatewayV2RuntimeMetrics:
             "gateway_event_dead_letter_total=%d gateway_event_ack_calls=%d "
             "gateway_event_ack_p50_ms=%.1f gateway_event_ack_p95_ms=%.1f "
             "gateway_event_ack_p99_ms=%.1f gateway_event_ack_max_ms=%.1f "
+            "gateway_event_admission_calls=%d gateway_event_admission_p50_ms=%.1f "
+            "gateway_event_admission_p95_ms=%.1f gateway_event_admission_p99_ms=%.1f "
+            "gateway_event_admission_max_ms=%.1f gateway_event_admission_accepted=%d "
+            "gateway_event_admission_unavailable=%d gateway_event_admission_conflict=%d "
+            "gateway_event_admission_invalid=%d gateway_event_admission_error=%d "
             "event_worker_active=%d event_worker_limit=%d event_queue_depth=%d "
             "event_oldest_age_seconds=%.3f event_dead_letters=%d "
             "decision_queue_depth=%d decision_oldest_age_seconds=%.3f decision_inflight=%d "
@@ -221,7 +254,9 @@ class GatewayV2RuntimeMetrics:
             "callback_rejected_generation_mismatch=%d "
             "callback_rejected_state_version_mismatch=%d "
             "callback_rejected_session_not_running=%d callback_rejected_invalid_payload=%d "
-            "callback_rejected_other=%d",
+            "callback_rejected_other=%d activity_capacity_reserved_total=%d "
+            "activity_capacity_full_total=%d activity_capacity_reserved_by_skill=%s "
+            "activity_capacity_full_by_skill=%s",
             snapshot.worker_active.get("event", 0),
             snapshot.oldest_age_seconds.get("event", 0.0),
             snapshot.worker_active.get("event", 0),
@@ -232,6 +267,16 @@ class GatewayV2RuntimeMetrics:
             snapshot.event_ack_latency.p95_ms,
             snapshot.event_ack_latency.p99_ms,
             snapshot.event_ack_latency.max_ms,
+            snapshot.event_admission_latency.count,
+            snapshot.event_admission_latency.p50_ms,
+            snapshot.event_admission_latency.p95_ms,
+            snapshot.event_admission_latency.p99_ms,
+            snapshot.event_admission_latency.max_ms,
+            snapshot.event_admission_outcomes.get("accepted", 0),
+            snapshot.event_admission_outcomes.get("unavailable", 0),
+            snapshot.event_admission_outcomes.get("conflict", 0),
+            snapshot.event_admission_outcomes.get("invalid", 0),
+            snapshot.event_admission_outcomes.get("error", 0),
             snapshot.worker_active.get("event", 0),
             snapshot.worker_limit.get("event", 0),
             snapshot.queue_depth.get("event", 0),
@@ -286,7 +331,32 @@ class GatewayV2RuntimeMetrics:
             snapshot.callback_outcomes.get("rejected_session_not_running", 0),
             snapshot.callback_outcomes.get("rejected_invalid_payload", 0),
             snapshot.callback_outcomes.get("rejected_other", 0),
+            sum(snapshot.activity_capacity_reserved.values()),
+            sum(snapshot.activity_capacity_full.values()),
+            json.dumps(
+                snapshot.activity_capacity_reserved,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            json.dumps(
+                snapshot.activity_capacity_full,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
         )
+
+    def _record_activity_capacity(
+        self,
+        counters: dict[str, int],
+        skill_name: str,
+    ) -> None:
+        normalized = skill_name.strip()
+        if not normalized:
+            raise ValueError("skill_name must not be empty")
+        with self._lock:
+            counters[normalized] = counters.get(normalized, 0) + 1
 
     def _require_worker(self, worker_type: str) -> None:
         if worker_type not in self._worker_limit:

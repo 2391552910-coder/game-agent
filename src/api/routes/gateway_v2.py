@@ -79,6 +79,14 @@ def _record_event_ack_latency(request: Request, started: float) -> None:
         metrics.record_event_ack(elapsed_ms=(time.monotonic() - started) * 1_000)
 
 
+def _record_event_admission(request: Request, outcome: str, started: float) -> None:
+    runtime = getattr(request.app.state, "gateway_v2_runtime", None)
+    metrics = getattr(runtime, "metrics", None)
+    record = getattr(metrics, "record_event_admission", None)
+    if callable(record):
+        record(outcome, elapsed_ms=(time.monotonic() - started) * 1_000)
+
+
 @router.get(
     "/capabilities",
     response_model=GatewayV2Capabilities,
@@ -163,6 +171,7 @@ async def receive_events(
 
     try:
         response = await accept_gateway_event_batch(identity, envelope)
+        _record_event_admission(request, "accepted", started)
         _record_event_ack_latency(request, started)
         logger.info(
             "LLM Gateway v2 event HTTP response sent",
@@ -176,12 +185,16 @@ async def receive_events(
         )
         return response
     except EventBatchInvalid:
+        _record_event_admission(request, "invalid", started)
         return _error(400, "bad_request", "bad request")
     except EventContentConflict:
+        _record_event_admission(request, "conflict", started)
         return _error(409, "event_content_conflict", "event content conflicts with stored event")
     except EventServiceUnavailable:
+        _record_event_admission(request, "unavailable", started)
         return _error(503, "service_unavailable", "service unavailable")
     except Exception as error:
+        _record_event_admission(request, "error", started)
         logger.error(
             "LLM Gateway v2 event admission failed",
             extra={

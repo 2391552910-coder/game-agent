@@ -45,6 +45,12 @@ class Settings(BaseSettings):
 
     # ── PostgreSQL ──
     postgres_dsn: PostgresDsn = Field(...)
+    postgres_pool_size: int = Field(default=20, ge=1, le=100)
+    postgres_max_overflow: int = Field(default=40, ge=0, le=100)
+    postgres_pool_timeout_seconds: float = Field(default=5.0, gt=0, le=60.0)
+    postgres_event_admission_pool_size: int = Field(default=16, ge=1, le=100)
+    postgres_event_admission_max_overflow: int = Field(default=16, ge=0, le=100)
+    postgres_event_admission_pool_timeout_seconds: float = Field(default=1.0, gt=0, le=60.0)
 
     # ── Neo4j ──
     neo4j_uri: str = Field(default="bolt://localhost:7687")
@@ -131,9 +137,17 @@ class Settings(BaseSettings):
     llm_gateway_v2_agent_timeout_seconds: float = Field(default=60.0, gt=0, le=300.0)
     llm_gateway_v2_agent_max_concurrency: int = Field(default=16, ge=1, le=256)
     llm_gateway_v2_agent_acquire_timeout_seconds: float = Field(default=0.25, gt=0, le=60.0)
+    llm_gateway_v2_event_admission_max_concurrency: int = Field(default=32, ge=1, le=256)
+    llm_gateway_v2_event_admission_acquire_timeout_seconds: float = Field(default=1.0, gt=0, le=60.0)
+    llm_gateway_v2_event_admission_timeout_seconds: float = Field(default=5.0, gt=0, le=60.0)
     llm_gateway_v2_decision_target_seconds: float = Field(default=55.0, gt=0, le=300.0)
     llm_gateway_v2_lease_ttl_ms: int = Field(default=600_000, ge=1_000, le=86_400_000)
     llm_gateway_v2_lease_safety_window_ms: int = Field(default=5_000, ge=0, le=3_600_000)
+    llm_gateway_v2_activity_capacity_ttl_seconds: int = Field(
+        default=1_800,
+        ge=60,
+        le=86_400,
+    )
     llm_gateway_v2_force_skills: Annotated[tuple[str, ...], NoDecode] = Field(default=())
     llm_gateway_v2_rag_mode: Literal["naive", "hybrid", "mix"] = "naive"
     llm_gateway_v2_rag_top_k: int = Field(default=10, ge=1, le=200)

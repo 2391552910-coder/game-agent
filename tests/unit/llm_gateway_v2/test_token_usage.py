@@ -6,12 +6,15 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from prometheus_client import CollectorRegistry, generate_latest
 
 from src.core.integration.llm_gateway_v2.token_usage import (
     GatewayV2TokenUsageCallback,
     GatewayV2TokenUsageReporter,
     GatewayV2TokenUsageTracker,
+    MyAgentLLMUsageCallback,
     gateway_v2_token_callback_config,
+    llm_call_config,
 )
 
 
@@ -250,6 +253,83 @@ def test_callback_config_exists_only_inside_v2_decision_scope() -> None:
     finally:
         tracker.complete_decision(scope, decision_status="succeeded")
     assert gateway_v2_token_callback_config() is None
+
+
+async def test_myagent_llm_usage_callback_records_call_and_token_metrics() -> None:
+    registry = CollectorRegistry()
+    callback = MyAgentLLMUsageCallback(registry=registry)
+    run_id = uuid4()
+
+    await callback.on_chat_model_start(
+        {"kwargs": {"model_name": "deepseek-v4-flash-0731"}},
+        [[]],
+        run_id=run_id,
+        metadata={
+            "flow": "gateway_v2",
+            "node": "gateway_v2_action_reasoning",
+            "model_type": "default",
+        },
+    )
+    await callback.on_llm_end(
+        _response(
+            usage_metadata={
+                "input_tokens": 90,
+                "output_tokens": 15,
+                "total_tokens": 105,
+            }
+        ),
+        run_id=run_id,
+    )
+
+    output = generate_latest(registry).decode()
+    assert (
+        'myagent_llm_calls_total{flow="gateway_v2",model="deepseek-v4-flash-0731",'
+        'model_type="default",node="gateway_v2_action_reasoning",status="success"} 1.0'
+    ) in output
+    assert (
+        'myagent_llm_tokens_total{direction="input",flow="gateway_v2",'
+        'model="deepseek-v4-flash-0731",model_type="default",'
+        'node="gateway_v2_action_reasoning"} 90.0'
+    ) in output
+    assert (
+        'myagent_llm_tokens_total{direction="output",flow="gateway_v2",'
+        'model="deepseek-v4-flash-0731",model_type="default",'
+        'node="gateway_v2_action_reasoning"} 15.0'
+    ) in output
+    assert (
+        'myagent_llm_tokens_total{direction="total",flow="gateway_v2",'
+        'model="deepseek-v4-flash-0731",model_type="default",'
+        'node="gateway_v2_action_reasoning"} 105.0'
+    ) in output
+    assert gateway_v2_token_callback_config() is None
+
+
+def test_llm_call_config_merges_token_callback_and_metric_metadata() -> None:
+    tracker = GatewayV2TokenUsageTracker()
+    scope = tracker.start_decision(
+        event_id="event-call-config",
+        session_id="session-call-config",
+        control_generation=3,
+        decision_lease_id="lease-call-config",
+    )
+    try:
+        config = llm_call_config(
+            flow="gateway_v2",
+            node="activity_plan_generation",
+            model_type="default",
+            metadata={"request_id": "request-1", "node": "caller-node"},
+        )
+        assert len(config["callbacks"]) == 2
+        assert isinstance(config["callbacks"][0], GatewayV2TokenUsageCallback)
+        assert isinstance(config["callbacks"][1], MyAgentLLMUsageCallback)
+        assert config["metadata"] == {
+            "request_id": "request-1",
+            "flow": "gateway_v2",
+            "node": "activity_plan_generation",
+            "model_type": "default",
+        }
+    finally:
+        tracker.complete_decision(scope, decision_status="succeeded")
 
 
 async def test_reporter_logs_zero_interval_and_lifetime_summary(

@@ -65,6 +65,12 @@ def _mock_settings():
     mock.rerank_max_concurrency = 1
     # PostgreSQL
     mock.postgres_dsn = "postgresql+asyncpg://test:test@localhost/test"
+    mock.postgres_pool_size = 20
+    mock.postgres_max_overflow = 40
+    mock.postgres_pool_timeout_seconds = 5.0
+    mock.postgres_event_admission_pool_size = 16
+    mock.postgres_event_admission_max_overflow = 16
+    mock.postgres_event_admission_pool_timeout_seconds = 1.0
     # Neo4j
     mock.neo4j_uri = "bolt://localhost:7687"
     mock.neo4j_username = "neo4j"
@@ -129,9 +135,13 @@ def _mock_settings():
     mock.llm_gateway_v2_agent_timeout_seconds = 30.0
     mock.llm_gateway_v2_agent_max_concurrency = 16
     mock.llm_gateway_v2_agent_acquire_timeout_seconds = 0.25
+    mock.llm_gateway_v2_event_admission_max_concurrency = 32
+    mock.llm_gateway_v2_event_admission_acquire_timeout_seconds = 1.0
+    mock.llm_gateway_v2_event_admission_timeout_seconds = 5.0
     mock.llm_gateway_v2_decision_target_seconds = 55.0
     mock.llm_gateway_v2_lease_ttl_ms = 600_000
     mock.llm_gateway_v2_lease_safety_window_ms = 5_000
+    mock.llm_gateway_v2_activity_capacity_ttl_seconds = 1_800
     mock.llm_gateway_v2_rag_mode = "naive"
     mock.llm_gateway_v2_rag_top_k = 10
     mock.llm_gateway_v2_rag_chunk_top_k = 10

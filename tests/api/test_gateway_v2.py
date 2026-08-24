@@ -148,7 +148,7 @@ async def test_valid_signed_batch_returns_exact_ack_without_tenant_api_key(clien
             "duplicateEventIds": [],
         }
     )
-    metrics = SimpleNamespace(record_event_ack=Mock())
+    metrics = SimpleNamespace(record_event_ack=Mock(), record_event_admission=Mock())
     original_runtime = getattr(app.state, "gateway_v2_runtime", None)
     app.state.gateway_v2_runtime = SimpleNamespace(metrics=metrics)
     try:
@@ -167,6 +167,11 @@ async def test_valid_signed_batch_returns_exact_ack_without_tenant_api_key(clien
     assert envelope.trace_id == "trace-1"
     metrics.record_event_ack.assert_called_once()
     assert metrics.record_event_ack.call_args.kwargs["elapsed_ms"] >= 0
+    metrics.record_event_admission.assert_called_once_with(
+        "accepted",
+        elapsed_ms=metrics.record_event_admission.call_args.kwargs["elapsed_ms"],
+    )
+    assert metrics.record_event_admission.call_args.kwargs["elapsed_ms"] >= 0
 
 
 @pytest.mark.asyncio
@@ -357,15 +362,32 @@ async def test_repository_failures_have_stable_protocol_responses(
     status_code: int,
     code: str,
 ) -> None:
+    from src.api.main import app
+
     _configure(_mock_settings)
-    with patch(
-        "src.api.routes.gateway_v2.accept_gateway_event_batch",
-        AsyncMock(side_effect=error),
-    ):
-        response = await _post(client, _payload())
+    metrics = SimpleNamespace(record_event_admission=Mock())
+    original_runtime = getattr(app.state, "gateway_v2_runtime", None)
+    app.state.gateway_v2_runtime = SimpleNamespace(metrics=metrics)
+    try:
+        with patch(
+            "src.api.routes.gateway_v2.accept_gateway_event_batch",
+            AsyncMock(side_effect=error),
+        ):
+            response = await _post(client, _payload())
+    finally:
+        app.state.gateway_v2_runtime = original_runtime
 
     assert response.status_code == status_code
     assert response.json() == {"error": {"code": code, "message": response.json()["error"]["message"]}}
+    expected_outcome = {
+        EventContentConflict: "conflict",
+        EventServiceUnavailable: "unavailable",
+    }[type(error)]
+    metrics.record_event_admission.assert_called_once_with(
+        expected_outcome,
+        elapsed_ms=metrics.record_event_admission.call_args.kwargs["elapsed_ms"],
+    )
+    assert metrics.record_event_admission.call_args.kwargs["elapsed_ms"] >= 0
 
 
 @pytest.mark.asyncio
@@ -427,19 +449,32 @@ async def test_unknown_failure_returns_and_logs_sanitized_internal_error(
     _mock_settings,
     caplog,
 ) -> None:
+    from src.api.main import app
+
     _configure(_mock_settings)
+    metrics = SimpleNamespace(record_event_admission=Mock())
+    original_runtime = getattr(app.state, "gateway_v2_runtime", None)
+    app.state.gateway_v2_runtime = SimpleNamespace(metrics=metrics)
     caplog.set_level("ERROR", logger="src.api.routes.gateway_v2")
-    with patch(
-        "src.api.routes.gateway_v2.accept_gateway_event_batch",
-        AsyncMock(side_effect=RuntimeError("secret database detail")),
-    ):
-        response = await _post(client, _payload())
+    try:
+        with patch(
+            "src.api.routes.gateway_v2.accept_gateway_event_batch",
+            AsyncMock(side_effect=RuntimeError("secret database detail")),
+        ):
+            response = await _post(client, _payload())
+    finally:
+        app.state.gateway_v2_runtime = original_runtime
 
     assert response.status_code == 500
     assert response.json() == {"error": {"code": "internal_error", "message": "internal error"}}
     assert "secret database detail" not in response.text
     assert "secret database detail" not in caplog.text
     assert "LLM Gateway v2 event admission failed" in caplog.text
+    metrics.record_event_admission.assert_called_once_with(
+        "error",
+        elapsed_ms=metrics.record_event_admission.call_args.kwargs["elapsed_ms"],
+    )
+    assert metrics.record_event_admission.call_args.kwargs["elapsed_ms"] >= 0
 
 
 def test_v2_events_route_is_registered_at_stable_path() -> None:

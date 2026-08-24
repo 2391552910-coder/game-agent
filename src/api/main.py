@@ -15,17 +15,21 @@ configure_logging()
 
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
+from fastapi.responses import JSONResponse, Response  # noqa: E402
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest  # noqa: E402
 from pydantic import SecretStr  # noqa: E402
 
 from src.api.middleware import PUBLIC_PATHS, AuthMiddleware, RateLimitMiddleware  # noqa: E402
 from src.api.routes import analysis, gateway_v2, providers, quota, tenants, webhooks  # noqa: E402
 from src.config import settings  # noqa: E402
-from src.core.infrastructure.db import close_db, init_db  # noqa: E402
+from src.core.infrastructure.db import async_session_factory, close_db, init_db  # noqa: E402
 from src.core.infrastructure.redis import close_redis, init_redis  # noqa: E402
 from src.core.integration.gateway_event_queue import (  # noqa: E402
     start_gateway_event_worker,
     stop_gateway_event_worker,
+)
+from src.core.integration.llm_gateway_v2.activity_capacity_repository import (  # noqa: E402
+    ActivityCapacityRepository,
 )
 from src.core.integration.llm_gateway_v2.activity_plan_repository import (  # noqa: E402
     ActivityPlanRepository,
@@ -69,12 +73,13 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (  # noqa: E402
 from src.core.integration.llm_gateway_v2.terminal_repository import TerminalRepository  # noqa: E402
 from src.core.integration.llm_gateway_v2.token_usage import (  # noqa: E402
     GatewayV2TokenUsageReporter,
+    myagent_llm_metrics_registry,
 )
 from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegistry  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-PUBLIC_PATHS.update({"/ready", "/api/gateway/v2/events", "/api/gateway/v2/capabilities"})
+PUBLIC_PATHS.update({"/ready", "/metrics", "/api/gateway/v2/events", "/api/gateway/v2/capabilities"})
 
 event_worker_status = WorkerStatusRegistry()
 decision_worker_status = WorkerStatusRegistry()
@@ -109,7 +114,10 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         "agent_timeout_seconds=%s decision_timeout_seconds=%s "
         "event_parallelism=%s decision_parallelism=%s agent_concurrency=%s "
         "agent_acquire_timeout_seconds=%s decision_target_seconds=%s "
-        "lease_ttl_ms=%s lease_safety_window_ms=%s force_skills=%s",
+        "lease_ttl_ms=%s lease_safety_window_ms=%s "
+        "activity_capacity_ttl_seconds=%s db_pool=%s+%s "
+        "event_admission_pool=%s+%s event_admission_pool_timeout_seconds=%s "
+        "force_skills=%s",
         getattr(runtime_settings, "llm_gateway_v1_enabled", False),
         getattr(runtime_settings, "llm_gateway_v2_enabled", False),
         getattr(runtime_settings, "llm_provider_source", "env"),
@@ -126,6 +134,12 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         getattr(runtime_settings, "llm_gateway_v2_decision_target_seconds", ""),
         getattr(runtime_settings, "llm_gateway_v2_lease_ttl_ms", ""),
         getattr(runtime_settings, "llm_gateway_v2_lease_safety_window_ms", ""),
+        getattr(runtime_settings, "llm_gateway_v2_activity_capacity_ttl_seconds", ""),
+        getattr(runtime_settings, "postgres_pool_size", ""),
+        getattr(runtime_settings, "postgres_max_overflow", ""),
+        getattr(runtime_settings, "postgres_event_admission_pool_size", ""),
+        getattr(runtime_settings, "postgres_event_admission_max_overflow", ""),
+        getattr(runtime_settings, "postgres_event_admission_pool_timeout_seconds", ""),
         ",".join(getattr(runtime_settings, "llm_gateway_v2_force_skills", ())) or "disabled",
     )
 
@@ -205,7 +219,11 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             "decision": settings.llm_gateway_v2_decision_max_parallelism,
         }
     )
-    inbox_repository = InboxRepository(metrics=runtime_metrics)
+    inbox_repository = InboxRepository(
+        async_session_factory,
+        metrics=runtime_metrics,
+    )
+    activity_capacity_repository = ActivityCapacityRepository()
     outbox_repository = OutboxRepository(
         lease_ttl_ms=getattr(settings, "llm_gateway_v2_lease_ttl_ms", 600_000),
         lease_safety_window_ms=getattr(
@@ -214,6 +232,11 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             5_000,
         ),
         metrics=runtime_metrics,
+        activity_capacity_ttl_seconds=getattr(
+            settings,
+            "llm_gateway_v2_activity_capacity_ttl_seconds",
+            1_800,
+        ),
     )
     terminal_repository = TerminalRepository()
     activity_repository = ActivityPlanRepository()
@@ -255,6 +278,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             ),
             step_authorizer=gateway_v2_activity_skill_is_permitted,
             scene_catalog=scene_catalog,
+            capacity_repository=activity_capacity_repository,
         ),
         scene_catalog=scene_catalog,
         force_skills=settings.llm_gateway_v2_force_skills,
@@ -263,6 +287,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             "llm_gateway_v2_decision_target_seconds",
             55.0,
         ),
+        activity_capacity_repository=activity_capacity_repository,
     )
     event_dispatcher = GatewayV2EventDispatcher(
         context_repository=inbox_repository,
@@ -497,3 +522,11 @@ async def readiness_check(request: Request) -> JSONResponse:
     snapshot = await service.snapshot()
     status_code = 200 if snapshot.status == "ready" else 503
     return JSONResponse(status_code=status_code, content=snapshot.to_dict())
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    return Response(
+        content=generate_latest(myagent_llm_metrics_registry),
+        headers={"Content-Type": CONTENT_TYPE_LATEST},
+    )

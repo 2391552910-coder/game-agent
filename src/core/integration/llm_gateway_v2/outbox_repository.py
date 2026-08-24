@@ -13,6 +13,11 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.infrastructure.db import async_session_factory
+from src.core.integration.llm_gateway_v2.activity_capacity import (
+    DEFAULT_ACTIVITY_CAPACITY_POLICY,
+    ActivityCapacityPolicy,
+    scene_id_from_snapshot,
+)
 from src.core.integration.llm_gateway_v2.contracts import DecisionRejectedEvent, SessionStoppedEvent
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent
 from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics, QueueMetrics
@@ -44,6 +49,14 @@ class DecisionPlanConflictError(Exception):
 class DecisionPlanUnavailableError(Exception):
     def __init__(self) -> None:
         super().__init__("gateway v2 decision plan unavailable")
+
+
+class ActivityCapacityFullError(Exception):
+    def __init__(self, skill_name: str, capacity_key: str, limit: int) -> None:
+        self.skill_name = skill_name
+        self.capacity_key = capacity_key
+        self.limit = limit
+        super().__init__(f"activity capacity is full for {skill_name}")
 
 
 @dataclass(frozen=True)
@@ -238,19 +251,52 @@ _INSERT_PLANNED_DECISION = sa.text(
         gateway_id, session_id, decision_id, decision_lease_id,
         control_generation, state_version, lease_expires_at_ms, action,
         request_body_json, request_body_bytes, body_hash, status,
-        activity_plan_id, activity_plan_version, activity_step_id, activity_phase
+        activity_plan_id, activity_plan_version, activity_step_id, activity_phase,
+        activity_capacity_key, activity_capacity_limit, activity_capacity_expires_at
     ) VALUES (
         :id, :tenant_id, :cycle_id, :source_event_id, :action_tracking_id,
         :gateway_id, :session_id, :decision_id, :decision_lease_id,
         :control_generation, :state_version, :lease_expires_at_ms, :action,
         :request_body_json, :request_body_bytes, :body_hash, 'planned',
-        :activity_plan_id, :activity_plan_version, :activity_step_id, :activity_phase
+        :activity_plan_id, :activity_plan_version, :activity_step_id, :activity_phase,
+        :activity_capacity_key, :activity_capacity_limit,
+        CASE
+            WHEN :activity_capacity_key IS NULL THEN NULL
+            WHEN :lease_expires_at_ms IS NULL
+                THEN clock_timestamp() + (:activity_capacity_ttl_seconds * interval '1 second')
+            ELSE LEAST(
+                clock_timestamp() + (:activity_capacity_ttl_seconds * interval '1 second'),
+                to_timestamp(:lease_expires_at_ms / 1000.0)
+            )
+        END
     )
     RETURNING id
     """
 ).bindparams(
     sa.bindparam("request_body_json", type_=JSONB),
     sa.bindparam("request_body_bytes", type_=sa.LargeBinary()),
+    sa.bindparam("lease_expires_at_ms", type_=sa.BigInteger()),
+    sa.bindparam("activity_capacity_ttl_seconds", type_=sa.Integer()),
+    sa.bindparam("activity_capacity_key", type_=sa.String(length=512)),
+    sa.bindparam("activity_capacity_limit", type_=sa.Integer()),
+)
+
+_COUNT_ACTIVE_CAPACITY_RESERVATIONS = sa.text(
+    """
+    SELECT count(DISTINCT d.id)
+    FROM llm_gateway_decisions AS d
+    LEFT JOIN llm_gateway_skill_calls AS sc ON sc.decision_row_id = d.id
+    WHERE d.activity_capacity_key = :activity_capacity_key
+      AND d.activity_capacity_expires_at > clock_timestamp()
+      AND (
+          d.status IN ('planned', 'sending', 'retryable_failed')
+          OR (d.status = 'accepted' AND sc.status IN ('pending', 'started'))
+      )
+    """
+)
+
+_LOCK_ACTIVITY_CAPACITY = sa.text(
+    "SELECT pg_advisory_xact_lock(hashtextextended(:activity_capacity_key, 1))"
 )
 
 _MARK_PLAN_MANUAL = sa.text(
@@ -787,6 +833,8 @@ class OutboxRepository:
         lease_ttl_ms: int | None = None,
         lease_safety_window_ms: int = 0,
         metrics: GatewayV2RuntimeMetrics | None = None,
+        activity_capacity_policy: ActivityCapacityPolicy = DEFAULT_ACTIVITY_CAPACITY_POLICY,
+        activity_capacity_ttl_seconds: int = 1_800,
     ) -> None:
         if lease_ttl_ms is None:
             if lease_safety_window_ms != 0:
@@ -797,12 +845,16 @@ class OutboxRepository:
                 lease_ttl_ms=lease_ttl_ms,
                 safety_window_ms=lease_safety_window_ms,
             )
+        if activity_capacity_ttl_seconds <= 0:
+            raise ValueError("activity_capacity_ttl_seconds must be positive")
         self._session_factory = session_factory
         self._effect_service = effect_service or TerminalEffectService()
         self._decision_id_factory = decision_id_factory or (lambda: str(uuid4()))
         self._lease_ttl_ms = lease_ttl_ms
         self._lease_safety_window_ms = lease_safety_window_ms
         self._metrics = metrics
+        self._activity_capacity_policy = activity_capacity_policy
+        self._activity_capacity_ttl_seconds = activity_capacity_ttl_seconds
 
     async def find_by_source_event(self, event: ClaimedGatewayEvent) -> PlannedDecision | None:
         try:
@@ -869,6 +921,37 @@ class OutboxRepository:
                         conflict_category = "decision_lease_consumed"
 
                 if conflict_category is None:
+                    capacity_key: str | None = None
+                    capacity_limit: int | None = None
+                    if isinstance(action, GatewayV2CallSkillAction):
+                        capacity_key = self._activity_capacity_policy.capacity_key(
+                            event.gateway_id,
+                            action.skill_name,
+                            context.session_snapshot,
+                        )
+                        capacity_limit = self._activity_capacity_policy.limit_for(
+                            action.skill_name,
+                            scene_id=scene_id_from_snapshot(context.session_snapshot),
+                        )
+                        if capacity_key is not None and capacity_limit is not None:
+                            await session.execute(
+                                _LOCK_ACTIVITY_CAPACITY,
+                                {"activity_capacity_key": capacity_key},
+                            )
+                            active_count = await session.scalar(
+                                _COUNT_ACTIVE_CAPACITY_RESERVATIONS,
+                                {"activity_capacity_key": capacity_key},
+                            )
+                            if int(active_count or 0) >= capacity_limit:
+                                if self._metrics is not None:
+                                    self._metrics.record_activity_capacity_full(
+                                        action.skill_name
+                                    )
+                                raise ActivityCapacityFullError(
+                                    action.skill_name,
+                                    capacity_key,
+                                    capacity_limit,
+                                )
                     decision_id = self._decision_id_factory()
                     frozen = freeze_gateway_v2_decision(decision_id, event.trace_id, context, action)
                     identity_result = await session.execute(
@@ -949,10 +1032,17 @@ class OutboxRepository:
                                 "activity_phase": (
                                     None if activity_binding is None else activity_binding.phase
                                 ),
+                                "activity_capacity_key": capacity_key,
+                                "activity_capacity_limit": capacity_limit,
+                                "activity_capacity_ttl_seconds": self._activity_capacity_ttl_seconds,
                             },
                         )
                         if inserted.scalar_one_or_none() is None:
                             raise RuntimeError("planned decision insert returned no identity")
+                        if capacity_key is not None and self._metrics is not None:
+                            self._metrics.record_activity_capacity_reserved(
+                                action.skill_name
+                            )
                         planned = PlannedDecision(
                             row_id=row_id,
                             decision_id=decision_id,
@@ -964,7 +1054,12 @@ class OutboxRepository:
                             action_tracking_id=action_tracking_id,
                             created=True,
                         )
-        except (DecisionPlanFencedError, DecisionPlanConflictError, DecisionPlanUnavailableError):
+        except (
+            ActivityCapacityFullError,
+            DecisionPlanFencedError,
+            DecisionPlanConflictError,
+            DecisionPlanUnavailableError,
+        ):
             raise
         except IntegrityError:
             existing = await self.find_by_source_event(event)

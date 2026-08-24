@@ -14,6 +14,7 @@ from uuid import UUID
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import LLMResult
+from prometheus_client import REGISTRY, CollectorRegistry, Counter
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +426,192 @@ def gateway_v2_token_callback_config() -> dict[str, list[AsyncCallbackHandler]] 
     if _current_decision.get() is None:
         return None
     return {"callbacks": [gateway_v2_token_usage_callback]}
+
+
+@dataclass(frozen=True)
+class _LLMMetricRun:
+    flow: str
+    node: str
+    model_type: str
+    model: str
+
+
+class MyAgentLLMUsageCallback(AsyncCallbackHandler):
+    """Record low-cardinality LLM call and token metrics for Gateway V2."""
+
+    def __init__(self, *, registry: CollectorRegistry = REGISTRY) -> None:
+        self._calls = Counter(
+            "myagent_llm_calls",
+            "LLM calls by Gateway V2 flow and outcome.",
+            labelnames=("flow", "model", "model_type", "node", "status"),
+            registry=registry,
+        )
+        self._tokens = Counter(
+            "myagent_llm_tokens",
+            "LLM token usage by Gateway V2 flow.",
+            labelnames=("direction", "flow", "model", "model_type", "node"),
+            registry=registry,
+        )
+        self._runs: dict[str, _LLMMetricRun] = {}
+        self._lock = Lock()
+
+    async def on_chat_model_start(
+        self,
+        serialized: dict[str, Any],
+        messages: list[list[Any]],
+        *,
+        run_id: UUID,
+        **kwargs: Any,
+    ) -> None:
+        del messages
+        self._remember_run(
+            serialized,
+            run_id=run_id,
+            metadata=kwargs.get("metadata"),
+            invocation_params=kwargs.get("invocation_params"),
+        )
+
+    async def on_llm_start(
+        self,
+        serialized: dict[str, Any],
+        prompts: list[str],
+        *,
+        run_id: UUID,
+        **kwargs: Any,
+    ) -> None:
+        del prompts
+        self._remember_run(
+            serialized,
+            run_id=run_id,
+            metadata=kwargs.get("metadata"),
+            invocation_params=kwargs.get("invocation_params"),
+        )
+
+    async def on_llm_end(
+        self,
+        response: LLMResult,
+        *,
+        run_id: UUID,
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        run = self._forget_run(run_id)
+        usage = extract_token_usage(response)
+        if run is None:
+            run = _LLMMetricRun("gateway_v2", "unknown", "unknown", "unknown")
+        self._calls.labels(
+            flow=run.flow,
+            model=run.model,
+            model_type=run.model_type,
+            node=run.node,
+            status="success",
+        ).inc()
+        if usage is not None:
+            labels = {
+                "flow": run.flow,
+                "model": run.model,
+                "model_type": run.model_type,
+                "node": run.node,
+            }
+            self._tokens.labels(direction="input", **labels).inc(usage.input_tokens)
+            self._tokens.labels(direction="output", **labels).inc(usage.output_tokens)
+            self._tokens.labels(direction="total", **labels).inc(usage.total_tokens)
+
+    async def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        **kwargs: Any,
+    ) -> None:
+        del error, kwargs
+        run = self._forget_run(run_id)
+        if run is None:
+            run = _LLMMetricRun("gateway_v2", "unknown", "unknown", "unknown")
+        self._calls.labels(
+            flow=run.flow,
+            model=run.model,
+            model_type=run.model_type,
+            node=run.node,
+            status="error",
+        ).inc()
+
+    def _remember_run(
+        self,
+        serialized: Mapping[str, Any],
+        *,
+        run_id: UUID,
+        metadata: object,
+        invocation_params: object,
+    ) -> None:
+        metadata_map = metadata if isinstance(metadata, Mapping) else {}
+        serialized_kwargs = serialized.get("kwargs")
+        serialized_map = serialized_kwargs if isinstance(serialized_kwargs, Mapping) else {}
+        invocation_map = invocation_params if isinstance(invocation_params, Mapping) else {}
+        run = _LLMMetricRun(
+            flow=_metric_label(metadata_map.get("flow"), "gateway_v2"),
+            node=_metric_label(metadata_map.get("node"), "unknown"),
+            model_type=_metric_label(metadata_map.get("model_type"), "unknown"),
+            model=_metric_label(
+                metadata_map.get("model")
+                or serialized_map.get("model_name")
+                or serialized_map.get("model")
+                or invocation_map.get("model_name")
+                or invocation_map.get("model"),
+                "unknown",
+            ),
+        )
+        with self._lock:
+            self._runs.setdefault(str(run_id), run)
+
+    def _forget_run(self, run_id: UUID) -> _LLMMetricRun | None:
+        with self._lock:
+            return self._runs.pop(str(run_id), None)
+
+
+def _metric_label(value: object, fallback: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:128]
+    return fallback
+
+
+myagent_llm_metrics_registry = REGISTRY
+myagent_llm_usage_callback = MyAgentLLMUsageCallback(registry=myagent_llm_metrics_registry)
+
+
+def llm_call_config(
+    *,
+    flow: str,
+    node: str,
+    model_type: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one LangChain invocation config for an instrumented LLM call.
+
+    Gateway V2 calls need both the decision-scoped token callback and the
+    low-cardinality labels consumed by MyAgent metrics.  Keeping the merge in
+    one place prevents a node from accidentally dropping either side when it
+    passes ``config`` to ``ainvoke``.
+    """
+    callback_config = gateway_v2_token_callback_config() or {}
+    config = dict(callback_config)
+    callbacks = list(config.get("callbacks") or [])
+    if myagent_llm_usage_callback not in callbacks:
+        callbacks.append(myagent_llm_usage_callback)
+    config["callbacks"] = callbacks
+
+    merged_metadata = dict(config.get("metadata") or {})
+    if metadata is not None:
+        merged_metadata.update(metadata)
+    merged_metadata.update(
+        {
+            "flow": flow,
+            "node": node,
+            "model_type": model_type,
+        }
+    )
+    config["metadata"] = merged_metadata
+    return config
 
 
 class GatewayV2TokenUsageReporter:

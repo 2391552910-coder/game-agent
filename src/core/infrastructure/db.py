@@ -6,18 +6,32 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.config import settings
 
-# 创建异步引擎
-# pool_pre_ping=True 每次从连接池取连接前先 ping，自动剔除失效连接
-# pool_size=20 连接池保持的常驻连接数
-# max_overflow=40 连接池满时允许额外创建的连接数，超过则阻塞等待
-# pool_recycle=3600 连接存活超过 1 小时后强制重建，防止数据库主动断开
-engine = create_async_engine(
-    str(settings.postgres_dsn),
-    echo=False,
-    pool_pre_ping=True,
-    pool_size=20,
-    max_overflow=40,
-    pool_recycle=3600,
+
+def _create_engine(*, pool_size: int, max_overflow: int, pool_timeout: float):
+    # pool_pre_ping 防止复用已经被 PostgreSQL/网络关闭的连接。
+    return create_async_engine(
+        str(settings.postgres_dsn),
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=3600,
+    )
+
+
+# Worker、outbox 和普通业务查询共享此连接池。
+engine = _create_engine(
+    pool_size=settings.postgres_pool_size,
+    max_overflow=settings.postgres_max_overflow,
+    pool_timeout=settings.postgres_pool_timeout_seconds,
+)
+
+# HTTP 事件接收使用独立池，避免模型 worker 的长事务耗尽 ACK 连接。
+event_admission_engine = _create_engine(
+    pool_size=settings.postgres_event_admission_pool_size,
+    max_overflow=settings.postgres_event_admission_max_overflow,
+    pool_timeout=settings.postgres_event_admission_pool_timeout_seconds,
 )
 
 # 异步会话工厂
@@ -26,6 +40,14 @@ engine = create_async_engine(
 # autoflush=False 手动控制 flush 时机
 async_session_factory = async_sessionmaker(
     engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
+event_admission_session_factory = async_sessionmaker(
+    event_admission_engine,
     class_=AsyncSession,
     expire_on_commit=False,
     autocommit=False,
@@ -61,6 +83,8 @@ async def init_db() -> None:
     """
     async with engine.begin() as conn:
         await conn.execute(text("SELECT 1"))
+    async with event_admission_engine.begin() as conn:
+        await conn.execute(text("SELECT 1"))
 
 
 async def close_db() -> None:
@@ -69,4 +93,5 @@ async def close_db() -> None:
 
     释放所有连接，确保进程干净退出。
     """
+    await event_admission_engine.dispose()
     await engine.dispose()

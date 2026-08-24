@@ -21,7 +21,10 @@ def test_runtime_metrics_track_bounded_workers_queues_and_latency() -> None:
     metrics.record_agent_result("timeout", elapsed_ms=55_000)
     metrics.record_callback_result("accepted", elapsed_ms=40)
     metrics.record_event_ack(elapsed_ms=12)
+    metrics.record_event_admission("accepted", elapsed_ms=10)
     metrics.record_decision_superseded(2)
+    metrics.record_activity_capacity_reserved("dance_auto_schedule")
+    metrics.record_activity_capacity_full("dance_auto_schedule")
     metrics.task_finished("event")
 
     snapshot = metrics.snapshot()
@@ -36,7 +39,11 @@ def test_runtime_metrics_track_bounded_workers_queues_and_latency() -> None:
     assert snapshot.agent_latency.p99_ms >= 55_000
     assert snapshot.callback_latency.count == 1
     assert snapshot.event_ack_latency.count == 1
+    assert snapshot.event_admission_outcomes == {"accepted": 1}
+    assert snapshot.event_admission_latency.count == 1
     assert snapshot.decision_superseded_total == 2
+    assert snapshot.activity_capacity_reserved == {"dance_auto_schedule": 1}
+    assert snapshot.activity_capacity_full == {"dance_auto_schedule": 1}
 
 
 def test_runtime_metrics_log_contains_agent_capacity_without_identifiers(caplog) -> None:
@@ -54,6 +61,9 @@ def test_runtime_metrics_log_contains_agent_capacity_without_identifiers(caplog)
     assert "agent_limit=16" in message
     assert "event_worker_limit=32" in message
     assert "gateway_event_ack_calls=0" in message
+    assert "gateway_event_admission_calls=0" in message
     assert "decision_superseded_total=0" in message
+    assert "activity_capacity_reserved_total=0" in message
+    assert "activity_capacity_full_total=0" in message
     assert "session_id" not in message
     assert "event_id" not in message

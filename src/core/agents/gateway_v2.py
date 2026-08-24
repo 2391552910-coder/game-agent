@@ -30,7 +30,7 @@ from src.core.integration.llm_gateway_v2.decision_service import (
 )
 from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
 from src.core.integration.llm_gateway_v2.token_usage import (
-    gateway_v2_token_callback_config,
+    llm_call_config,
 )
 from src.core.llm.factory import get_llm
 
@@ -175,11 +175,13 @@ async def gateway_v2_action_reasoning_node(state: GatewayV2AgentState) -> Gatewa
         raw_action_list: GatewayV2ActionList | None = None
         for attempt in range(1, _MAX_STRUCTURED_OUTPUT_ATTEMPTS + 1):
             try:
-                callback_config = gateway_v2_token_callback_config()
-                invocation = (
-                    chain.ainvoke(prompt_values)
-                    if callback_config is None
-                    else chain.ainvoke(prompt_values, config=callback_config)
+                invocation = chain.ainvoke(
+                    prompt_values,
+                    config=llm_call_config(
+                        flow="gateway_v2",
+                        node="gateway_v2_action_reasoning",
+                        model_type="default",
+                    ),
                 )
                 raw_action_list = await asyncio.wait_for(
                     invocation,

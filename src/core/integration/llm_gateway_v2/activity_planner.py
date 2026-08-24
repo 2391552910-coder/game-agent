@@ -12,6 +12,11 @@ from uuid import uuid4
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.core.agents.gateway_v2_models import GatewayV2AgentContext
+from src.core.integration.llm_gateway_v2.activity_capacity import ActivityCapacitySnapshot
+from src.core.integration.llm_gateway_v2.activity_capacity_repository import (
+    ActivityCapacityRepository,
+    ActivityCapacityUnavailableError,
+)
 from src.core.integration.llm_gateway_v2.activity_plan import (
     CANONICAL_NON_CHAT_SKILLS,
     ActivityPlan,
@@ -34,7 +39,7 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (
     scene_id_from_snapshot,
 )
 from src.core.integration.llm_gateway_v2.token_usage import (
-    gateway_v2_token_callback_config,
+    llm_call_config,
 )
 from src.core.llm.factory import get_llm
 
@@ -225,11 +230,13 @@ class GatewayV2ActivityPlanGenerator:
                 ensure_ascii=False,
             ),
         }
-        callback_config = gateway_v2_token_callback_config()
-        invocation = (
-            chain.ainvoke(values)
-            if callback_config is None
-            else chain.ainvoke(values, config=callback_config)
+        invocation = chain.ainvoke(
+            values,
+            config=llm_call_config(
+                flow="gateway_v2",
+                node="activity_plan_generation",
+                model_type="default",
+            ),
         )
         generated = await asyncio.wait_for(invocation, timeout=self._timeout_seconds)
         return ActivityPlanProposal.model_validate(generated)
@@ -256,12 +263,30 @@ class ActivityPlanCoordinator:
         plan_id_factory: Callable[[], str] | None = None,
         step_authorizer: ActivityStepAuthorizer | None = None,
         scene_catalog: SceneCatalog | None = None,
+        capacity_repository: ActivityCapacityRepository | None = None,
     ) -> None:
         self._repository = repository
         self._generator = generator
         self._plan_id_factory = plan_id_factory or (lambda: f"activity-plan-{uuid4().hex}")
         self._step_authorizer = step_authorizer or _catalog_step_is_permitted
         self._scene_catalog = scene_catalog
+        self._capacity_repository = capacity_repository
+
+    async def _capacity_snapshot(
+        self,
+        event: ClaimedGatewayEvent,
+        context: GatewayV2AgentContext,
+    ) -> ActivityCapacitySnapshot | None:
+        if self._capacity_repository is None:
+            return None
+        try:
+            return await self._capacity_repository.snapshot(event.gateway_id, context)
+        except ActivityCapacityUnavailableError:
+            logger.warning(
+                "Activity capacity snapshot unavailable; preserving current plan selection",
+                extra={"event_id": event.event_id, "gateway_id": event.gateway_id},
+            )
+            return None
 
     async def resume(
         self,
@@ -269,6 +294,7 @@ class ActivityPlanCoordinator:
         context: GatewayV2AgentContext,
     ) -> ActivityPlanContext | None:
         snapshot = await self._repository.load(event)
+        capacity_snapshot = await self._capacity_snapshot(event, context)
         if (
             snapshot.plan is None
             or snapshot.plan.status != "active"
@@ -282,6 +308,7 @@ class ActivityPlanCoordinator:
                 context,
                 self._scene_catalog,
             )
+            or not _current_step_has_capacity(snapshot.plan, capacity_snapshot)
         ):
             return None
         return await self._repository.prepare(event, context, proposed_plan=None)
@@ -292,6 +319,7 @@ class ActivityPlanCoordinator:
         context: GatewayV2AgentContext,
     ) -> ActivityPlanContext | None:
         snapshot = await self._repository.load(event)
+        capacity_snapshot = await self._capacity_snapshot(event, context)
         if (
             snapshot.plan is not None
             and snapshot.plan.status == "active"
@@ -305,6 +333,7 @@ class ActivityPlanCoordinator:
                 context,
                 self._scene_catalog,
             )
+            and _current_step_has_capacity(snapshot.plan, capacity_snapshot)
         ):
             return await self._repository.prepare(event, context, proposed_plan=None)
 
@@ -321,6 +350,7 @@ class ActivityPlanCoordinator:
                 step_authorizer=self._step_authorizer,
                 scene_catalog=self._scene_catalog,
                 recent_actions=snapshot.recent_actions,
+                capacity_snapshot=capacity_snapshot,
             )
         except ActivityPlanValidationError:
             return None
@@ -332,6 +362,7 @@ class ActivityPlanCoordinator:
         context: GatewayV2AgentContext,
     ) -> ActivityPlanContext | None:
         snapshot = await self._repository.load(event)
+        capacity_snapshot = await self._capacity_snapshot(event, context)
         if (
             snapshot.plan is not None
             and snapshot.plan.status == "active"
@@ -345,6 +376,7 @@ class ActivityPlanCoordinator:
                 context,
                 self._scene_catalog,
             )
+            and _current_step_has_capacity(snapshot.plan, capacity_snapshot)
         ):
             return await self._repository.prepare(event, context, proposed_plan=None)
 
@@ -369,6 +401,7 @@ class ActivityPlanCoordinator:
                 plan_version=version,
                 recent_actions=snapshot.recent_actions,
                 step_authorizer=self._step_authorizer,
+                capacity_snapshot=capacity_snapshot,
             )
             plan = materialize_activity_plan(
                 proposal,
@@ -398,6 +431,7 @@ class ActivityPlanCoordinator:
                     step_authorizer=self._step_authorizer,
                     scene_catalog=self._scene_catalog,
                     recent_actions=snapshot.recent_actions,
+                    capacity_snapshot=capacity_snapshot,
                 )
             except ActivityPlanValidationError as fallback_error:
                 logger.warning(
@@ -452,6 +486,16 @@ def _current_step_is_resolvable(
     return target is not None and target.scene_id == scene_id
 
 
+def _current_step_has_capacity(
+    plan: ActivityPlan,
+    capacity_snapshot: ActivityCapacitySnapshot | None,
+) -> bool:
+    if capacity_snapshot is None:
+        return True
+    skill_name = plan.current_step().skill_name
+    return skill_name is None or capacity_snapshot.is_available(skill_name)
+
+
 def _is_lobby(snapshot: Mapping[str, Any]) -> bool:
     scene_id = snapshot.get("SceneId", snapshot.get("sceneId"))
     scene_name = snapshot.get("SceneName", snapshot.get("sceneName"))
@@ -472,6 +516,7 @@ def _safe_fallback_plan(
     step_authorizer: ActivityStepAuthorizer,
     scene_catalog: SceneCatalog | None = None,
     recent_actions: tuple[Mapping[str, Any], ...] = (),
+    capacity_snapshot: ActivityCapacitySnapshot | None = None,
 ) -> ActivityPlan:
     lobby = _is_lobby(context.session_snapshot)
     available = {
@@ -494,6 +539,7 @@ def _safe_fallback_plan(
         for skill_name in _SAFE_FALLBACK_SKILL_ORDER
         if (skill_name, "v1") in available
         and (lobby or skill_name != "scene_tornado")
+        and (capacity_snapshot is None or capacity_snapshot.is_available(skill_name))
     ]
     if len(ordered) < 3:
         raise ActivityPlanValidationError(
@@ -518,10 +564,27 @@ def _safe_fallback_plan(
             raise ActivityPlanValidationError(
                 "Gateway lease does not authorize an available activity skill"
             )
-        first = authorized_first_steps[
-            _stable_rotation(role_identity, len(authorized_first_steps))
-        ]
+        if capacity_snapshot is None:
+            first = authorized_first_steps[
+                _stable_rotation(role_identity, len(authorized_first_steps))
+            ]
+        else:
+            weighted = capacity_snapshot.weighted_order(
+                [skill_name for skill_name, _ in authorized_first_steps],
+                identity=role_identity,
+                plan_version=version,
+            )
+            if not weighted:
+                raise ActivityPlanValidationError("No activity has remaining capacity")
+            first = (weighted[0], "v1")
     remaining = [identity for identity in ordered if identity != first]
+    if capacity_snapshot is not None:
+        weighted = capacity_snapshot.weighted_order(
+            [skill_name for skill_name, _ in remaining],
+            identity=role_identity,
+            plan_version=version,
+        )
+        remaining = [(skill_name, "v1") for skill_name in weighted]
     if first != ("move_to", "v1") and ("move_to", "v1") in remaining:
         remaining.remove(("move_to", "v1"))
         rotation = _stable_rotation(role_identity, len(remaining) + 1)
@@ -608,6 +671,7 @@ def diversify_activity_plan_proposal(
     plan_version: int,
     recent_actions: tuple[Mapping[str, Any], ...],
     step_authorizer: ActivityStepAuthorizer,
+    capacity_snapshot: ActivityCapacitySnapshot | None = None,
 ) -> ActivityPlanProposal:
     if scene_catalog is None:
         return proposal
@@ -624,6 +688,7 @@ def diversify_activity_plan_proposal(
         if step not in forced
         and step.skill_name is not None
         and (lobby or step.skill_name != "scene_tornado")
+        and (capacity_snapshot is None or capacity_snapshot.is_available(step.skill_name))
     ]
     social = [step for step in proposal.steps if step.skill_name is None]
     scene_candidates = _scene_candidates_for_context(
@@ -643,6 +708,7 @@ def diversify_activity_plan_proposal(
         role_identity=role_identity,
         plan_version=plan_version,
         step_authorizer=step_authorizer,
+        capacity_snapshot=capacity_snapshot,
     )
     if preferred is not None:
         existing_preferred = next(
@@ -699,6 +765,14 @@ def diversify_activity_plan_proposal(
     else:
         rotation = _stable_rotation(role_identity, len(others)) if others else 0
         others = others[rotation:] + others[:rotation]
+    if capacity_snapshot is not None:
+        weighted_skills = capacity_snapshot.weighted_order(
+            [step.skill_name for step in others if step.skill_name is not None],
+            identity=role_identity,
+            plan_version=plan_version,
+        )
+        rank = {skill_name: index for index, skill_name in enumerate(weighted_skills)}
+        others.sort(key=lambda step: rank.get(str(step.skill_name), len(rank)))
     if not lobby:
         others = _avoid_immediate_successful_skill_repeat(
             others,
@@ -768,6 +842,7 @@ def _role_preferred_activity_step(
     role_identity: str,
     plan_version: int,
     step_authorizer: ActivityStepAuthorizer,
+    capacity_snapshot: ActivityCapacitySnapshot | None = None,
 ) -> ActivityPlanProposalStep | None:
     available = {(skill.skill_name, skill.schema_version) for skill in context.available_skills}
     candidates = [
@@ -775,11 +850,22 @@ def _role_preferred_activity_step(
         for skill_name in _ROLE_DIVERSITY_SKILL_ORDER
         if (skill_name, "v1") in available
         and step_authorizer(context, skill_name, "v1")
+        and (capacity_snapshot is None or capacity_snapshot.is_available(skill_name))
     ]
     if not candidates:
         return None
     bucket = _stable_role_bucket(role_identity)
-    skill_name = candidates[(bucket + max(plan_version - 1, 0)) % len(candidates)]
+    if capacity_snapshot is None:
+        skill_name = candidates[(bucket + max(plan_version - 1, 0)) % len(candidates)]
+    else:
+        ordered = capacity_snapshot.weighted_order(
+            candidates,
+            identity=role_identity,
+            plan_version=plan_version,
+        )
+        if not ordered:
+            return None
+        skill_name = ordered[0]
     return proposal.steps[0].model_copy(
         update={
             "step_id": f"role-{plan_version}-{bucket % 100000}-{skill_name}",

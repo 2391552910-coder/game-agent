@@ -32,6 +32,7 @@ from src.core.agents.gateway_v2_prompts import (
     GATEWAY_V2_ACTION_REASONING_USER,
 )
 from src.core.agents.models import RecommendedAction
+from src.core.integration.llm_gateway_v2.activity_capacity import ActivityCapacitySnapshot
 from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlanProposal,
     create_plaza_social_plan,
@@ -55,7 +56,7 @@ from src.core.integration.llm_gateway_v2.decision_service import (
     select_gateway_v2_action,
 )
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent, EventProcessResult
-from src.core.integration.llm_gateway_v2.outbox_repository import PlannedDecision
+from src.core.integration.llm_gateway_v2.outbox_repository import ActivityCapacityFullError, PlannedDecision
 from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCatalog,
     SceneCoordinates,
@@ -65,6 +66,7 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (
 from src.core.integration.llm_gateway_v2.token_usage import (
     GatewayV2TokenUsageTracker,
     gateway_v2_token_callback_config,
+    gateway_v2_token_usage_callback,
 )
 
 
@@ -1182,7 +1184,7 @@ async def test_action_reasoning_retries_one_invalid_structured_response(
     assert result["reasoned_actions"][0]["skillName"] == "jump"
 
 
-async def test_action_reasoning_passes_v2_token_callback_config(
+async def test_action_reasoning_passes_v2_call_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = build_gateway_v2_agent_context(_event())
@@ -1194,7 +1196,7 @@ async def test_action_reasoning_passes_v2_token_callback_config(
             assert method == "json_mode"
 
             async def invoke(_: Any, config: dict[str, Any]) -> GatewayV2ActionList:
-                captured["marker"] = config.get("metadata", {}).get("token_scope_marker")
+                captured["config"] = config
                 return GatewayV2ActionList(actions=(_skill("jump"),))
 
             return RunnableLambda(invoke)
@@ -1206,8 +1208,16 @@ async def test_action_reasoning_passes_v2_token_callback_config(
     monkeypatch.setattr(gateway_v2_module, "get_llm", fake_get_llm)
     monkeypatch.setattr(
         gateway_v2_module,
-        "gateway_v2_token_callback_config",
-        lambda: {"metadata": {"token_scope_marker": "action-reasoning"}},
+        "llm_call_config",
+        lambda **_: {
+            "callbacks": [gateway_v2_token_usage_callback],
+            "metadata": {
+                "token_scope_marker": "action-reasoning",
+                "flow": "gateway_v2",
+                "node": "gateway_v2_action_reasoning",
+                "model_type": "default",
+            },
+        },
         raising=False,
     )
 
@@ -1220,7 +1230,13 @@ async def test_action_reasoning_passes_v2_token_callback_config(
     )
 
     assert result.get("errors", []) == []
-    assert captured == {"marker": "action-reasoning"}
+    assert gateway_v2_token_usage_callback in captured["config"]["callbacks"].handlers
+    assert captured["config"]["metadata"] == {
+        "token_scope_marker": "action-reasoning",
+        "flow": "gateway_v2",
+        "node": "gateway_v2_action_reasoning",
+        "model_type": "default",
+    }
 
 
 def test_v2_graph_uses_only_realtime_decision_nodes() -> None:
@@ -1530,6 +1546,188 @@ class _PlanningRepository:
         )
         return self.stored
 
+
+@dataclass
+class _CapacityRaceRepository(_PlanningRepository):
+    capacity_failures: int = 1
+    capacity_attempts: int = 0
+
+    async def plan_decision(self, event, context, action, activity_binding=None) -> PlannedDecision:
+        self.capacity_attempts += 1
+        if action.action == "call_skill" and self.capacity_failures > 0:
+            self.capacity_failures -= 1
+            raise ActivityCapacityFullError(
+                action.skill_name,
+                "gateway-1:scene:8:skill:dance_auto_schedule",
+                33,
+            )
+        return await super().plan_decision(event, context, action, activity_binding)
+
+
+@dataclass
+class _CapacitySnapshotRepository:
+    async def snapshot(self, gateway_id: str, context) -> ActivityCapacitySnapshot:
+        del gateway_id, context
+        return ActivityCapacitySnapshot(
+            scene_id=8,
+            active_by_skill={"dance_auto_schedule": 33},
+        )
+
+
+async def test_capacity_race_replaces_full_activity_with_trusted_move_to() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "move_to", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            },
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "allowedArgs": ["target.x", "target.y", "target.z"],
+                "missingArgs": ["target.x", "target.y", "target.z"],
+            },
+        ],
+    )
+    payload["decisionContext"]["session"].update(
+        {
+            "SceneId": 8,
+            "SceneName": "CJ_JiuBa_Zhong_suo",
+            "RoleId": "capacity-race-role",
+        }
+    )
+    event = _event(lease=payload)
+    dance = GatewayV2CallSkillAction(
+        action="call_skill",
+        skillName="dance_auto_schedule",
+        schemaVersion="v1",
+        arguments={"score": 90},
+        reason="model selected dance",
+    )
+    repository = _CapacityRaceRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(
+            runner=_Runner(
+                result={"selected_action": dance.model_dump(mode="json", by_alias=True)}
+            )
+        ),
+        repository=repository,
+        activity_capacity_repository=_CapacitySnapshotRepository(),
+        scene_catalog=SceneCatalog(
+            [
+                SceneTarget(
+                    target_id="scene:8:navigation:plaza:1",
+                    scene_id=8,
+                    scene_name="CJ_JiuBa_Zhong_suo",
+                    kind="navigation",
+                    activity="plaza",
+                    point_key="1",
+                    coordinates=SceneCoordinates(10.0, 0.0, 20.0),
+                    source_path="capacity-race-test",
+                )
+            ]
+        ),
+    )
+
+    result = await planner(
+        _claimed_for_planner(event),
+        build_gateway_v2_agent_context(event),
+    )
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.capacity_attempts == 2
+    assert repository.plans == 1
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["skillName"] == "move_to"
+    assert repository.stored.request_body_json["arguments"] == {
+        "target": {"x": 10.0, "y": 0.0, "z": 20.0}
+    }
+    assert repository.activity_bindings == [None]
+
+
+async def test_second_capacity_race_falls_back_to_wait_with_delay() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "darts_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "shooting_auto_schedule", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            },
+            {
+                "skillName": "darts_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": [
+                    "dartType1",
+                    "dartType2",
+                    "dartType3",
+                    "dartNum1",
+                    "dartNum2",
+                    "dartNum3",
+                    "score",
+                    "needBuy",
+                ],
+                "missingArgs": [
+                    "dartType1",
+                    "dartType2",
+                    "dartType3",
+                    "dartNum1",
+                    "dartNum2",
+                    "dartNum3",
+                    "score",
+                    "needBuy",
+                ],
+            },
+            {
+                "skillName": "shooting_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["distance", "weapon", "posture", "score"],
+                "missingArgs": ["distance", "weapon", "posture", "score"],
+            },
+        ],
+    )
+    payload["decisionContext"]["session"].update({"SceneId": 8})
+    event = _event(lease=payload)
+    dance = GatewayV2CallSkillAction(
+        action="call_skill",
+        skillName="dance_auto_schedule",
+        schemaVersion="v1",
+        arguments={"score": 90},
+        reason="model selected dance",
+    )
+    repository = _CapacityRaceRepository(capacity_failures=3)
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(
+            runner=_Runner(
+                result={"selected_action": dance.model_dump(mode="json", by_alias=True)}
+            )
+        ),
+        repository=repository,
+        activity_capacity_repository=_CapacitySnapshotRepository(),
+    )
+
+    result = await planner(
+        _claimed_for_planner(event),
+        build_gateway_v2_agent_context(event),
+    )
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.capacity_attempts == 3
+    assert repository.plans == 1
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert repository.stored.request_body_json["waitMs"] > 0
 
 @dataclass
 class _ActivityCoordinator:

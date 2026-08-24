@@ -18,6 +18,11 @@ from src.core.agents.gateway_v2_models import (
     GatewayV2WaitAction,
     parse_gateway_v2_agent_action,
 )
+from src.core.integration.llm_gateway_v2.activity_capacity import ActivityCapacitySnapshot
+from src.core.integration.llm_gateway_v2.activity_capacity_repository import (
+    ActivityCapacityRepository,
+    ActivityCapacityUnavailableError,
+)
 from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanBinding,
     ActivityPlanContext,
@@ -41,6 +46,7 @@ from src.core.integration.llm_gateway_v2.contracts import (
 )
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent, EventProcessResult
 from src.core.integration.llm_gateway_v2.outbox_repository import (
+    ActivityCapacityFullError,
     DecisionPlanConflictError,
     DecisionPlanFencedError,
     DecisionPlanUnavailableError,
@@ -518,6 +524,10 @@ def _lease_authorized_local_activity_action(
     context: GatewayV2AgentContext,
     *,
     reason: str,
+    capacity_snapshot: ActivityCapacitySnapshot | None = None,
+    scene_catalog: SceneCatalog | None = None,
+    plan_version: int = 1,
+    excluded_skill_names: frozenset[str] = frozenset(),
 ) -> GatewayV2CallSkillAction | None:
     if context.lease_kind != "observation" or "call_skill" not in context.allowed_decision_actions:
         return None
@@ -533,9 +543,15 @@ def _lease_authorized_local_activity_action(
     )
     candidates = [
         (skill_name, schema_version)
-        for skill_name in _LOCAL_FALLBACK_SKILL_ORDER
+        for skill_name in (
+            (*_LOCAL_FALLBACK_SKILL_ORDER, "move_to")
+            if capacity_snapshot is not None
+            else _LOCAL_FALLBACK_SKILL_ORDER
+        )
         for schema_version in ("v1",)
         if (skill_name, schema_version) in published
+        and skill_name not in excluded_skill_names
+        and (capacity_snapshot is None or capacity_snapshot.is_available(skill_name))
         and not (
             isinstance(last_skill_name, str)
             and skill_name.casefold() == last_skill_name.casefold()
@@ -544,13 +560,48 @@ def _lease_authorized_local_activity_action(
     if not candidates:
         return None
 
-    offset = _stable_context_bucket(context) % len(candidates)
-    for skill_name, schema_version in candidates[offset:] + candidates[:offset]:
+    if capacity_snapshot is None:
+        offset = _stable_context_bucket(context) % len(candidates)
+        ordered = candidates[offset:] + candidates[:offset]
+    else:
+        identity = str(
+            _snapshot_value(context.session_snapshot, "AccountId", "accountId")
+            or context.session_id
+        )
+        weighted = capacity_snapshot.weighted_order(
+            [skill_name for skill_name, _ in candidates],
+            identity=identity,
+            plan_version=plan_version,
+        )
+        ordered = [(skill_name, "v1") for skill_name in weighted]
+    for skill_name, schema_version in ordered:
+        scene_target_id = None
+        if skill_name == "move_to":
+            if scene_catalog is None:
+                continue
+            scene_id = scene_id_from_snapshot(context.session_snapshot)
+            if scene_id is None:
+                continue
+            identity = str(
+                _snapshot_value(context.session_snapshot, "AccountId", "accountId")
+                or context.session_id
+            )
+            targets = scene_catalog.select_candidates(
+                scene_id=scene_id,
+                role_identity=identity,
+                plan_version=plan_version,
+                limit=1,
+            )
+            if not targets:
+                continue
+            scene_target_id = targets[0].target_id
         action = _gateway_v2_activity_skill_action(
             context,
             skill_name,
             schema_version,
             reason=reason,
+            scene_catalog=scene_catalog,
+            scene_target_id=scene_target_id,
         )
         if action is not None:
             return action
@@ -840,6 +891,7 @@ class GatewayV2DecisionPlanner:
     force_skills: tuple[str, ...] = ()
     token_usage_tracker: GatewayV2TokenUsageTracker = gateway_v2_token_usage_tracker
     decision_target_seconds: float | None = None
+    activity_capacity_repository: ActivityCapacityRepository | None = None
     now_ms: Callable[[], int] = lambda: int(time.time() * 1_000)
 
     def __post_init__(self) -> None:
@@ -1034,15 +1086,59 @@ class GatewayV2DecisionPlanner:
             if action is None:
                 raise GatewayV2AgentExecutionError("empty_output")
             action = _normalize_gateway_v2_action(context, action)
-            if activity_context is None:
-                await self.repository.plan_decision(event, context, action)
-            else:
-                await self.repository.plan_decision(
-                    event,
+            try:
+                if activity_context is None:
+                    await self.repository.plan_decision(event, context, action)
+                else:
+                    await self.repository.plan_decision(
+                        event,
+                        context,
+                        action,
+                        activity_binding=activity_context.binding,
+                    )
+            except ActivityCapacityFullError as error:
+                capacity_snapshot = None
+                if self.activity_capacity_repository is not None:
+                    try:
+                        capacity_snapshot = await self.activity_capacity_repository.snapshot(
+                            event.gateway_id,
+                            context,
+                        )
+                    except ActivityCapacityUnavailableError:
+                        logger.warning(
+                            "Activity capacity refresh failed after a full reservation",
+                            extra={
+                                "event_id": event.event_id,
+                                "gateway_id": event.gateway_id,
+                                "skill_name": error.skill_name,
+                            },
+                        )
+                fallback = _lease_authorized_local_activity_action(
                     context,
-                    action,
-                    activity_binding=activity_context.binding,
+                    reason=(
+                        f"{error.skill_name} reached its configured capacity; "
+                        "continue elsewhere"
+                    ),
+                    capacity_snapshot=capacity_snapshot,
+                    scene_catalog=self.scene_catalog,
+                    plan_version=(
+                        activity_context.plan.version
+                        if activity_context is not None
+                        else 1
+                    ),
+                    excluded_skill_names=frozenset({error.skill_name}),
                 )
+                if fallback is None:
+                    fallback = _decision_deadline_fallback(context)
+                if fallback is None:
+                    raise
+                try:
+                    await self.repository.plan_decision(event, context, fallback)
+                except ActivityCapacityFullError:
+                    wait = _decision_deadline_fallback(context)
+                    if wait is None:
+                        raise
+                    await self.repository.plan_decision(event, context, wait)
             return EventProcessResult("succeeded")
         except DecisionPlanFencedError:
             return EventProcessResult("manual", error_stage="fence", error_category="claim_lost")

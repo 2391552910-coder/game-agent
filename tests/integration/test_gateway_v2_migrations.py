@@ -465,6 +465,7 @@ def _assert_decisions(
     details: dict[str, Any],
     *,
     activity_plan: bool = False,
+    activity_capacity: bool = False,
 ) -> None:
     columns = details["columns"]
     expected_columns = {
@@ -511,6 +512,14 @@ def _assert_decisions(
                 "activity_phase",
             }
         )
+    if activity_capacity:
+        expected_columns.update(
+            {
+                "activity_capacity_key",
+                "activity_capacity_limit",
+                "activity_capacity_expires_at",
+            }
+        )
     assert set(columns) == expected_columns
     _assert_column(columns, "id", sa.UUID, nullable=False, default="gen_random_uuid()")
     _assert_column(columns, "tenant_id", sa.UUID, nullable=False)
@@ -542,6 +551,16 @@ def _assert_decisions(
         _assert_column(columns, "activity_plan_version", sa.BigInteger, nullable=True)
         _assert_column(columns, "activity_step_id", sa.String, nullable=True, length=128)
         _assert_column(columns, "activity_phase", sa.String, nullable=True, length=64)
+    if activity_capacity:
+        _assert_column(columns, "activity_capacity_key", sa.String, nullable=True, length=512)
+        _assert_column(columns, "activity_capacity_limit", sa.Integer, nullable=True)
+        _assert_column(
+            columns,
+            "activity_capacity_expires_at",
+            sa.DateTime,
+            nullable=True,
+            timezone=True,
+        )
     _assert_column(columns, "error_stage", sa.String, nullable=True, length=64)
     _assert_column(columns, "error_category", sa.String, nullable=True, length=64)
     _assert_column(columns, "created_at", sa.DateTime, nullable=False, default="now()", timezone=True)
@@ -562,6 +581,12 @@ def _assert_decisions(
     _assert_named_unique(details, "uq_llm_gateway_decisions_source_event", ["source_event_id"])
     _assert_named_unique(details, "uq_llm_gateway_decisions_lease", ["gateway_id", "decision_lease_id"])
     _assert_index(details, "ix_llm_gateway_decisions_due", ["status", "next_attempt_at", "created_at"])
+    if activity_capacity:
+        _assert_index(
+            details,
+            "ix_llm_gateway_decisions_activity_capacity",
+            ["activity_capacity_key", "activity_capacity_expires_at"],
+        )
     _assert_check_tokens(
         database_url,
         "llm_gateway_decisions",
@@ -576,6 +601,17 @@ def _assert_decisions(
                 "dead_letter",
                 "cancelled",
                 "manual",
+            ),
+            **(
+                {
+                    "ck_llm_gateway_decisions_activity_capacity_complete": (
+                        "activity_capacity_key",
+                        "activity_capacity_limit > 0",
+                        "activity_capacity_expires_at",
+                    )
+                }
+                if activity_capacity
+                else {}
             ),
         },
     )
@@ -691,6 +727,7 @@ def _assert_v2_schema(
     processing_index: bool = True,
     hosted_chat: bool = False,
     activity_plan: bool = False,
+    activity_capacity: bool = False,
 ) -> None:
     snapshot = _inspect_schema(database_url)
     assert snapshot["tables"] >= V2_TABLES
@@ -704,6 +741,7 @@ def _assert_v2_schema(
         database_url,
         snapshot["details"]["llm_gateway_decisions"],
         activity_plan=activity_plan,
+        activity_capacity=activity_capacity,
     )
     _assert_skill_calls(database_url, snapshot["details"]["llm_gateway_skill_calls"])
 
@@ -766,7 +804,7 @@ def _prepare_revision_007(migration_config: Config, database_url: URL) -> None:
         return
 
     current_revision = _current_revision(database_url)
-    if current_revision in {"008", "009", "010", "011", "012", "013"}:
+    if current_revision in {"008", "009", "010", "011", "012", "013", "014"}:
         command.downgrade(migration_config, "007")
         return
     if current_revision in {"001", "002", "003", "004", "005", "006", "007"}:
@@ -804,6 +842,17 @@ def test_gateway_v2_migration_round_trip(
 
     command.upgrade(migration_config, "head")
     assert _current_database(test_postgres_url) == test_postgres_url.database
+    assert _current_revision(test_postgres_url) == "014"
+    _assert_v2_schema(
+        test_postgres_url,
+        processing_index=False,
+        hosted_chat=True,
+        activity_plan=True,
+        activity_capacity=True,
+    )
+    schema_at_014 = _v2_schema_fingerprint(test_postgres_url)
+
+    command.downgrade(migration_config, "013")
     assert _current_revision(test_postgres_url) == "013"
     _assert_v2_schema(
         test_postgres_url,
@@ -812,6 +861,7 @@ def test_gateway_v2_migration_round_trip(
         activity_plan=True,
     )
     schema_at_013 = _v2_schema_fingerprint(test_postgres_url)
+    assert schema_at_013 != schema_at_014
 
     command.downgrade(migration_config, "012")
     assert _current_revision(test_postgres_url) == "012"
@@ -826,14 +876,15 @@ def test_gateway_v2_migration_round_trip(
     assert schema_at_010 != schema_at_012
 
     command.upgrade(migration_config, "head")
-    assert _current_revision(test_postgres_url) == "013"
+    assert _current_revision(test_postgres_url) == "014"
     _assert_v2_schema(
         test_postgres_url,
         processing_index=False,
         hosted_chat=True,
         activity_plan=True,
+        activity_capacity=True,
     )
-    assert _v2_schema_fingerprint(test_postgres_url) == schema_at_013
+    assert _v2_schema_fingerprint(test_postgres_url) == schema_at_014
 
     command.downgrade(migration_config, "009")
     assert _current_revision(test_postgres_url) == "009"

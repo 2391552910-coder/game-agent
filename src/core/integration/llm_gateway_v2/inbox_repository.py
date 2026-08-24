@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, SQLAlchemyErro
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.agents.gateway_v2_models import GatewayV2AgentContext
-from src.core.infrastructure.db import async_session_factory
+from src.core.infrastructure.db import event_admission_session_factory
 from src.core.integration.llm_gateway_v2.auth import InboundGatewayIdentity
 from src.core.integration.llm_gateway_v2.canonical import event_content_hash
 from src.core.integration.llm_gateway_v2.contracts import GatewayV2Event, parse_gateway_v2_event
@@ -83,6 +84,10 @@ _SELECT_ONE = sa.text(
     FROM llm_gateway_events
     WHERE gateway_id = :gateway_id AND event_id = :event_id
     """
+)
+
+_SET_ADMISSION_STATEMENT_TIMEOUT = sa.text(
+    "SELECT set_config('statement_timeout', :timeout_ms, true)"
 )
 
 _UPSERT_SESSION = sa.text(
@@ -174,6 +179,95 @@ _INSERT_EVENT = sa.text(
     RETURNING event_id
     """
 ).bindparams(sa.bindparam("event_body", type_=JSONB))
+
+_ADMIT_NON_CHAT_EVENTS = sa.text(
+    """
+    WITH input AS (
+        SELECT *
+        FROM jsonb_to_recordset(CAST(:events_json AS jsonb)) AS item(
+            ordinal integer,
+            event_row_id uuid,
+            cycle_id uuid,
+            session_id text,
+            event_id text,
+            event_type text,
+            control_generation bigint,
+            event_sequence bigint,
+            content_hash text,
+            event_body jsonb
+        )
+    ), session_input AS (
+        SELECT DISTINCT ON (session_id)
+            session_id,
+            ordinal
+        FROM input
+        ORDER BY session_id, ordinal
+    ), runtime_sessions AS (
+        INSERT INTO llm_gateway_sessions (
+            tenant_id, gateway_id, session_id, status
+        )
+        SELECT :tenant_id, :gateway_id, session_input.session_id, 'pending'
+        FROM session_input
+        ON CONFLICT (gateway_id, session_id) DO UPDATE
+          SET updated_at = now()
+        RETURNING id, session_id
+    ), cycle_input AS (
+        SELECT DISTINCT ON (session_id, control_generation)
+            cycle_id,
+            session_id,
+            control_generation,
+            ordinal
+        FROM input
+        ORDER BY session_id, control_generation, ordinal
+    ), runtime_cycles AS (
+        INSERT INTO llm_gateway_control_cycles (
+            id, tenant_id, runtime_session_id, gateway_id, session_id,
+            control_generation, status, next_event_sequence
+        )
+        SELECT
+            cycle_input.cycle_id,
+            :tenant_id,
+            runtime_sessions.id,
+            :gateway_id,
+            cycle_input.session_id,
+            cycle_input.control_generation,
+            'pending',
+            1
+        FROM cycle_input
+        JOIN runtime_sessions USING (session_id)
+        ON CONFLICT (gateway_id, session_id, control_generation) DO UPDATE
+          SET updated_at = now()
+        RETURNING id, session_id, control_generation
+    ), inserted_events AS (
+        INSERT INTO llm_gateway_events (
+            id, tenant_id, cycle_id, gateway_id, session_id, event_id, event_type,
+            control_generation, event_sequence, content_hash, event_body, trace_id, status
+        )
+        SELECT
+            input.event_row_id,
+            :tenant_id,
+            runtime_cycles.id,
+            :gateway_id,
+            input.session_id,
+            input.event_id,
+            input.event_type,
+            input.control_generation,
+            input.event_sequence,
+            input.content_hash,
+            input.event_body,
+            :trace_id,
+            'pending'
+        FROM input
+        JOIN runtime_cycles
+          ON runtime_cycles.session_id = input.session_id
+         AND runtime_cycles.control_generation = input.control_generation
+        ON CONFLICT DO NOTHING
+        RETURNING event_id
+    )
+    SELECT event_id
+    FROM inserted_events
+    """
+)
 
 _SELECT_CLAIM_CYCLE = sa.text(
     """
@@ -934,12 +1028,20 @@ def _hosted_chat_cycle_is_processable(event_type: str, cycle_status: str) -> boo
 class InboxRepository:
     def __init__(
         self,
-        session_factory: _SessionFactory | Callable[[], AsyncSession] = async_session_factory,
+        session_factory: _SessionFactory | Callable[[], AsyncSession] = event_admission_session_factory,
         *,
         metrics: GatewayV2RuntimeMetrics | None = None,
+        statement_timeout_seconds: float | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._metrics = metrics
+        if statement_timeout_seconds is None:
+            from src.config import settings
+
+            statement_timeout_seconds = settings.llm_gateway_v2_event_admission_timeout_seconds
+        if statement_timeout_seconds <= 0:
+            raise ValueError("statement_timeout_seconds must be positive")
+        self._statement_timeout_seconds = statement_timeout_seconds
 
     async def resolve_role_id(self, gateway_id: str, session_id: str) -> str | None:
         async with self._session_factory() as session:
@@ -967,6 +1069,14 @@ class InboxRepository:
             async with self._session_factory() as session:
                 try:
                     await session.begin()
+                    await session.execute(
+                        _SET_ADMISSION_STATEMENT_TIMEOUT,
+                        {
+                            "timeout_ms": str(
+                                max(1, int(self._statement_timeout_seconds * 1_000))
+                            )
+                        },
+                    )
                     existing = await self._load_existing(session, identity.gateway_id, prepared)
                     for item in prepared:
                         stored_hash = existing.get(item.event.event_id)
@@ -978,7 +1088,37 @@ class InboxRepository:
 
                     classifications: dict[str, str | None] = {}
                     pending = tuple(item for item in prepared if item.event.event_id not in existing)
-                    for item in _order_prepared_events_for_insertion(pending):
+                    ordered_pending = _order_prepared_events_for_insertion(pending)
+                    non_chat = tuple(
+                        item for item in ordered_pending if not _is_hosted_chat_event(item.event)
+                    )
+                    inserted_non_chat = await self._insert_non_chat_batch(
+                        session,
+                        identity,
+                        trace_id,
+                        non_chat,
+                    )
+                    unresolved_non_chat = tuple(
+                        item for item in non_chat if item.event.event_id not in inserted_non_chat
+                    )
+                    stored_non_chat = await self._load_existing(
+                        session,
+                        identity.gateway_id,
+                        unresolved_non_chat,
+                    )
+                    for item in non_chat:
+                        event_id = item.event.event_id
+                        if event_id in inserted_non_chat:
+                            classifications[event_id] = "received"
+                            continue
+                        stored_hash = stored_non_chat.get(event_id)
+                        if stored_hash is None or stored_hash != item.content_hash:
+                            raise EventAdmissionConflict(event_id)
+                        classifications[event_id] = "duplicate"
+
+                    for item in ordered_pending:
+                        if not _is_hosted_chat_event(item.event):
+                            continue
                         classifications[item.event.event_id] = await self._insert_one(
                             session,
                             identity,
@@ -997,6 +1137,8 @@ class InboxRepository:
                             received.append(item.event.event_id)
                         elif classification == "duplicate":
                             duplicates.append(item.event.event_id)
+                        else:
+                            raise EventAdmissionConflict(item.event.event_id)
 
                     await session.commit()
                 except EventAdmissionConflict:
@@ -1545,6 +1687,9 @@ class InboxRepository:
         hosted_cycle_cache: dict[str, tuple[object, int]],
     ) -> str | None:
         event = item.event
+        if not _is_hosted_chat_event(event):
+            raise ValueError("_insert_one only accepts hosted chat events")
+
         savepoint = await session.begin_nested()
         created_runtime_session_key: str | None = None
         created_cycle_key: tuple[str, int] | None = None
@@ -1689,6 +1834,45 @@ class InboxRepository:
         if stored_hash != item.content_hash:
             raise EventAdmissionConflict(event.event_id)
         return "duplicate"
+
+    async def _insert_non_chat_batch(
+        self,
+        session: AsyncSession,
+        identity: InboundGatewayIdentity,
+        trace_id: str,
+        items: Sequence[_PreparedEvent],
+    ) -> frozenset[str]:
+        if not items:
+            return frozenset()
+        payload = [
+            {
+                "ordinal": ordinal,
+                "event_row_id": str(uuid4()),
+                "cycle_id": str(uuid4()),
+                "session_id": item.event.session_id,
+                "event_id": item.event.event_id,
+                "event_type": item.event.event_type,
+                "control_generation": item.event.control_generation,
+                "event_sequence": item.event.event_sequence,
+                "content_hash": item.content_hash,
+                "event_body": item.event.model_dump(mode="json"),
+            }
+            for ordinal, item in enumerate(items)
+        ]
+        result = await session.execute(
+            _ADMIT_NON_CHAT_EVENTS,
+            {
+                "tenant_id": identity.tenant_id,
+                "gateway_id": identity.gateway_id,
+                "trace_id": trace_id,
+                "events_json": json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+            },
+        )
+        return frozenset(str(event_id) for event_id in result.scalars())
 
     async def _load_one_hash(self, session: AsyncSession, gateway_id: str, event_id: str) -> str | None:
         result = await session.execute(

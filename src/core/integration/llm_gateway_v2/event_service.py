@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import UUID
 
 from src.core.agents.gateway_v2_models import GatewayV2AgentContext
+from src.core.infrastructure.db import event_admission_session_factory
 from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanRepository,
     ActivityPlanUnavailableError,
@@ -32,6 +33,11 @@ from src.core.integration.llm_gateway_v2.decision_service import (
     build_gateway_v2_agent_context,
 )
 from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
+from src.core.integration.llm_gateway_v2.event_admission import (
+    EventAdmissionLimiter,
+    EventAdmissionOverloadedError,
+    get_default_event_admission_limiter,
+)
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent, EventProcessResult
 from src.core.integration.llm_gateway_v2.hosted_chat import HostedChatPermanentError, HostedChatRetryableError
 from src.core.integration.llm_gateway_v2.inbox_repository import (
@@ -277,7 +283,15 @@ class EventService:
     repository: _InboxRepository
     max_batch_size: int | None = None
     hooks: WorkerHooks = NO_OP_WORKER_HOOKS
+    admission_limiter: EventAdmissionLimiter | None = None
 
+    def __post_init__(self) -> None:
+        if self.admission_limiter is None:
+            object.__setattr__(
+                self,
+                "admission_limiter",
+                get_default_event_admission_limiter(),
+            )
     async def accept_event_batch(
         self,
         identity: InboundGatewayIdentity,
@@ -294,7 +308,23 @@ class EventService:
 
         started = time.monotonic()
         try:
-            acceptance = await self.repository.accept_event_batch(identity, envelope.trace_id, envelope.events)
+            async with self.admission_limiter.slot():
+                acceptance = await self.repository.accept_event_batch(
+                    identity,
+                    envelope.trace_id,
+                    envelope.events,
+                )
+        except EventAdmissionOverloadedError:
+            logger.warning(
+                "LLM Gateway v2 event admission overloaded",
+                extra={
+                    "trace_id": envelope.trace_id,
+                    "gateway_id": identity.gateway_id,
+                    "event_count": len(envelope.events),
+                    "elapsed_ms": (time.monotonic() - started) * 1_000,
+                },
+            )
+            raise EventServiceUnavailable from None
         except EventAdmissionConflict:
             logger.warning(
                 "LLM Gateway v2 event admission conflict",
@@ -361,4 +391,7 @@ GatewayV2EventService = EventService
 
 
 def build_gateway_v2_event_service(max_batch_size: int | None = None) -> EventService:
-    return EventService(InboxRepository(), max_batch_size=max_batch_size)
+    return EventService(
+        InboxRepository(event_admission_session_factory),
+        max_batch_size=max_batch_size,
+    )

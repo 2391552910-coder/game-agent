@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableLambda
 
 from src.core.integration.llm_gateway_v2 import activity_planner as activity_planner_module
 from src.core.integration.llm_gateway_v2 import decision_service as decision_service_module
+from src.core.integration.llm_gateway_v2.activity_capacity import ActivityCapacitySnapshot
 from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlan,
     ActivityPlanProposal,
@@ -22,6 +23,7 @@ from src.core.integration.llm_gateway_v2.activity_plan_repository import (
 from src.core.integration.llm_gateway_v2.activity_planner import (
     ActivityPlanCoordinator,
     GatewayV2ActivityPlanGenerator,
+    diversify_activity_plan_proposal,
 )
 from src.core.integration.llm_gateway_v2.capacity import AgentCapacityExceededError, AgentCapacityLimiter
 from src.core.integration.llm_gateway_v2.scene_catalog import (
@@ -30,6 +32,7 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneTarget,
     load_default_scene_catalog,
 )
+from src.core.integration.llm_gateway_v2.token_usage import gateway_v2_token_usage_callback
 
 
 @dataclass
@@ -130,7 +133,7 @@ def _non_lobby_proposal() -> ActivityPlanProposal:
 
 
 @pytest.mark.asyncio
-async def test_model_plan_generation_passes_v2_token_callback_config(
+async def test_model_plan_generation_passes_v2_call_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -141,7 +144,7 @@ async def test_model_plan_generation_passes_v2_token_callback_config(
             assert method == "json_mode"
 
             async def invoke(_: Any, config: dict[str, Any]) -> ActivityPlanProposal:
-                captured["marker"] = config.get("metadata", {}).get("token_scope_marker")
+                captured["config"] = config
                 return _proposal()
 
             return RunnableLambda(invoke)
@@ -153,8 +156,16 @@ async def test_model_plan_generation_passes_v2_token_callback_config(
     monkeypatch.setattr(activity_planner_module, "get_llm", fake_get_llm)
     monkeypatch.setattr(
         activity_planner_module,
-        "gateway_v2_token_callback_config",
-        lambda: {"metadata": {"token_scope_marker": "activity-plan"}},
+        "llm_call_config",
+        lambda **_: {
+            "callbacks": [gateway_v2_token_usage_callback],
+            "metadata": {
+                "token_scope_marker": "activity-plan",
+                "flow": "gateway_v2",
+                "node": "activity_plan_generation",
+                "model_type": "default",
+            },
+        },
         raising=False,
     )
 
@@ -165,7 +176,13 @@ async def test_model_plan_generation_passes_v2_token_callback_config(
     )
 
     assert result.goal_id == "plaza_social"
-    assert captured == {"marker": "activity-plan"}
+    assert gateway_v2_token_usage_callback in captured["config"]["callbacks"].handlers
+    assert captured["config"]["metadata"] == {
+        "token_scope_marker": "activity-plan",
+        "flow": "gateway_v2",
+        "node": "activity_plan_generation",
+        "model_type": "default",
+    }
 
 
 @pytest.mark.asyncio
@@ -439,6 +456,42 @@ async def test_ten_roles_use_scene_targets_and_stable_role_rotation() -> None:
     assert all(step.scene_target_id is not None for step in move_steps)
     assert len({step.scene_target_id for step in move_steps}) == 10
     assert len({body["skillName"] for body in wire_decisions}) == 10
+
+
+def test_full_activities_are_removed_from_plan_diversification() -> None:
+    context = _context(
+        skills=[
+            "dance_auto_schedule",
+            "darts_auto_schedule",
+            "shooting_auto_schedule",
+            "coffee_auto_schedule",
+            "move_to",
+        ],
+        lobby=False,
+        account_id="role-capacity-1",
+        scene_id=8,
+    )
+    capacity = ActivityCapacitySnapshot(
+        scene_id=8,
+        active_by_skill={
+            "dance_auto_schedule": 33,
+            "darts_auto_schedule": 16,
+            "shooting_auto_schedule": 25,
+        },
+    )
+
+    proposal = diversify_activity_plan_proposal(
+        _non_lobby_proposal(),
+        context,
+        scene_catalog=load_default_scene_catalog(),
+        plan_version=1,
+        recent_actions=(),
+        step_authorizer=lambda context, skill_name, schema_version: True,
+        capacity_snapshot=capacity,
+    )
+
+    assert "dance_auto_schedule" not in {step.skill_name for step in proposal.steps}
+    assert "move_to" in {step.skill_name for step in proposal.steps}
 
 
 @pytest.mark.asyncio

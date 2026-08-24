@@ -526,6 +526,39 @@ async def test_batch_duplicates_are_deduplicated_in_first_seen_order(session_fac
     assert await _counts(session_factory) == (1, 1, 2)
 
 
+async def test_fifty_event_batch_uses_constant_database_statements(
+    session_factory,
+    verified_test_postgres_url: URL,
+) -> None:
+    engine = create_async_engine(verified_test_postgres_url, poolclass=sa.pool.NullPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        statements.append(statement.strip())
+
+    sa.event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+    events = tuple(
+        _event(f"bulk-event-{index}", session_id=f"bulk-session-{index}")
+        for index in range(50)
+    )
+    try:
+        acceptance = await InboxRepository(factory).accept_event_batch(
+            IDENTITY,
+            "trace-bulk-50",
+            events,
+        )
+    finally:
+        sa.event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
+        await engine.dispose()
+
+    assert acceptance.received_event_ids == tuple(event.event_id for event in events)
+    assert acceptance.duplicate_event_ids == ()
+    assert len(statements) <= 4
+    assert not any(statement.startswith(("SAVEPOINT", "RELEASE SAVEPOINT")) for statement in statements)
+    assert await _counts(session_factory) == (50, 50, 50)
+
+
 async def test_batch_internal_content_conflict_fails_before_database(session_factory) -> None:
     repository = InboxRepository(session_factory)
     original = _event("event-1", sequence=2, reason="first")
@@ -689,24 +722,21 @@ async def test_persisted_content_conflict_rolls_back_other_new_events(session_fa
     assert ids == ["event-1"]
 
 
-async def test_recoverable_integrity_error_omits_only_current_event(session_factory) -> None:
+async def test_partition_sequence_conflict_rolls_back_the_whole_batch(session_factory) -> None:
     repository = InboxRepository(session_factory)
     first = _event("event-1", sequence=2, reason="first")
     same_partition_sequence = _event("event-2", sequence=2, reason="second")
     later = _event("event-3", sequence=3)
 
-    acceptance = await repository.accept_event_batch(
-        IDENTITY,
-        "trace-1",
-        (first, same_partition_sequence, later),
-    )
+    with pytest.raises(EventAdmissionConflict) as caught:
+        await repository.accept_event_batch(
+            IDENTITY,
+            "trace-1",
+            (first, same_partition_sequence, later),
+        )
 
-    assert acceptance.received_event_ids == ("event-1", "event-3")
-    assert acceptance.duplicate_event_ids == ()
-    async with session_factory() as session:
-        result = await session.execute(sa.text("SELECT event_id FROM llm_gateway_events ORDER BY event_id"))
-        ids = result.scalars().all()
-    assert ids == ["event-1", "event-3"]
+    assert caught.value.event_id == "event-2"
+    assert await _counts(session_factory) == (0, 0, 0)
 
 
 @asynccontextmanager
@@ -717,7 +747,9 @@ async def _fault_trigger(factory: async_sessionmaker[AsyncSession]) -> AsyncIter
                 """
                 CREATE OR REPLACE FUNCTION llm_gateway_v2_test_fault() RETURNS trigger AS $$
                 BEGIN
-                    IF NEW.event_id = 'fault-data' THEN
+                    IF NEW.event_id = 'fault-timeout' THEN
+                        PERFORM pg_sleep(0.2);
+                    ELSIF NEW.event_id = 'fault-data' THEN
                         RAISE EXCEPTION 'data fault' USING ERRCODE = '22003';
                     ELSIF NEW.event_id = 'fault-deadlock' THEN
                         RAISE EXCEPTION 'deadlock fault' USING ERRCODE = '40P01';
@@ -748,7 +780,7 @@ async def _fault_trigger(factory: async_sessionmaker[AsyncSession]) -> AsyncIter
             await session.execute(sa.text("DROP FUNCTION IF EXISTS llm_gateway_v2_test_fault()"))
 
 
-async def test_recoverable_data_error_omits_only_current_event(session_factory) -> None:
+async def test_data_error_rolls_back_the_whole_batch(session_factory) -> None:
     # A single connection keeps the temporary trigger visible to repository sessions.
     engine = session_factory.kw.get("bind")
     assert engine is not None
@@ -757,25 +789,37 @@ async def test_recoverable_data_error_omits_only_current_event(session_factory) 
     try:
         async with _fault_trigger(factory):
             repository = InboxRepository(factory)
-            acceptance = await repository.accept_event_batch(
-                IDENTITY,
-                "trace-1",
-                (
-                    _event("event-1", sequence=2),
-                    _event("fault-data", sequence=2, session_id="session-fault"),
-                    _event("event-3", sequence=3),
-                ),
-            )
-        assert acceptance.received_event_ids == ("event-1", "event-3")
-        assert acceptance.duplicate_event_ids == ()
-        async with session_factory() as session:
-            orphan_sessions = await session.scalar(
-                sa.text("SELECT count(*) FROM llm_gateway_sessions WHERE session_id = 'session-fault'")
-            )
-            orphan_cycles = await session.scalar(
-                sa.text("SELECT count(*) FROM llm_gateway_control_cycles WHERE session_id = 'session-fault'")
-            )
-        assert (orphan_sessions, orphan_cycles) == (0, 0)
+            with pytest.raises(EventAdmissionUnavailable):
+                await repository.accept_event_batch(
+                    IDENTITY,
+                    "trace-1",
+                    (
+                        _event("event-1", sequence=2),
+                        _event("fault-data", sequence=2, session_id="session-fault"),
+                        _event("event-3", sequence=3),
+                    ),
+                )
+        assert await _counts(session_factory) == (0, 0, 0)
+    finally:
+        await connection.close()
+
+
+async def test_statement_timeout_rolls_back_and_connection_remains_usable(session_factory) -> None:
+    engine = session_factory.kw.get("bind")
+    assert engine is not None
+    connection = await engine.connect()
+    factory = async_sessionmaker(connection, expire_on_commit=False, autoflush=False)
+    try:
+        async with _fault_trigger(factory):
+            repository = InboxRepository(factory, statement_timeout_seconds=0.05)
+            with pytest.raises(EventAdmissionUnavailable):
+                await repository.accept_event_batch(
+                    IDENTITY,
+                    "trace-timeout",
+                    (_event("fault-timeout"),),
+                )
+        assert await connection.scalar(sa.text("SELECT 1")) == 1
+        assert await _counts(session_factory) == (0, 0, 0)
     finally:
         await connection.close()
 
@@ -946,10 +990,13 @@ class _BarrierInboxRepository(InboxRepository):
     def __init__(self, session_factory, barrier: asyncio.Barrier) -> None:
         super().__init__(session_factory)
         self._barrier = barrier
+        self._waited = False
 
     async def _load_existing(self, session, gateway_id, prepared):
         existing = await super()._load_existing(session, gateway_id, prepared)
-        await asyncio.wait_for(self._barrier.wait(), timeout=5)
+        if not self._waited:
+            self._waited = True
+            await asyncio.wait_for(self._barrier.wait(), timeout=5)
         return existing
 
 

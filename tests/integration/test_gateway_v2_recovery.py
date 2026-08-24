@@ -18,6 +18,10 @@ from src.core.agents.gateway_v2_models import (
     GatewayV2NoOpAction,
     GatewayV2WaitAction,
 )
+from src.core.integration.llm_gateway_v2.activity_capacity import (
+    ActivityCapacityPolicy,
+    ActivityCapacityRule,
+)
 from src.core.integration.llm_gateway_v2.auth import InboundGatewayIdentity
 from src.core.integration.llm_gateway_v2.contracts import (
     GatewayV2BatchEnvelope,
@@ -31,6 +35,7 @@ from src.core.integration.llm_gateway_v2.event_service import EventService
 from src.core.integration.llm_gateway_v2.event_worker import EventProcessResult, EventWorker
 from src.core.integration.llm_gateway_v2.inbox_repository import InboxRepository
 from src.core.integration.llm_gateway_v2.outbox_repository import (
+    ActivityCapacityFullError,
     DecisionPlanConflictError,
     DecisionPlanFencedError,
     DecisionPlanUnavailableError,
@@ -111,6 +116,63 @@ def _event(
     )
 
 
+def _capacity_event(event_id: str, *, session_id: str) -> GatewayV2Event:
+    return parse_gateway_v2_event(
+        {
+            "eventId": event_id,
+            "eventType": "session_started",
+            "sessionId": session_id,
+            "controlGeneration": 1,
+            "eventSequence": 1,
+            "stateVersion": 1,
+            "decisionLeaseId": f"lease-{session_id}",
+            "occurredAtMs": 1_700_000_000_001,
+            "payload": {
+                "reason": "decision_requested",
+                "lease": {
+                    "sessionId": session_id,
+                    "controlGeneration": 1,
+                    "decisionLeaseId": f"lease-{session_id}",
+                    "stateVersion": 1,
+                    "leaseKind": "observation",
+                    "allowedActions": ["call_skill", "wait"],
+                    "allowedSkillName": None,
+                    "allowedSkillNames": ["dance_auto_schedule"],
+                    "parentSkillName": None,
+                },
+                "decisionContext": {
+                    "session": {
+                        "AccountId": f"account-{session_id}",
+                        "SceneId": 8,
+                        "SceneInstanceId": "instance-load-1",
+                    },
+                    "availableSkills": [
+                        {
+                            "SkillName": "dance_auto_schedule",
+                            "SchemaVersion": "v1",
+                            "RequireRunning": True,
+                            "CooldownMs": 0,
+                        }
+                    ],
+                    "skillArgumentHints": [
+                        {
+                            "skillName": "dance_auto_schedule",
+                            "schemaVersion": "v1",
+                            "argumentStatus": "ready",
+                            "suggestedArgs": {"score": 90},
+                            "allowedArgs": [{"path": "score"}],
+                            "missingArgs": [],
+                            "warnings": [],
+                            "nextSteps": [],
+                        }
+                    ],
+                    "lastSkillResult": None,
+                },
+            },
+        }
+    )
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _upgrade_schema(migration_config) -> None:
     command.upgrade(migration_config, "head")
@@ -157,6 +219,79 @@ async def session_factory(verified_test_postgres_url: URL) -> AsyncIterator[asyn
 async def _admit(repository: InboxRepository, *events: GatewayV2Event) -> None:
     result = await repository.accept_event_batch(IDENTITY, f"trace-{uuid4()}", events)
     assert result.received_event_ids == tuple(event.event_id for event in events)
+
+
+async def test_activity_capacity_reservation_is_atomic_across_sessions(session_factory) -> None:
+    policy = ActivityCapacityPolicy(
+        (ActivityCapacityRule("dance_auto_schedule", 1),)
+    )
+    inbox = InboxRepository(session_factory)
+    await _admit(
+        inbox,
+        _capacity_event("capacity-event-1", session_id="capacity-session-1"),
+        _capacity_event("capacity-event-2", session_id="capacity-session-2"),
+    )
+    first = await inbox.claim_next_event(
+        worker_id="capacity-worker-1",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    second = await inbox.claim_next_event(
+        worker_id="capacity-worker-2",
+        claim_ttl_ms=30_000,
+        max_attempts=3,
+    )
+    assert first is not None
+    assert second is not None
+    first_context = build_gateway_v2_agent_context(first.event)
+    second_context = build_gateway_v2_agent_context(second.event)
+    assert await inbox.persist_lease_context(first, first_context)
+    assert await inbox.persist_lease_context(second, second_context)
+    action = GatewayV2CallSkillAction.model_validate(
+        {
+            "action": "call_skill",
+            "skillName": "dance_auto_schedule",
+            "schemaVersion": "v1",
+            "arguments": {"score": 90},
+            "reason": "capacity test",
+        }
+    )
+    outbox = OutboxRepository(
+        session_factory,
+        activity_capacity_policy=policy,
+        activity_capacity_ttl_seconds=1_800,
+    )
+
+    results = await asyncio.gather(
+        outbox.plan_decision(first, first_context, action),
+        outbox.plan_decision(second, second_context, action),
+        return_exceptions=True,
+    )
+    planned = [result for result in results if not isinstance(result, BaseException)]
+    failures = [result for result in results if isinstance(result, BaseException)]
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                sa.text(
+                    "SELECT activity_capacity_key, activity_capacity_limit "
+                    "FROM llm_gateway_decisions"
+                )
+            )
+        ).mappings().all()
+    assert len(planned) == 1
+    assert planned[0].created is True
+    assert len(failures) == 1
+    assert isinstance(failures[0], ActivityCapacityFullError)
+    assert rows == [
+        {
+            "activity_capacity_key": (
+                "gateway-recovery:scene:8:instance:instance-load-1:"
+                "skill:dance_auto_schedule"
+            ),
+            "activity_capacity_limit": 1,
+        }
+    ]
 
 
 async def _row(factory: async_sessionmaker[AsyncSession], event_id: str) -> sa.RowMapping:
