@@ -137,7 +137,7 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         "session_idle_timeout_seconds=%s event_stale_after_seconds=%s "
         "activity_capacity_ttl_seconds=%s db_pool=%s+%s "
         "event_admission_pool=%s+%s event_admission_pool_timeout_seconds=%s "
-        "force_skills=%s",
+        "force_action=%s force_wait_ms=%s force_skills=%s",
         getattr(runtime_settings, "llm_gateway_v1_enabled", False),
         getattr(runtime_settings, "llm_gateway_v2_enabled", False),
         getattr(runtime_settings, "llm_provider_source", "env"),
@@ -162,6 +162,8 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         getattr(runtime_settings, "postgres_event_admission_pool_size", ""),
         getattr(runtime_settings, "postgres_event_admission_max_overflow", ""),
         getattr(runtime_settings, "postgres_event_admission_pool_timeout_seconds", ""),
+        getattr(runtime_settings, "llm_gateway_v2_force_action", None) or "disabled",
+        getattr(runtime_settings, "llm_gateway_v2_force_wait_ms", ""),
         ",".join(getattr(runtime_settings, "llm_gateway_v2_force_skills", ())) or "disabled",
     )
 
@@ -307,6 +309,8 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
         ),
         scene_catalog=scene_catalog,
         force_skills=settings.llm_gateway_v2_force_skills,
+        force_action=getattr(settings, "llm_gateway_v2_force_action", None),
+        force_wait_ms=getattr(settings, "llm_gateway_v2_force_wait_ms", 10_000),
         decision_target_seconds=getattr(
             settings,
             "llm_gateway_v2_decision_target_seconds",

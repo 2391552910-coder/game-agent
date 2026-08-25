@@ -149,6 +149,8 @@ class Settings(BaseSettings):
         le=86_400,
     )
     llm_gateway_v2_force_skills: Annotated[tuple[str, ...], NoDecode] = Field(default=())
+    llm_gateway_v2_force_action: Literal["wait"] | None = Field(default=None)
+    llm_gateway_v2_force_wait_ms: int = Field(default=10_000, ge=1, le=3_600_000)
     llm_gateway_v2_rag_mode: Literal["naive", "hybrid", "mix"] = "naive"
     llm_gateway_v2_rag_top_k: int = Field(default=10, ge=1, le=200)
     llm_gateway_v2_rag_chunk_top_k: int = Field(default=10, ge=1, le=200)
@@ -191,6 +193,15 @@ class Settings(BaseSettings):
             )
         return skills
 
+    @field_validator("llm_gateway_v2_force_action", mode="before")
+    @classmethod
+    def parse_llm_gateway_v2_force_action(cls, value: object) -> object:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if value != "wait":
+            raise ValueError("llm_gateway_v2_force_action only supports 'wait'")
+        return value
+
     @model_validator(mode="after")
     def validate_llm_gateway_v2(self) -> "Settings":
         if self.llm_gateway_v2_retry_base_ms > self.llm_gateway_v2_retry_max_ms:
@@ -204,6 +215,8 @@ class Settings(BaseSettings):
                 "llm_gateway_v2_event_stale_after_seconds must not exceed "
                 "llm_gateway_v2_session_idle_timeout_seconds"
             )
+        if self.llm_gateway_v2_force_action is not None and self.llm_gateway_v2_force_skills:
+            raise ValueError("llm_gateway_v2_force_action and llm_gateway_v2_force_skills are mutually exclusive")
         decision_target_ms = self.llm_gateway_v2_decision_target_seconds * 1_000
         if (
             decision_target_ms + self.llm_gateway_v2_lease_safety_window_ms

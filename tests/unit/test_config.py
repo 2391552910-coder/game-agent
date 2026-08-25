@@ -55,7 +55,13 @@ _MYAGENT_ENV_PREFIXES = (
 )
 _MYAGENT_ENV_NAMES = {"ENV", "LOG_LEVEL", "APP_WORKERS", "CORS_ALLOWED_ORIGINS"}
 _V2_ENV_NAMES = {name.upper() for name in VALID_V2_SETTINGS if name.startswith("llm_gateway_")}
-_V2_ENV_NAMES.add("LLM_GATEWAY_V2_FORCE_SKILLS")
+_V2_ENV_NAMES.update(
+    {
+        "LLM_GATEWAY_V2_FORCE_ACTION",
+        "LLM_GATEWAY_V2_FORCE_WAIT_MS",
+        "LLM_GATEWAY_V2_FORCE_SKILLS",
+    }
+)
 _SAFE_TEST_PROCESS_ENVIRONMENT = {
     "ENV": "test",
     "OPENAI_API_KEY": "test-openai-key",
@@ -259,6 +265,37 @@ def test_v2_force_skills_accepts_comma_separated_env_value() -> None:
     )
 
 
+def test_v2_force_action_accepts_wait_and_configures_wait_duration() -> None:
+    config = Settings(
+        _env_file=None,
+        **REQUIRED_SETTINGS,
+        llm_gateway_v2_force_action="wait",
+        llm_gateway_v2_force_wait_ms=10_000,
+    )
+
+    assert config.llm_gateway_v2_force_action == "wait"
+    assert config.llm_gateway_v2_force_wait_ms == 10_000
+
+
+def test_v2_force_action_treats_blank_value_as_disabled() -> None:
+    config = Settings(
+        _env_file=None,
+        **REQUIRED_SETTINGS,
+        llm_gateway_v2_force_action="",
+    )
+
+    assert config.llm_gateway_v2_force_action is None
+
+
+def test_v2_force_action_rejects_actions_other_than_wait() -> None:
+    with pytest.raises(ValidationError, match="force_action"):
+        Settings(
+            _env_file=None,
+            **REQUIRED_SETTINGS,
+            llm_gateway_v2_force_action="call_skill",
+        )
+
+
 @pytest.mark.parametrize(
     "force_skills",
     [
@@ -372,6 +409,7 @@ def test_v2_enabled_rejects_invalid_identity_configuration(
         "llm_gateway_v2_retry_max_ms",
         "llm_gateway_v2_claim_ttl_ms",
         "llm_gateway_v2_agent_timeout_seconds",
+        "llm_gateway_v2_force_wait_ms",
         "llm_gateway_v2_poll_ms",
         "llm_gateway_v2_shutdown_grace_seconds",
         "llm_gateway_v2_readiness_timeout_seconds",
@@ -404,6 +442,7 @@ def test_v2_retry_base_must_not_exceed_retry_max() -> None:
         ("llm_gateway_v2_retry_max_ms", 3_600_001),
         ("llm_gateway_v2_claim_ttl_ms", 3_600_001),
         ("llm_gateway_v2_agent_timeout_seconds", 301),
+        ("llm_gateway_v2_force_wait_ms", 3_600_001),
         ("llm_gateway_v2_poll_ms", 60_001),
         ("llm_gateway_v2_shutdown_grace_seconds", 301),
         ("llm_gateway_v2_readiness_timeout_seconds", 61),

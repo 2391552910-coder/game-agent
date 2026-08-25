@@ -2308,6 +2308,170 @@ async def test_force_skills_waits_when_gateway_lease_publishes_none_of_them() ->
     assert repository.stored.request_body_json["waitMs"] == 1_000
 
 
+async def test_force_wait_preserves_lobby_tornado_bootstrap() -> None:
+    payload = _lease(
+        available_skills=[{"skillName": "scene_tornado", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "scene_tornado",
+                "schemaVersion": "v1",
+                "allowedArgs": [],
+                "missingArgs": [],
+            }
+        ],
+        allowed_skill_names=[],
+    )
+    payload["decisionContext"]["session"].update(
+        {
+            "SceneId": 1,
+            "SceneName": "Lobby",
+            "NavigationAvailable": False,
+            "SkillExecuting": False,
+            "LastSkillName": None,
+        }
+    )
+    event = _event(lease=payload)
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        force_action="wait",
+        force_wait_ms=10_000,
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "call_skill"
+    assert repository.stored.request_body_json["skillName"] == "scene_tornado"
+
+
+async def test_force_wait_preserves_lobby_tornado_after_internal_decision_target() -> None:
+    payload = _lease(
+        available_skills=[{"skillName": "scene_tornado", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "scene_tornado",
+                "schemaVersion": "v1",
+                "allowedArgs": [],
+                "missingArgs": [],
+            }
+        ],
+        allowed_skill_names=[],
+    )
+    payload["decisionContext"]["session"].update(
+        {
+            "SceneId": 1,
+            "SceneName": "Lobby",
+            "NavigationAvailable": False,
+            "SkillExecuting": False,
+            "LastSkillName": None,
+        }
+    )
+    event = _event(lease=payload)
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(
+            runner=_Runner(result={"errors": ["must not run"]})
+        ),
+        repository=repository,
+        force_action="wait",
+        force_wait_ms=10_000,
+        decision_target_seconds=55,
+        now_ms=lambda: event.occurred_at_ms + 60_000,
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "call_skill"
+    assert repository.stored.request_body_json["skillName"] == "scene_tornado"
+
+
+async def test_force_wait_pauses_after_lobby_tornado_without_model_or_activity_plan() -> None:
+    payload = _lease(
+        available_skills=[
+            {"skillName": "dance_auto_schedule", "schemaVersion": "v1"},
+            {"skillName": "move_to", "schemaVersion": "v1"},
+        ],
+        hints=[
+            {
+                "skillName": "dance_auto_schedule",
+                "schemaVersion": "v1",
+                "allowedArgs": ["score"],
+                "missingArgs": ["score"],
+            },
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "allowedArgs": ["target.x", "target.y", "target.z"],
+                "missingArgs": ["target.x", "target.y", "target.z"],
+            },
+        ],
+    )
+    payload["decisionContext"]["session"].update(
+        {
+            "SceneId": 7,
+            "SceneName": "CJ_guangchang",
+            "LastSkillName": "scene_tornado",
+        }
+    )
+    event = _event(lease=payload, terminal={"status": "success", "skillName": "scene_tornado"})
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    coordinator = _ActivityCoordinator(
+        ActivityPlanContext(
+            plan=record_step_terminal(create_plaza_social_plan("plan-force-wait"), "arrival", succeeded=True),
+            binding=ActivityPlanBinding("plan-force-wait", 1, "dance", "activity"),
+            recent_actions=(),
+            recent_failures=(),
+        )
+    )
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        activity_coordinator=coordinator,
+        force_action="wait",
+        force_wait_ms=10_000,
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert coordinator.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert repository.stored.request_body_json["waitMs"] == 10_000
+
+
+async def test_force_wait_uses_no_op_when_wait_is_not_authorized() -> None:
+    payload = _lease(allowed_actions=["call_skill", "no_op"])
+    payload["decisionContext"]["session"].update(
+        {"SceneId": 7, "SceneName": "CJ_guangchang", "LastSkillName": "scene_tornado"}
+    )
+    event = _event(lease=payload)
+    runner = _Runner(result={"errors": ["must not run"]})
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        force_action="wait",
+        force_wait_ms=10_000,
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert runner.calls == 0
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "no_op"
+
+
 async def test_planner_resolves_scene_target_to_trusted_move_coordinates() -> None:
     payload = _lease(
         available_skills=[{"skillName": "move_to", "schemaVersion": "v1"}],

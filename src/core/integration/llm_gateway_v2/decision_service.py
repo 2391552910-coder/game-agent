@@ -647,6 +647,29 @@ def _forced_test_skill_action(
     raise GatewayV2DecisionSelectionError
 
 
+def _forced_wait_action(
+    context: GatewayV2AgentContext,
+    wait_ms: int,
+) -> GatewayV2AgentAction | None:
+    reason = "Forced wait after the initial Lobby-to-plaza transition for dialogue testing"
+    if "wait" in context.allowed_decision_actions:
+        return GatewayV2WaitAction(reason=reason, waitMs=wait_ms)
+    if "no_op" in context.allowed_decision_actions:
+        return GatewayV2NoOpAction(reason=reason)
+    logger.warning(
+        "LLM Gateway v2 forced wait is not authorized by the current Gateway lease",
+        extra={
+            "event_id": context.event_id,
+            "session_id": context.session_id,
+            "control_generation": context.control_generation,
+            "decision_lease_id": context.decision_lease_id,
+            "state_version": context.state_version,
+            "error_category": "forced_action_not_authorized",
+        },
+    )
+    return None
+
+
 def _gateway_v2_activity_skill_action(
     context: GatewayV2AgentContext,
     skill_name: str,
@@ -895,6 +918,8 @@ class GatewayV2DecisionPlanner:
     activity_coordinator: ActivityPlanCoordinator | None = None
     scene_catalog: SceneCatalog | None = None
     force_skills: tuple[str, ...] = ()
+    force_action: str | None = None
+    force_wait_ms: int = 10_000
     token_usage_tracker: GatewayV2TokenUsageTracker = gateway_v2_token_usage_tracker
     decision_target_seconds: float | None = None
     activity_capacity_repository: ActivityCapacityRepository | None = None
@@ -905,6 +930,12 @@ class GatewayV2DecisionPlanner:
     def __post_init__(self) -> None:
         if self.decision_target_seconds is not None and self.decision_target_seconds <= 0:
             raise ValueError("decision_target_seconds must be positive")
+        if self.force_action not in (None, "wait"):
+            raise ValueError("force_action only supports 'wait'")
+        if self.force_wait_ms <= 0:
+            raise ValueError("force_wait_ms must be positive")
+        if self.force_action is not None and self.force_skills:
+            raise ValueError("force_action and force_skills are mutually exclusive")
         if self.scene_catalog is not None and self.target_allocator is None:
             object.__setattr__(self, "target_allocator", SceneTargetAllocator())
 
@@ -1002,12 +1033,13 @@ class GatewayV2DecisionPlanner:
                 >= self.decision_target_seconds * 1_000
             )
             action: GatewayV2AgentAction | None = None
-            if not deadline_reached:
+            if not deadline_reached or self.force_action == "wait":
                 action = _initial_room_transition_action(context)
             activity_context = None
             if (
                 action is not None
                 and not self.force_skills
+                and self.force_action is None
                 and self.activity_coordinator is not None
             ):
                 prepare_deterministic = getattr(
@@ -1021,6 +1053,7 @@ class GatewayV2DecisionPlanner:
                 deadline_reached
                 and action is None
                 and not self.force_skills
+                and self.force_action is None
                 and self.activity_coordinator is not None
             ):
                 activity_context = await self.activity_coordinator.resume(event, context)
@@ -1028,11 +1061,20 @@ class GatewayV2DecisionPlanner:
                 not deadline_reached
                 and action is None
                 and not self.force_skills
+                and self.force_action is None
                 and self.activity_coordinator is not None
             ):
                 activity_context = await self.activity_coordinator.prepare(event, context)
             if action is None and self.force_skills:
                 action = _forced_test_skill_action(event, context, self.force_skills)
+            if action is None and self.force_action == "wait":
+                action = _forced_wait_action(context, self.force_wait_ms)
+                if action is None:
+                    return EventProcessResult(
+                        "manual",
+                        error_stage="decision",
+                        error_category="forced_action_not_authorized",
+                    )
             if action is None and activity_context is not None:
                 planned_action = _planned_activity_action(
                     context,
