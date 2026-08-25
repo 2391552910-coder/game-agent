@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from src.core.integration.llm_gateway_v2.decision_client import (
+    DecisionClientProtocolError,
     DecisionClientResult,
     DecisionClientTransportError,
 )
@@ -44,6 +45,7 @@ class _Repository:
         self.claims = claims
         self.responses: list[tuple[ClaimedDecision, DecisionClientResult]] = []
         self.failures: list[tuple[ClaimedDecision, str, str]] = []
+        self.failure_response_bodies: list[object | None] = []
         self.renew_result = True
         self.swept = 0
         self.dead_letters = 0
@@ -65,9 +67,11 @@ class _Repository:
         max_attempts: int,
         retry_base_ms: int,
         retry_max_ms: int,
+        response_body_json: object | None = None,
     ):
         del max_attempts, retry_base_ms, retry_max_ms
         self.failures.append((decision, error_stage, error_category))
+        self.failure_response_bodies.append(response_body_json)
         return True
 
     async def renew_decision_claim(self, decision, *, claim_ttl_ms: int):
@@ -103,6 +107,7 @@ def _worker(
     *,
     claim_ttl_ms: int = 30_000,
     metrics: GatewayV2RuntimeMetrics | None = None,
+    audit_repository: object | None = None,
 ) -> DecisionWorker:
     return DecisionWorker(
         repository=repository,
@@ -116,6 +121,7 @@ def _worker(
         retry_max_ms=1_000,
         max_parallelism=1,
         metrics=metrics,
+        audit_repository=audit_repository,
     )
 
 
@@ -245,6 +251,40 @@ async def test_worker_marks_idempotency_conflict_manual_through_repository() -> 
 
     assert repository.responses == [(claim, response)]
     assert response.is_idempotency_conflict is True
+
+
+async def test_worker_audit_keeps_limited_non_json_gateway_response() -> None:
+    claim = _claim(token="00000000-0000-0000-0000-000000000111")
+    repository = _Repository([claim])
+    audit_records: list[object] = []
+
+    class _Audit:
+        async def append(self, record: object) -> None:
+            audit_records.append(record)
+
+    worker = _worker(
+        repository,
+        _Client(
+            [
+                DecisionClientProtocolError(
+                    "response_not_json",
+                    http_status=502,
+                    response_body_text="upstream unavailable",
+                )
+            ]
+        ),
+        audit_repository=_Audit(),
+    )
+
+    assert await worker.run_once() == 1
+    assert len(audit_records) == 1
+    assert repository.failure_response_bodies == [
+        {"httpStatus": 502, "rawBody": "upstream unavailable"}
+    ]
+    assert audit_records[0].response_body_json == {
+        "httpStatus": 502,
+        "rawBody": "upstream unavailable",
+    }
 
 
 async def test_worker_lost_claim_cancels_in_flight_http() -> None:

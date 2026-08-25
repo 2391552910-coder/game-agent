@@ -239,6 +239,7 @@ class HostedChatService:
         max_queue_size: int = 100,
         state_ttl_seconds: float = 300.0,
         max_state_entries: int = 10_000,
+        audit_recorder: Callable[[dict[str, object]], object] | None = None,
     ) -> None:
         if (
             max_queue_size <= 0
@@ -263,6 +264,7 @@ class HostedChatService:
         self._pending_results: OrderedDict[str, _ExpiringResult] = OrderedDict()
         self._pending_sends: OrderedDict[tuple[str, str], _ExpiringPendingSend] = OrderedDict()
         self._state_lock = asyncio.Lock()
+        self._audit_recorder = audit_recorder
 
     async def handle_chat_received(self, gateway_id: str, event: object) -> None:
         event_id = str(event.event_id)
@@ -271,6 +273,10 @@ class HostedChatService:
         payload = event.payload
         if not payload.supported or payload.text is None:
             return
+        await self._record_audit(
+            {"record_type": "chat", "direction": "inbound", "status": "received", "gateway_id": gateway_id,
+             "event_id": event_id, "session_id": event.session_id, "content": payload.text}
+        )
         sender = payload.sender
         try:
             await self._generate_and_send(
@@ -341,6 +347,11 @@ class HostedChatService:
                 raise HostedChatPermanentError("result_identity_mismatch")
             self._outbound.pop(payload.chat_message_id, None)
             self._message_by_request_id.pop(request.request_id, None)
+        await self._record_audit(
+            {"record_type": "chat", "direction": "inbound", "status": payload.status, "gateway_id": gateway_id,
+             "event_id": str(event.event_id), "session_id": payload.session_id,
+             "content": payload.reason, "chat_message_id": payload.chat_message_id}
+        )
         logger.info(
             "Hosted chat send result received",
             extra={"chat_message_id": payload.chat_message_id, "status": payload.status},
@@ -422,6 +433,12 @@ class HostedChatService:
                     self._pending_sends[pending_key] = pending
                     self._pending_sends.move_to_end(pending_key)
                     self._trim_state(self._pending_sends)
+                await self._record_audit(
+                    {"record_type": "chat", "direction": "outbound", "status": "generated",
+                     "gateway_id": gateway_id, "event_id": event_id, "session_id": session_id,
+                     "content": request.content, "request_id": pending.request_id,
+                     "request_body_json": request.model_dump(mode="json", by_alias=True)}
+                )
             accepted = await self._send(pending.request, pending.request_id)
             async with self._state_lock:
                 now = time.monotonic()
@@ -532,6 +549,17 @@ class HostedChatService:
     async def _discard_pending_send(self, gateway_id: str, event_id: str) -> None:
         async with self._state_lock:
             self._pending_sends.pop((gateway_id, event_id), None)
+
+    async def _record_audit(self, item: dict[str, object]) -> None:
+        recorder = self._audit_recorder
+        if recorder is None:
+            return
+        try:
+            result = recorder(item)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.warning("Hosted chat audit recording failed", extra={"category": "audit_write_failed"})
 
     def _expire(self, now: float) -> None:
         for key, expires_at in list(self._processed_events.items()):

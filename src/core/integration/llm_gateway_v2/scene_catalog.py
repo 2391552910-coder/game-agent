@@ -101,6 +101,33 @@ class SceneCatalog:
             return None
         return target
 
+    def movement_targets_for_scene(self, scene_id: int) -> tuple[SceneTarget, ...]:
+        return tuple(
+            target
+            for target in self.targets_for_scene(scene_id)
+            if target.kind in _MOVEMENT_TARGET_KINDS
+        )
+
+    def trusted_movement_target_for_coordinates(
+        self,
+        *,
+        scene_id: int,
+        value: Mapping[str, Any],
+    ) -> SceneTarget | None:
+        try:
+            coordinates = _coordinates(value, "move target")
+        except SceneCatalogError:
+            return None
+        comparison_key = coordinates.comparison_key()
+        return next(
+            (
+                target
+                for target in self.movement_targets_for_scene(scene_id)
+                if target.coordinates.comparison_key() == comparison_key
+            ),
+            None,
+        )
+
     def select_candidates(
         self,
         *,
@@ -112,11 +139,7 @@ class SceneCatalog:
     ) -> tuple[SceneTarget, ...]:
         if limit <= 0:
             raise ValueError("limit must be positive")
-        targets = [
-            target
-            for target in self.targets_for_scene(scene_id)
-            if target.kind in _MOVEMENT_TARGET_KINDS
-        ]
+        targets = list(self.movement_targets_for_scene(scene_id))
         if not targets:
             return ()
 

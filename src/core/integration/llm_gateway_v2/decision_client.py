@@ -14,6 +14,11 @@ from src.core.integration.llm_gateway_v2.auth import build_outbound_hmac_headers
 from src.core.integration.llm_gateway_v2.contracts import parse_gateway_v2_decision_response
 
 DecisionResponseStatus = Literal["accepted", "rejected"]
+MAX_RESPONSE_BODY_PREVIEW = 4_096
+
+
+def _response_body_preview(content: bytes) -> str:
+    return content[:MAX_RESPONSE_BODY_PREVIEW].decode("utf-8", errors="replace")
 
 
 class DecisionClientTransportError(Exception):
@@ -23,9 +28,16 @@ class DecisionClientTransportError(Exception):
 
 
 class DecisionClientProtocolError(Exception):
-    def __init__(self, category: str, *, http_status: int | None = None) -> None:
+    def __init__(
+        self,
+        category: str,
+        *,
+        http_status: int | None = None,
+        response_body_text: str | None = None,
+    ) -> None:
         self.category = category
         self.http_status = http_status
+        self.response_body_text = response_body_text
         super().__init__("gateway v2 decision response invalid")
 
 
@@ -41,6 +53,7 @@ class DecisionClientResult:
     decision_lease_id: str | None = None
     control_generation: int | None = None
     state_version: int | None = None
+    response_body_json: Mapping[str, Any] | None = None
 
     @property
     def is_idempotency_conflict(self) -> bool:
@@ -65,11 +78,18 @@ def validate_decision_response(
     if request_identity is not None:
         _validate_response_identity(response, request_identity)
 
+    decision_lease_id = response.decision_lease_id
+    if response.status == "accepted" and decision_lease_id is None:
+        request_lease_id = None if request_identity is None else request_identity.get("decisionLeaseId")
+        if not isinstance(request_lease_id, str) or not request_lease_id:
+            raise DecisionClientProtocolError("response_identity_missing")
+        decision_lease_id = request_lease_id
+
     result_identity = {
         "trace_id": response.trace_id,
         "session_id": response.session_id,
         "decision_id": response.decision_id,
-        "decision_lease_id": response.decision_lease_id,
+        "decision_lease_id": decision_lease_id,
         "control_generation": response.control_generation,
         "state_version": response.state_version,
     }
@@ -80,6 +100,7 @@ def validate_decision_response(
             status="rejected",
             reason=response.reason,
             skill_call_id=None,
+            response_body_json=dict(payload) if isinstance(payload, Mapping) else None,
             **result_identity,
         )
 
@@ -113,6 +134,7 @@ def validate_decision_response(
         status="accepted",
         reason=response.reason,
         skill_call_id=skill_call_id,
+        response_body_json=dict(payload) if isinstance(payload, Mapping) else None,
         **result_identity,
     )
 
@@ -130,7 +152,7 @@ def _validate_response_identity(response: Any, expected: Mapping[str, Any]) -> N
         expected_value = expected.get(request_key)
         actual_value = getattr(response, response_attribute)
         if actual_value is None:
-            if response.status == "accepted":
+            if response.status == "accepted" and request_key != "decisionLeaseId":
                 raise DecisionClientProtocolError("response_identity_missing")
             continue
         if actual_value != expected_value:
@@ -217,10 +239,20 @@ class GatewayV2DecisionClient:
             raise DecisionClientProtocolError(
                 "response_not_json",
                 http_status=response.status_code,
+                response_body_text=_response_body_preview(response.content),
             ) from None
-        return validate_decision_response(
-            action,
-            response.status_code,
-            payload,
-            request_identity=_request_identity(raw_body),
-        )
+        try:
+            return validate_decision_response(
+                action,
+                response.status_code,
+                payload,
+                request_identity=_request_identity(raw_body),
+            )
+        except DecisionClientProtocolError as error:
+            if error.response_body_text is not None:
+                raise
+            raise DecisionClientProtocolError(
+                error.category,
+                http_status=error.http_status,
+                response_body_text=_response_body_preview(response.content),
+            ) from None

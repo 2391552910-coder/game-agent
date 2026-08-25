@@ -46,6 +46,7 @@ from src.core.integration.llm_gateway_v2.inbox_repository import (
     EventAdmissionUnavailable,
     InboxRepository,
 )
+from src.core.integration.llm_gateway_v2.monitor_audit import MonitorAuditRepository, MonitorRecord, safe_record
 from src.core.integration.llm_gateway_v2.terminal_repository import MutationDisposition, MutationResult
 from src.core.integration.llm_gateway_v2.worker_hooks import NO_OP_WORKER_HOOKS, WorkerHooks
 
@@ -284,6 +285,7 @@ class EventService:
     max_batch_size: int | None = None
     hooks: WorkerHooks = NO_OP_WORKER_HOOKS
     admission_limiter: EventAdmissionLimiter | None = None
+    audit_repository: MonitorAuditRepository | None = None
 
     def __post_init__(self) -> None:
         if self.admission_limiter is None:
@@ -351,6 +353,24 @@ class EventService:
         await self.hooks.after_event_commit(
             acceptance.received_event_ids + acceptance.duplicate_event_ids
         )
+        received_ids = set(acceptance.received_event_ids)
+        for event in envelope.events:
+            if event.event_id not in received_ids:
+                continue
+            await safe_record(
+                self.audit_repository,
+                MonitorRecord(
+                    tenant_id=identity.tenant_id,
+                    gateway_id=identity.gateway_id,
+                    session_id=event.session_id,
+                    event_id=event.event_id,
+                    trace_id=envelope.trace_id,
+                    record_type=_monitor_record_type(event.event_type),
+                    direction="inbound",
+                    status="accepted",
+                    request_body_json=event.model_dump(mode="json", by_alias=True),
+                ),
+            )
 
         input_order = tuple(dict.fromkeys(event.event_id for event in envelope.events))
         received = set(acceptance.received_event_ids)
@@ -390,8 +410,17 @@ class EventService:
 GatewayV2EventService = EventService
 
 
+def _monitor_record_type(event_type: str) -> str:
+    if event_type in {"skill_started", "skill_finished"}:
+        return "skill"
+    if event_type in {"chat_received", "nearby_friend_chat_requested", "chat_send_result"}:
+        return "chat"
+    return "event"
+
+
 def build_gateway_v2_event_service(max_batch_size: int | None = None) -> EventService:
     return EventService(
         InboxRepository(event_admission_session_factory),
         max_batch_size=max_batch_size,
+        audit_repository=MonitorAuditRepository(),
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlanProposal,
     create_plaza_social_plan,
     record_step_terminal,
+    validate_activity_plan,
 )
 from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanBinding,
@@ -757,6 +759,84 @@ async def test_non_lobby_plan_does_not_repeat_scene_tornado() -> None:
 
     assert result is not None
     assert all(step.skill_name != "scene_tornado" for step in result.plan.steps)
+
+
+@pytest.mark.asyncio
+async def test_new_lease_retargets_existing_move_step_without_calling_model() -> None:
+    existing = validate_activity_plan(
+        {
+            "planId": "plan-existing",
+            "goalId": "plaza_explore",
+            "goalSummary": "Explore the current scene",
+            "phase": "movement",
+            "status": "active",
+            "version": 1,
+            "currentStepId": "move",
+            "steps": [
+                {
+                    "stepId": "move",
+                    "phase": "movement",
+                    "skillName": "move_to",
+                    "schemaVersion": "v1",
+                    "sceneTargetId": "scene:7:navigation:1",
+                    "intent": "Walk to a trusted scene point",
+                },
+                {
+                    "stepId": "dance",
+                    "phase": "activity",
+                    "skillName": "dance_auto_schedule",
+                    "schemaVersion": "v1",
+                    "intent": "Dance at the plaza",
+                },
+                {
+                    "stepId": "coffee",
+                    "phase": "activity",
+                    "skillName": "coffee_auto_schedule",
+                    "schemaVersion": "v1",
+                    "intent": "Have coffee",
+                },
+            ],
+        }
+    )
+    repository = _Repository(
+        ActivityPlanSnapshot(existing, (), (), version=1, last_event_sequence=1)
+    )
+    scene_catalog = SceneCatalog(
+        [
+            SceneTarget(
+                target_id=f"scene:7:navigation:{index}",
+                scene_id=7,
+                scene_name="CJ_guangchang",
+                kind="navigation",
+                activity="wander",
+                point_key=str(index),
+                coordinates=SceneCoordinates(float(index), 0.0, 2.0),
+                source_path="test-scene",
+            )
+            for index in (1, 2)
+        ]
+    )
+    generator = _Generator(_proposal())
+    coordinator = ActivityPlanCoordinator(
+        repository=repository,
+        generator=generator,
+        scene_catalog=scene_catalog,
+        step_authorizer=lambda context, skill_name, schema_version: True,
+    )
+
+    result = await coordinator.prepare(
+        SimpleNamespace(event_sequence=2),
+        _context(
+            skills=["move_to", "dance_auto_schedule", "coffee_auto_schedule"],
+            lobby=False,
+            scene_id=7,
+        ),
+    )
+
+    assert result is not None
+    assert generator.calls == 0
+    assert result.plan.version == 2
+    assert result.plan.current_step().scene_target_id == "scene:7:navigation:2"
 
 
 def _context(

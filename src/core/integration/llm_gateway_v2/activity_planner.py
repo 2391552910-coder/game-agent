@@ -24,6 +24,7 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlanProposalStep,
     ActivityPlanValidationError,
     materialize_activity_plan,
+    replace_move_target,
 )
 from src.core.integration.llm_gateway_v2.activity_plan_repository import (
     ActivityPlanContext,
@@ -303,13 +304,18 @@ class ActivityPlanCoordinator:
                 context,
                 self._step_authorizer,
             )
-            or not _current_step_is_resolvable(
-                snapshot.plan,
-                context,
-                self._scene_catalog,
-            )
             or not _current_step_has_capacity(snapshot.plan, capacity_snapshot)
         ):
+            return None
+        retargeted = _retarget_active_move_step(
+            event,
+            context,
+            snapshot,
+            scene_catalog=self._scene_catalog,
+        )
+        if retargeted is not None:
+            return await self._repository.prepare(event, context, proposed_plan=retargeted)
+        if not _current_step_is_resolvable(snapshot.plan, context, self._scene_catalog):
             return None
         return await self._repository.prepare(event, context, proposed_plan=None)
 
@@ -335,6 +341,14 @@ class ActivityPlanCoordinator:
             )
             and _current_step_has_capacity(snapshot.plan, capacity_snapshot)
         ):
+            retargeted = _retarget_active_move_step(
+                event,
+                context,
+                snapshot,
+                scene_catalog=self._scene_catalog,
+            )
+            if retargeted is not None:
+                return await self._repository.prepare(event, context, proposed_plan=retargeted)
             return await self._repository.prepare(event, context, proposed_plan=None)
 
         version = max(
@@ -378,6 +392,14 @@ class ActivityPlanCoordinator:
             )
             and _current_step_has_capacity(snapshot.plan, capacity_snapshot)
         ):
+            retargeted = _retarget_active_move_step(
+                event,
+                context,
+                snapshot,
+                scene_catalog=self._scene_catalog,
+            )
+            if retargeted is not None:
+                return await self._repository.prepare(event, context, proposed_plan=retargeted)
             return await self._repository.prepare(event, context, proposed_plan=None)
 
         version = max(
@@ -496,6 +518,52 @@ def _current_step_has_capacity(
     return skill_name is None or capacity_snapshot.is_available(skill_name)
 
 
+def _retarget_active_move_step(
+    event: ClaimedGatewayEvent,
+    context: GatewayV2AgentContext,
+    snapshot: ActivityPlanSnapshot,
+    *,
+    scene_catalog: SceneCatalog | None,
+) -> ActivityPlan | None:
+    plan = snapshot.plan
+    event_sequence = getattr(event, "event_sequence", None)
+    if (
+        plan is None
+        or plan.status != "active"
+        or plan.current_step().skill_name != "move_to"
+        or scene_catalog is None
+        or type(event_sequence) is not int
+        or event_sequence <= snapshot.last_event_sequence
+    ):
+        return None
+    scene_id = scene_id_from_snapshot(context.session_snapshot)
+    next_version = max(snapshot.version, plan.version) + 1
+    if scene_id is None:
+        return replace_move_target(plan, plan.current_step_id, None, version=next_version)
+    role_identity = role_identity_from_snapshot(
+        context.session_snapshot,
+        fallback=context.session_id,
+    )
+    candidates = scene_catalog.select_candidates(
+        scene_id=scene_id,
+        role_identity=role_identity,
+        plan_version=next_version,
+        limit=max(1, len(scene_catalog.movement_targets_for_scene(scene_id))),
+        recent_actions=snapshot.recent_actions,
+    )
+    old_target_id = plan.current_step().scene_target_id
+    next_target = next(
+        (candidate for candidate in candidates if candidate.target_id != old_target_id),
+        None,
+    )
+    return replace_move_target(
+        plan,
+        plan.current_step_id,
+        None if next_target is None else next_target.target_id,
+        version=next_version,
+    )
+
+
 def _is_lobby(snapshot: Mapping[str, Any]) -> bool:
     scene_id = snapshot.get("SceneId", snapshot.get("sceneId"))
     scene_name = snapshot.get("SceneName", snapshot.get("sceneName"))
@@ -585,7 +653,12 @@ def _safe_fallback_plan(
             plan_version=version,
         )
         remaining = [(skill_name, "v1") for skill_name in weighted]
-    if first != ("move_to", "v1") and ("move_to", "v1") in remaining:
+    if lobby and scene_catalog is None:
+        # The minimal fallback without a scene catalog is the canonical
+        # plaza_social template. Production runs have a trusted catalog and
+        # keep role rotation enabled to spread concurrent roles.
+        pass
+    elif first != ("move_to", "v1") and ("move_to", "v1") in remaining:
         remaining.remove(("move_to", "v1"))
         rotation = _stable_rotation(role_identity, len(remaining) + 1)
         remaining.insert(rotation, ("move_to", "v1"))

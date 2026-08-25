@@ -163,6 +163,8 @@ class Settings(BaseSettings):
     llm_gateway_v2_shutdown_grace_seconds: int = Field(default=10, ge=1, le=300)
     llm_gateway_v2_readiness_timeout_seconds: int = Field(default=3, ge=1, le=60)
     llm_gateway_v2_readiness_cache_seconds: int = Field(default=5, ge=1, le=300)
+    llm_gateway_v2_session_idle_timeout_seconds: float = Field(default=600.0, gt=0, le=86_400.0)
+    llm_gateway_v2_event_stale_after_seconds: float = Field(default=480.0, gt=0, le=86_400.0)
 
     # ── Token 配额 ──
     default_monthly_tokens: int = Field(default=40_000_000)
@@ -196,6 +198,11 @@ class Settings(BaseSettings):
         if self.llm_gateway_v2_lease_safety_window_ms >= self.llm_gateway_v2_lease_ttl_ms:
             raise ValueError(
                 "llm_gateway_v2_lease_safety_window_ms must be less than llm_gateway_v2_lease_ttl_ms"
+            )
+        if self.llm_gateway_v2_event_stale_after_seconds > self.llm_gateway_v2_session_idle_timeout_seconds:
+            raise ValueError(
+                "llm_gateway_v2_event_stale_after_seconds must not exceed "
+                "llm_gateway_v2_session_idle_timeout_seconds"
             )
         decision_target_ms = self.llm_gateway_v2_decision_target_seconds * 1_000
         if (

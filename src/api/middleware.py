@@ -18,7 +18,21 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
 
-PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/metrics", "/api/gateway/events"}
+PUBLIC_PATHS = {
+    "/health",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/metrics",
+    "/api/gateway/events",
+    "/api/gateway/v2/monitor",
+    "/api/gateway/v2/monitor/stream",
+    "/gateway",
+}
+
+
+def _is_public_path(path: str) -> bool:
+    return path in PUBLIC_PATHS or path.startswith("/gateway/assets/")
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """
@@ -30,7 +44,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     验证通过 -> Redis SETEX 缓存5分钟
     """
     async def dispatch(self, request: Request,call_next) -> Response:
-        if request.url.path in PUBLIC_PATHS:
+        if _is_public_path(request.url.path):
             return await call_next(request)
 
         api_key = request.headers.get("X-API-Key")
@@ -95,7 +109,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
           self.window = window
 
       async def dispatch(self, request: Request, call_next) -> Response:
-          if request.url.path in PUBLIC_PATHS:
+          if _is_public_path(request.url.path):
               return await call_next(request)
 
           from src.core.infrastructure.redis import get_redis

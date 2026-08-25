@@ -2018,7 +2018,8 @@ async def test_session_stop_converges_event_outbox_and_stop_call_atomically(sess
     )
     assert call["terminal_event_id"] == stopped.row_id
     assert (await _cycle(session_factory, 1))["status"] == "stopped"
-    assert (await _runtime(session_factory))["status"] == "stopped"
+    runtime = await _runtime(session_factory)
+    assert (runtime["status"], runtime["fence_version"]) == ("stopped", 2)
 
 
 async def test_gap_blocks_later_sequence_and_partition_advances_in_order(session_factory) -> None:

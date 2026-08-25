@@ -63,6 +63,7 @@ from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneTarget,
     load_default_scene_catalog,
 )
+from src.core.integration.llm_gateway_v2.scene_target_allocator import SceneTargetAllocator
 from src.core.integration.llm_gateway_v2.token_usage import (
     GatewayV2TokenUsageTracker,
     gateway_v2_token_callback_config,
@@ -1548,6 +1549,41 @@ class _PlanningRepository:
 
 
 @dataclass
+class _FencedPlanningRepository(_PlanningRepository):
+    async def is_event_fence_current(self, event, context) -> bool:
+        del event, context
+        return False
+
+
+async def test_model_is_not_called_when_session_fence_is_already_stopped() -> None:
+    runner = _Runner(
+        result={
+            "selected_action": GatewayV2WaitAction(
+                reason="should not run",
+                waitMs=1_000,
+            ).model_dump(mode="json", by_alias=True)
+        }
+    )
+    repository = _FencedPlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+    )
+
+    result = await planner(
+        _claimed_for_planner(_event()),
+        build_gateway_v2_agent_context(_event()),
+    )
+
+    assert result == EventProcessResult(
+        "manual",
+        error_stage="fence",
+        error_category="model_call_skipped",
+    )
+    assert runner.calls == 0
+
+
+@dataclass
 class _CapacityRaceRepository(_PlanningRepository):
     capacity_failures: int = 1
     capacity_attempts: int = 0
@@ -1572,6 +1608,91 @@ class _CapacitySnapshotRepository:
             scene_id=8,
             active_by_skill={"dance_auto_schedule": 33},
         )
+
+
+@dataclass
+class _BatchPlanningRepository:
+    stored_by_event: dict[str, PlannedDecision]
+
+    def __init__(self) -> None:
+        self.stored_by_event = {}
+
+    async def find_by_source_event(self, event: ClaimedGatewayEvent) -> PlannedDecision | None:
+        return self.stored_by_event.get(event.event_id)
+
+    async def plan_decision(self, event, context, action, activity_binding=None) -> PlannedDecision:
+        del activity_binding
+        frozen = freeze_gateway_v2_decision(
+            f"decision-{event.event_id}",
+            event.trace_id,
+            context,
+            action,
+        )
+        planned = PlannedDecision(
+            row_id=event.row_id,
+            decision_id=f"decision-{event.event_id}",
+            decision_lease_id=context.decision_lease_id,
+            action=action.action,
+            request_body_json=frozen.body_json,
+            request_body_bytes=frozen.body_bytes,
+            body_hash=frozen.body_hash,
+            action_tracking_id=None,
+            created=True,
+        )
+        self.stored_by_event[event.event_id] = planned
+        return planned
+
+
+def _move_lease(*, role_id: str) -> dict[str, Any]:
+    payload = _lease(
+        available_skills=[{"skillName": "move_to", "schemaVersion": "v1"}],
+        hints=[
+            {
+                "skillName": "move_to",
+                "schemaVersion": "v1",
+                "allowedArgs": ["target.x", "target.y", "target.z"],
+                "missingArgs": ["target.x", "target.y", "target.z"],
+            }
+        ],
+    )
+    payload["decisionContext"]["session"].update(
+        {"SceneId": 7, "SceneName": "CJ_guangchang", "RoleId": role_id}
+    )
+    return payload
+
+
+def _move_event(*, event_id: str, session_id: str, sequence: int, role_id: str):
+    raw = _event(lease=_move_lease(role_id=role_id)).model_dump(mode="json", by_alias=True)
+    raw.update({"eventId": event_id, "sessionId": session_id, "eventSequence": sequence})
+    raw["payload"]["lease"].update(
+        {
+            "sessionId": session_id,
+            "decisionLeaseId": f"lease-{event_id}",
+            "stateVersion": sequence,
+        }
+    )
+    raw["payload"]["decisionContext"]["session"]["SessionId"] = session_id
+    raw["decisionLeaseId"] = f"lease-{event_id}"
+    raw["stateVersion"] = sequence
+    return parse_gateway_v2_event(raw)
+
+
+def _move_scene_catalog() -> SceneCatalog:
+    return SceneCatalog(
+        [
+            SceneTarget(
+                target_id=f"scene:7:navigation:{index}",
+                scene_id=7,
+                scene_name="CJ_guangchang",
+                kind="navigation",
+                activity="wander",
+                point_key=str(index),
+                coordinates=SceneCoordinates(float(index), 0.0, 2.0),
+                source_path="test-scene",
+            )
+            for index in (1, 2)
+        ]
+    )
 
 
 async def test_capacity_race_replaces_full_activity_with_trusted_move_to() -> None:
@@ -1649,6 +1770,77 @@ async def test_capacity_race_replaces_full_activity_with_trusted_move_to() -> No
         "target": {"x": 10.0, "y": 0.0, "z": 20.0}
     }
     assert repository.activity_bindings == [None]
+
+
+async def test_final_move_to_check_downgrades_model_coordinates_outside_scene_catalog() -> None:
+    event = _move_event(event_id="event-untrusted", session_id="session-1", sequence=7, role_id="role-1")
+    runner = _Runner(
+        result={
+            "errors": [],
+            "selected_action": GatewayV2CallSkillAction(
+                action="call_skill",
+                skillName="move_to",
+                schemaVersion="v1",
+                arguments={"target": {"x": 999.0, "y": 999.0, "z": 999.0}},
+            ).model_dump(mode="json", by_alias=True),
+        }
+    )
+    repository = _PlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        scene_catalog=_move_scene_catalog(),
+    )
+
+    result = await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+
+    assert result == EventProcessResult("succeeded")
+    assert repository.stored is not None
+    assert repository.stored.request_body_json["action"] == "wait"
+    assert "arguments" not in repository.stored.request_body_json
+
+
+async def test_final_move_to_check_allocates_distinct_targets_and_waits_when_exhausted() -> None:
+    scene_catalog = _move_scene_catalog()
+    requested = GatewayV2CallSkillAction(
+        action="call_skill",
+        skillName="move_to",
+        schemaVersion="v1",
+        arguments={"target": {"x": 1.0, "y": 0.0, "z": 2.0}},
+    )
+    runner = _Runner(
+        result={"errors": [], "selected_action": requested.model_dump(mode="json", by_alias=True)}
+    )
+    repository = _BatchPlanningRepository()
+    planner = GatewayV2DecisionPlanner(
+        decision_service=GatewayV2DecisionService(runner=runner),
+        repository=repository,
+        scene_catalog=scene_catalog,
+        target_allocator=SceneTargetAllocator(window_ms=5_000),
+    )
+    events = [
+        _move_event(
+            event_id=f"event-batch-{index}",
+            session_id=f"session-{index}",
+            sequence=7,
+            role_id=f"role-{index}",
+        )
+        for index in range(3)
+    ]
+
+    results = [
+        await planner(_claimed_for_planner(event), build_gateway_v2_agent_context(event))
+        for event in events
+    ]
+
+    assert results == [EventProcessResult("succeeded")] * 3
+    bodies = [repository.stored_by_event[event.event_id].request_body_json for event in events]
+    assert [body["action"] for body in bodies] == ["call_skill", "call_skill", "wait"]
+    coordinates = [body["arguments"]["target"] for body in bodies[:2]]
+    assert {tuple(item[axis] for axis in ("x", "y", "z")) for item in coordinates} == {
+        (1.0, 0.0, 2.0),
+        (2.0, 0.0, 2.0),
+    }
 
 
 async def test_second_capacity_race_falls_back_to_wait_with_delay() -> None:

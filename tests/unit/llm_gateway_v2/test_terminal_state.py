@@ -584,6 +584,14 @@ def test_retryable_failed_decision_rejection_becomes_rejected() -> None:
     assert resolution.reason == "lease expired"
 
 
+def test_target_congested_decision_rejection_becomes_terminal_rejected() -> None:
+    resolution = resolve_decision_rejection("sending", None, "target_congested")
+
+    assert resolution.disposition is MutationDisposition.APPLIED
+    assert resolution.status == "rejected"
+    assert resolution.reason == "target_congested"
+
+
 def test_decision_rejection_requires_the_original_decision_identity() -> None:
     event = parse_gateway_v2_event(
         {

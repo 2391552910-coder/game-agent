@@ -20,7 +20,16 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest  # noqa: E402
 from pydantic import SecretStr  # noqa: E402
 
 from src.api.middleware import PUBLIC_PATHS, AuthMiddleware, RateLimitMiddleware  # noqa: E402
-from src.api.routes import analysis, gateway_v2, providers, quota, tenants, webhooks  # noqa: E402
+from src.api.routes import (  # noqa: E402
+    analysis,
+    gateway_monitor_page,
+    gateway_v2,
+    monitor,
+    providers,
+    quota,
+    tenants,
+    webhooks,
+)
 from src.config import settings  # noqa: E402
 from src.core.infrastructure.db import async_session_factory, close_db, init_db  # noqa: E402
 from src.core.infrastructure.redis import close_redis, init_redis  # noqa: E402
@@ -58,6 +67,7 @@ from src.core.integration.llm_gateway_v2.hosted_chat import (  # noqa: E402
     HostedChatService,
 )
 from src.core.integration.llm_gateway_v2.inbox_repository import InboxRepository  # noqa: E402
+from src.core.integration.llm_gateway_v2.monitor_audit import MonitorAuditRepository  # noqa: E402
 from src.core.integration.llm_gateway_v2.outbox_repository import OutboxRepository  # noqa: E402
 from src.core.integration.llm_gateway_v2.readiness import (  # noqa: E402
     ReadinessService,
@@ -79,7 +89,16 @@ from src.core.integration.llm_gateway_v2.worker_status import WorkerStatusRegist
 
 logger = logging.getLogger(__name__)
 
-PUBLIC_PATHS.update({"/ready", "/metrics", "/api/gateway/v2/events", "/api/gateway/v2/capabilities"})
+PUBLIC_PATHS.update(
+    {
+        "/ready",
+        "/metrics",
+        "/api/gateway/v2/events",
+        "/api/gateway/v2/capabilities",
+        "/api/gateway/v2/monitor",
+        "/api/gateway/v2/monitor/stream",
+    }
+)
 
 event_worker_status = WorkerStatusRegistry()
 decision_worker_status = WorkerStatusRegistry()
@@ -115,6 +134,7 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         "event_parallelism=%s decision_parallelism=%s agent_concurrency=%s "
         "agent_acquire_timeout_seconds=%s decision_target_seconds=%s "
         "lease_ttl_ms=%s lease_safety_window_ms=%s "
+        "session_idle_timeout_seconds=%s event_stale_after_seconds=%s "
         "activity_capacity_ttl_seconds=%s db_pool=%s+%s "
         "event_admission_pool=%s+%s event_admission_pool_timeout_seconds=%s "
         "force_skills=%s",
@@ -134,6 +154,8 @@ def log_runtime_configuration(runtime_settings: object) -> None:
         getattr(runtime_settings, "llm_gateway_v2_decision_target_seconds", ""),
         getattr(runtime_settings, "llm_gateway_v2_lease_ttl_ms", ""),
         getattr(runtime_settings, "llm_gateway_v2_lease_safety_window_ms", ""),
+        getattr(runtime_settings, "llm_gateway_v2_session_idle_timeout_seconds", ""),
+        getattr(runtime_settings, "llm_gateway_v2_event_stale_after_seconds", ""),
         getattr(runtime_settings, "llm_gateway_v2_activity_capacity_ttl_seconds", ""),
         getattr(runtime_settings, "postgres_pool_size", ""),
         getattr(runtime_settings, "postgres_max_overflow", ""),
@@ -222,7 +244,9 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
     inbox_repository = InboxRepository(
         async_session_factory,
         metrics=runtime_metrics,
+        event_stale_after_seconds=settings.llm_gateway_v2_event_stale_after_seconds,
     )
+    audit_repository = MonitorAuditRepository()
     activity_capacity_repository = ActivityCapacityRepository()
     outbox_repository = OutboxRepository(
         lease_ttl_ms=getattr(settings, "llm_gateway_v2_lease_ttl_ms", 600_000),
@@ -260,6 +284,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             max_queue_size=getattr(settings, "llm_gateway_hosted_chat_queue_size", 100),
             state_ttl_seconds=getattr(settings, "llm_gateway_hosted_chat_state_ttl_seconds", 300),
             max_state_entries=getattr(settings, "llm_gateway_hosted_chat_max_state_entries", 10_000),
+            audit_recorder=audit_repository.record_hosted_chat,
         )
     scene_catalog = load_default_scene_catalog()
     decision_planner = GatewayV2DecisionPlanner(
@@ -288,6 +313,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
             55.0,
         ),
         activity_capacity_repository=activity_capacity_repository,
+        audit_repository=audit_repository,
     )
     event_dispatcher = GatewayV2EventDispatcher(
         context_repository=inbox_repository,
@@ -309,6 +335,8 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
         retry_base_ms=settings.llm_gateway_v2_retry_base_ms,
         retry_max_ms=settings.llm_gateway_v2_retry_max_ms,
         max_parallelism=settings.llm_gateway_v2_event_max_parallelism,
+        session_idle_timeout_seconds=settings.llm_gateway_v2_session_idle_timeout_seconds,
+        event_stale_after_seconds=settings.llm_gateway_v2_event_stale_after_seconds,
         metrics=runtime_metrics,
     )
     decision_client = GatewayV2DecisionClient(
@@ -329,6 +357,7 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
         retry_max_ms=settings.llm_gateway_v2_retry_max_ms,
         max_parallelism=settings.llm_gateway_v2_decision_max_parallelism,
         metrics=runtime_metrics,
+        audit_repository=audit_repository,
     )
     return GatewayV2Runtime(
         event_worker=event_worker,
@@ -504,6 +533,8 @@ app.add_middleware(AuthMiddleware)
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 app.include_router(webhooks.gateway_router, prefix="/api/gateway", tags=["gateway-v1"])
 app.include_router(gateway_v2.router)
+app.include_router(monitor.router)
+app.include_router(gateway_monitor_page.router)
 app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["analysis"])
 app.include_router(tenants.router, prefix="/api/v1/tenants", tags=["tenants"])
 app.include_router(quota.router, prefix="/api/v1/quota", tags=["quota"])

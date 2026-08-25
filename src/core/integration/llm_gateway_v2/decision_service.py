@@ -5,6 +5,7 @@ import hashlib
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Protocol, cast
@@ -45,6 +46,7 @@ from src.core.integration.llm_gateway_v2.contracts import (
     parse_gateway_v2_decision,
 )
 from src.core.integration.llm_gateway_v2.event_worker import ClaimedGatewayEvent, EventProcessResult
+from src.core.integration.llm_gateway_v2.monitor_audit import MonitorAuditRepository, MonitorRecord, safe_record
 from src.core.integration.llm_gateway_v2.outbox_repository import (
     ActivityCapacityFullError,
     DecisionPlanConflictError,
@@ -59,8 +61,10 @@ from src.core.integration.llm_gateway_v2.paper_plane import (
 from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.scene_catalog import (
     SceneCatalog,
+    role_identity_from_snapshot,
     scene_id_from_snapshot,
 )
+from src.core.integration.llm_gateway_v2.scene_target_allocator import SceneTargetAllocator
 from src.core.integration.llm_gateway_v2.token_usage import (
     GatewayV2TokenUsageTracker,
     gateway_v2_token_usage_tracker,
@@ -881,6 +885,8 @@ class _DecisionPlanRepository(Protocol):
         activity_binding: ActivityPlanBinding | None = None,
     ) -> PlannedDecision: ...
 
+    async def record_decision_token_usage(self, event: ClaimedGatewayEvent, usage: object) -> bool: ...
+
 
 @dataclass(frozen=True)
 class GatewayV2DecisionPlanner:
@@ -893,10 +899,14 @@ class GatewayV2DecisionPlanner:
     decision_target_seconds: float | None = None
     activity_capacity_repository: ActivityCapacityRepository | None = None
     now_ms: Callable[[], int] = lambda: int(time.time() * 1_000)
+    audit_repository: MonitorAuditRepository | None = None
+    target_allocator: SceneTargetAllocator | None = None
 
     def __post_init__(self) -> None:
         if self.decision_target_seconds is not None and self.decision_target_seconds <= 0:
             raise ValueError("decision_target_seconds must be positive")
+        if self.scene_catalog is not None and self.target_allocator is None:
+            object.__setattr__(self, "target_allocator", SceneTargetAllocator())
 
     async def __call__(
         self,
@@ -912,16 +922,56 @@ class GatewayV2DecisionPlanner:
         try:
             result = await self._plan(event, context)
         except BaseException:
-            self.token_usage_tracker.complete_decision(
+            usage = self.token_usage_tracker.complete_decision(
                 token_scope,
                 decision_status="unhandled_error",
             )
+            await self._persist_token_usage(event, usage)
+            await self._record_audit(event, context, "unhandled_error", usage)
             raise
-        self.token_usage_tracker.complete_decision(
+        usage = self.token_usage_tracker.complete_decision(
             token_scope,
             decision_status=result.outcome,
         )
+        await self._persist_token_usage(event, usage)
+        await self._record_audit(event, context, result.outcome, usage)
         return result
+
+    async def _persist_token_usage(self, event: ClaimedGatewayEvent, usage: object) -> None:
+        record_usage = getattr(self.repository, "record_decision_token_usage", None)
+        if callable(record_usage):
+            with suppress(DecisionPlanUnavailableError):
+                await record_usage(event, usage)
+
+    async def _record_audit(
+        self,
+        event: ClaimedGatewayEvent,
+        context: GatewayV2AgentContext,
+        status: str,
+        usage: object,
+    ) -> None:
+        if self.audit_repository is None:
+            return
+        await safe_record(
+            self.audit_repository,
+            MonitorRecord(
+                tenant_id=event.tenant_id,
+                gateway_id=event.gateway_id,
+                session_id=context.session_id,
+                event_id=event.event_id,
+                trace_id=event.trace_id,
+                decision_id=context.decision_lease_id,
+                record_type="decision",
+                direction="system",
+                status=status,
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+                total_tokens=getattr(usage, "total_tokens", None),
+                model_calls=getattr(usage, "model_calls", None),
+                usage_reported_calls=getattr(usage, "usage_reported_calls", None),
+                usage_missing_calls=getattr(usage, "usage_missing_calls", None),
+            ),
+        )
 
     async def _plan(
         self,
@@ -1019,6 +1069,25 @@ class GatewayV2DecisionPlanner:
                     },
                 )
             if action is None:
+                fence_checker = getattr(self.repository, "is_event_fence_current", None)
+                if callable(fence_checker) and not await fence_checker(event, context):
+                    logger.info(
+                        "LLM Gateway v2 model call skipped after session fence changed",
+                        extra={
+                            "event_id": event.event_id,
+                            "trace_id": event.trace_id,
+                            "session_id": context.session_id,
+                            "control_generation": context.control_generation,
+                            "decision_lease_id": context.decision_lease_id,
+                            "state_version": context.state_version,
+                            "error_category": "model_call_skipped",
+                        },
+                    )
+                    return EventProcessResult(
+                        "manual",
+                        error_stage="fence",
+                        error_category="model_call_skipped",
+                    )
                 try:
                     action = await self.decision_service.decide(
                         context,
@@ -1086,6 +1155,12 @@ class GatewayV2DecisionPlanner:
             if action is None:
                 raise GatewayV2AgentExecutionError("empty_output")
             action = _normalize_gateway_v2_action(context, action)
+            action = self._finalize_move_to_action(
+                event,
+                context,
+                action,
+                activity_context=activity_context,
+            )
             try:
                 if activity_context is None:
                     await self.repository.plan_decision(event, context, action)
@@ -1132,6 +1207,12 @@ class GatewayV2DecisionPlanner:
                     fallback = _decision_deadline_fallback(context)
                 if fallback is None:
                     raise
+                fallback = self._finalize_move_to_action(
+                    event,
+                    context,
+                    fallback,
+                    activity_context=activity_context,
+                )
                 try:
                     await self.repository.plan_decision(event, context, fallback)
                 except ActivityCapacityFullError:
@@ -1141,7 +1222,19 @@ class GatewayV2DecisionPlanner:
                     await self.repository.plan_decision(event, context, wait)
             return EventProcessResult("succeeded")
         except DecisionPlanFencedError:
-            return EventProcessResult("manual", error_stage="fence", error_category="claim_lost")
+            logger.info(
+                "LLM Gateway v2 model result discarded after session fence changed",
+                extra={
+                    "event_id": event.event_id,
+                    "trace_id": event.trace_id,
+                    "session_id": context.session_id,
+                    "control_generation": context.control_generation,
+                    "decision_lease_id": context.decision_lease_id,
+                    "state_version": context.state_version,
+                    "error_category": "model_result_discarded",
+                },
+            )
+            return EventProcessResult("manual", error_stage="fence", error_category="model_result_discarded")
         except DecisionPlanConflictError as error:
             return EventProcessResult("manual", error_stage="plan", error_category=error.category)
         except DecisionPlanUnavailableError:
@@ -1156,3 +1249,61 @@ class GatewayV2DecisionPlanner:
                 error_stage=error.stage,
                 error_category=error.category,
             )
+
+    def _finalize_move_to_action(
+        self,
+        event: ClaimedGatewayEvent,
+        context: GatewayV2AgentContext,
+        action: GatewayV2AgentAction,
+        *,
+        activity_context: ActivityPlanContext | None,
+    ) -> GatewayV2AgentAction:
+        if not isinstance(action, GatewayV2CallSkillAction) or action.skill_name != "move_to":
+            return action
+        if self.scene_catalog is None or self.target_allocator is None:
+            return _safe_unavailable_skill_action(context)
+        scene_id = scene_id_from_snapshot(context.session_snapshot)
+        target = action.arguments.get("target")
+        if scene_id is None or not isinstance(target, Mapping):
+            return _safe_unavailable_skill_action(context)
+        trusted = self.scene_catalog.trusted_movement_target_for_coordinates(
+            scene_id=scene_id,
+            value=target,
+        )
+        if trusted is None:
+            return _safe_unavailable_skill_action(context)
+        role_identity = role_identity_from_snapshot(
+            context.session_snapshot,
+            fallback=context.session_id,
+        )
+        plan_version = 1 if activity_context is None else activity_context.plan.version
+        candidates = self.scene_catalog.select_candidates(
+            scene_id=scene_id,
+            role_identity=role_identity,
+            plan_version=plan_version,
+            limit=max(1, len(self.scene_catalog.movement_targets_for_scene(scene_id))),
+            recent_actions=(
+                () if activity_context is None else activity_context.recent_actions
+            ),
+        )
+        allocated = self.target_allocator.allocate(
+            gateway_id=event.gateway_id,
+            session_id=context.session_id,
+            event_id=event.event_id,
+            scene_id=scene_id,
+            control_generation=context.control_generation,
+            occurred_at_ms=event.event.occurred_at_ms,
+            candidates=candidates,
+            preferred_target_id=trusted.target_id,
+        )
+        if allocated is None:
+            return _safe_unavailable_skill_action(context)
+        arguments = dict(action.arguments)
+        arguments["target"] = allocated.coordinates.as_arguments()
+        try:
+            finalized = action.model_copy(update={"arguments": arguments})
+        except Exception:
+            return _safe_unavailable_skill_action(context)
+        if not _skill_is_permitted(context, finalized):
+            return _safe_unavailable_skill_action(context)
+        return finalized

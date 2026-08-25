@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -86,16 +87,27 @@ _SELECT_ONE = sa.text(
     """
 )
 
+_REFRESH_SESSION_LIVENESS = sa.text(
+    """
+    UPDATE llm_gateway_sessions
+    SET last_event_at = clock_timestamp(), updated_at = clock_timestamp()
+    WHERE gateway_id = :gateway_id
+      AND session_id IN :session_ids
+    """
+).bindparams(sa.bindparam("session_ids", expanding=True))
+
 _SET_ADMISSION_STATEMENT_TIMEOUT = sa.text(
     "SELECT set_config('statement_timeout', :timeout_ms, true)"
 )
 
 _UPSERT_SESSION = sa.text(
     """
-    INSERT INTO llm_gateway_sessions (tenant_id, gateway_id, session_id, status)
-    VALUES (:tenant_id, :gateway_id, :session_id, 'pending')
+    INSERT INTO llm_gateway_sessions (
+        tenant_id, gateway_id, session_id, status, last_event_at
+    )
+    VALUES (:tenant_id, :gateway_id, :session_id, 'pending', clock_timestamp())
     ON CONFLICT (gateway_id, session_id) DO UPDATE
-      SET updated_at = now()
+      SET updated_at = clock_timestamp()
     RETURNING id
     """
 )
@@ -204,12 +216,12 @@ _ADMIT_NON_CHAT_EVENTS = sa.text(
         ORDER BY session_id, ordinal
     ), runtime_sessions AS (
         INSERT INTO llm_gateway_sessions (
-            tenant_id, gateway_id, session_id, status
+            tenant_id, gateway_id, session_id, status, last_event_at
         )
-        SELECT :tenant_id, :gateway_id, session_input.session_id, 'pending'
+        SELECT :tenant_id, :gateway_id, session_input.session_id, 'pending', clock_timestamp()
         FROM session_input
         ON CONFLICT (gateway_id, session_id) DO UPDATE
-          SET updated_at = now()
+          SET updated_at = clock_timestamp()
         RETURNING id, session_id
     ), cycle_input AS (
         SELECT DISTINCT ON (session_id, control_generation)
@@ -751,10 +763,209 @@ _CLEANUP_CLOSED_CYCLE_EVENTS = sa.text(
     """
 )
 
+_SELECT_STALE_EVENTS = sa.text(
+    """
+    SELECT
+        e.id AS row_id,
+        e.cycle_id,
+        e.event_type,
+        e.status AS event_status,
+        s.id AS runtime_session_id,
+        s.fence_version
+    FROM llm_gateway_events AS e
+    JOIN llm_gateway_control_cycles AS c ON c.id = e.cycle_id
+    JOIN llm_gateway_sessions AS s ON s.id = c.runtime_session_id
+    WHERE e.status IN ('pending', 'processing', 'retryable_failed')
+      AND e.event_body ? 'occurredAtMs'
+      AND (
+          extract(epoch FROM clock_timestamp()) * 1000
+          - (e.event_body ->> 'occurredAtMs')::bigint
+      ) > :max_age_ms
+    ORDER BY e.received_at, e.id
+    FOR UPDATE OF s, e SKIP LOCKED
+    LIMIT 256
+    """
+)
+
+_MARK_STALE_EVENT = sa.text(
+    """
+    UPDATE llm_gateway_events
+    SET status = 'superseded',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        error_stage = 'gateway_session',
+        error_category = 'stale_event_discarded',
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    WHERE id = :row_id
+      AND status IN ('pending', 'processing', 'retryable_failed')
+    RETURNING id
+    """
+)
+
+_CANCEL_STALE_DECISIONS = sa.text(
+    """
+    UPDATE llm_gateway_decisions
+    SET status = 'cancelled',
+        response_status = 'cancelled',
+        response_reason = 'stale_event_discarded',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        locked_by = NULL,
+        lock_until = NULL,
+        error_stage = 'gateway_session',
+        error_category = 'stale_event_discarded',
+        completed_at = COALESCE(completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    WHERE source_event_id = :row_id
+      AND status IN ('planned', 'sending', 'retryable_failed')
+    """
+)
+
+_CANCEL_STALE_SKILL_CALLS = sa.text(
+    """
+    UPDATE llm_gateway_skill_calls AS call
+    SET status = 'cancelled',
+        failure_category = 'stale_event_discarded',
+        reason = 'stale_event_discarded',
+        retryable = false,
+        completed_at = COALESCE(call.completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    FROM llm_gateway_decisions AS decision
+    WHERE call.decision_row_id = decision.id
+      AND decision.source_event_id = :row_id
+      AND call.status IN ('pending', 'started')
+    """
+)
+
+_BUMP_SESSION_FENCE = sa.text(
+    """
+    UPDATE llm_gateway_sessions
+    SET fence_version = fence_version + 1,
+        updated_at = clock_timestamp()
+    WHERE id = :runtime_session_id
+      AND fence_version = :fence_version
+    RETURNING fence_version
+    """
+)
+
+_SELECT_IDLE_SESSIONS = sa.text(
+    """
+    SELECT
+        session.id,
+        session.current_generation,
+        session.fence_version,
+        (
+            SELECT cycle.id
+            FROM llm_gateway_control_cycles AS cycle
+            WHERE cycle.runtime_session_id = session.id
+              AND cycle.control_generation = session.current_generation
+              AND cycle.status IN ('pending', 'active')
+            LIMIT 1
+        ) AS current_cycle_id
+    FROM llm_gateway_sessions AS session
+    WHERE session.status = 'active'
+      AND session.last_event_at <= clock_timestamp() - (:idle_timeout_seconds * interval '1 second')
+    ORDER BY last_event_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 256
+    """
+)
+
+_STOP_IDLE_CYCLES = sa.text(
+    """
+    UPDATE llm_gateway_control_cycles
+    SET status = 'stopped',
+        stopped_at = clock_timestamp(),
+        updated_at = clock_timestamp()
+    WHERE runtime_session_id = :runtime_session_id
+      AND control_generation = :control_generation
+      AND status IN ('pending', 'active')
+    """
+)
+
+_SUPERSEDE_IDLE_EVENTS = sa.text(
+    """
+    UPDATE llm_gateway_events AS event
+    SET status = 'superseded',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        lock_until = NULL,
+        locked_by = NULL,
+        error_stage = 'gateway_session',
+        error_category = 'gateway_session_inactive',
+        completed_at = COALESCE(event.completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    FROM llm_gateway_control_cycles AS cycle
+    WHERE event.cycle_id = cycle.id
+      AND cycle.runtime_session_id = :runtime_session_id
+      AND cycle.control_generation = :control_generation
+      AND event.status IN ('pending', 'processing', 'retryable_failed')
+    """
+)
+
+_CANCEL_IDLE_DECISIONS = sa.text(
+    """
+    UPDATE llm_gateway_decisions AS decision
+    SET status = 'cancelled',
+        response_status = 'cancelled',
+        response_reason = 'gateway_session_inactive',
+        claim_token = NULL,
+        claimed_fence_version = NULL,
+        locked_by = NULL,
+        lock_until = NULL,
+        error_stage = 'gateway_session',
+        error_category = 'gateway_session_inactive',
+        completed_at = COALESCE(decision.completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    FROM llm_gateway_control_cycles AS cycle
+    WHERE decision.cycle_id = cycle.id
+      AND cycle.runtime_session_id = :runtime_session_id
+      AND cycle.control_generation = :control_generation
+      AND decision.status IN ('planned', 'sending', 'retryable_failed')
+    """
+)
+
+_CANCEL_IDLE_SKILL_CALLS = sa.text(
+    """
+    UPDATE llm_gateway_skill_calls AS call
+    SET status = 'cancelled',
+        failure_category = 'gateway_session_inactive',
+        reason = 'gateway_session_inactive',
+        retryable = false,
+        completed_at = COALESCE(call.completed_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+    FROM llm_gateway_decisions AS decision
+    JOIN llm_gateway_control_cycles AS cycle ON cycle.id = decision.cycle_id
+    WHERE call.decision_row_id = decision.id
+      AND cycle.runtime_session_id = :runtime_session_id
+      AND cycle.control_generation = :control_generation
+      AND call.status IN ('pending', 'started')
+    """
+)
+
+_STOP_IDLE_SESSION = sa.text(
+    """
+    UPDATE llm_gateway_sessions
+    SET status = 'stopped',
+        fence_version = fence_version + 1,
+        updated_at = clock_timestamp()
+    WHERE id = :runtime_session_id
+      AND status = 'active'
+      AND current_generation = :control_generation
+      AND fence_version = :fence_version
+    RETURNING id
+    """
+)
+
 _STOP_CURRENT_RUNTIME = sa.text(
     """
     UPDATE llm_gateway_sessions
-    SET status = 'stopped', updated_at = clock_timestamp()
+    SET status = 'stopped',
+        fence_version = fence_version + 1,
+        updated_at = clock_timestamp()
     WHERE id = :runtime_session_id
       AND current_generation = :control_generation
       AND fence_version = :claimed_fence_version
@@ -1032,6 +1243,7 @@ class InboxRepository:
         *,
         metrics: GatewayV2RuntimeMetrics | None = None,
         statement_timeout_seconds: float | None = None,
+        event_stale_after_seconds: float | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._metrics = metrics
@@ -1041,7 +1253,10 @@ class InboxRepository:
             statement_timeout_seconds = settings.llm_gateway_v2_event_admission_timeout_seconds
         if statement_timeout_seconds <= 0:
             raise ValueError("statement_timeout_seconds must be positive")
+        if event_stale_after_seconds is not None and event_stale_after_seconds <= 0:
+            raise ValueError("event_stale_after_seconds must be positive")
         self._statement_timeout_seconds = statement_timeout_seconds
+        self._event_stale_after_seconds = event_stale_after_seconds
 
     async def resolve_role_id(self, gateway_id: str, session_id: str) -> str | None:
         async with self._session_factory() as session:
@@ -1140,6 +1355,29 @@ class InboxRepository:
                         else:
                             raise EventAdmissionConflict(item.event.event_id)
 
+                    now_ms = int(time.time() * 1_000)
+                    stale_after_ms = (
+                        None
+                        if self._event_stale_after_seconds is None
+                        else int(self._event_stale_after_seconds * 1_000)
+                    )
+                    live_session_ids = tuple(
+                        dict.fromkeys(
+                            item.event.session_id
+                            for item in prepared
+                            if stale_after_ms is None
+                            or now_ms - item.event.occurred_at_ms <= stale_after_ms
+                        )
+                    )
+                    if live_session_ids:
+                        await session.execute(
+                            _REFRESH_SESSION_LIVENESS,
+                            {
+                                "gateway_id": identity.gateway_id,
+                                "session_ids": live_session_ids,
+                            },
+                        )
+
                     await session.commit()
                 except EventAdmissionConflict:
                     await self._rollback_quietly(session)
@@ -1161,6 +1399,78 @@ class InboxRepository:
 
         return BatchAcceptance(tuple(received), tuple(duplicates))
 
+    async def discard_stale_events(self, *, max_age_seconds: float | None = None) -> int:
+        threshold = self._event_stale_after_seconds if max_age_seconds is None else max_age_seconds
+        if threshold is None:
+            return 0
+        if threshold <= 0:
+            raise ValueError("max_age_seconds must be positive")
+
+        discarded = 0
+        async with self._session_factory() as session, session.begin():
+            while True:
+                rows = (
+                    await session.execute(
+                        _SELECT_STALE_EVENTS,
+                        {"max_age_ms": int(threshold * 1_000)},
+                    )
+                ).mappings().all()
+                if not rows:
+                    return discarded
+                for row in rows:
+                    await acquire_cycle_advisory_lock(session, row["cycle_id"])
+                    marked = await session.execute(_MARK_STALE_EVENT, {"row_id": row["row_id"]})
+                    if marked.scalar_one_or_none() is None:
+                        continue
+                    await session.execute(_CANCEL_STALE_DECISIONS, {"row_id": row["row_id"]})
+                    await session.execute(_CANCEL_STALE_SKILL_CALLS, {"row_id": row["row_id"]})
+                    if str(row["event_status"]) == "processing":
+                        await session.execute(
+                            _BUMP_SESSION_FENCE,
+                            {
+                                "runtime_session_id": row["runtime_session_id"],
+                                "fence_version": row["fence_version"],
+                            },
+                        )
+                    discarded += 1
+
+    async def stop_idle_sessions(self, *, idle_timeout_seconds: float) -> int:
+        if idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be positive")
+
+        stopped = 0
+        async with self._session_factory() as session, session.begin():
+            rows = (
+                await session.execute(
+                    _SELECT_IDLE_SESSIONS,
+                    {"idle_timeout_seconds": idle_timeout_seconds},
+                )
+            ).mappings().all()
+            for row in rows:
+                runtime_session_id = row["id"]
+                parameters = {
+                    "runtime_session_id": runtime_session_id,
+                    "control_generation": row["current_generation"],
+                }
+                await acquire_cycle_advisory_lock(
+                    session,
+                    row["current_cycle_id"] or runtime_session_id,
+                )
+                await session.execute(_STOP_IDLE_CYCLES, parameters)
+                await session.execute(_SUPERSEDE_IDLE_EVENTS, parameters)
+                await session.execute(_CANCEL_IDLE_DECISIONS, parameters)
+                await session.execute(_CANCEL_IDLE_SKILL_CALLS, parameters)
+                stopped_row = await session.execute(
+                    _STOP_IDLE_SESSION,
+                    {
+                        **parameters,
+                        "fence_version": row["fence_version"],
+                    },
+                )
+                if stopped_row.scalar_one_or_none() is not None:
+                    stopped += 1
+        return stopped
+
     @retry_database_mutation
     async def claim_next_event(
         self,
@@ -1175,6 +1485,9 @@ class InboxRepository:
             raise ValueError("claim_ttl_ms must be positive")
         if max_attempts <= 0:
             raise ValueError("max_attempts must be positive")
+
+        if self._event_stale_after_seconds is not None:
+            await self.discard_stale_events()
 
         while True:
             async with self._session_factory() as session, session.begin():

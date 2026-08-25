@@ -526,6 +526,7 @@ _COMPLETE_DECISION_RETRYABLE = sa.text(
         locked_by = NULL,
         error_stage = :error_stage,
         error_category = :error_category,
+        response_body_json = COALESCE(:response_body_json, response_body_json),
         updated_at = clock_timestamp()
     WHERE id = :row_id
       AND status = 'sending'
@@ -533,7 +534,7 @@ _COMPLETE_DECISION_RETRYABLE = sa.text(
       AND claimed_fence_version = :claimed_fence_version
     RETURNING id
     """
-)
+).bindparams(sa.bindparam("response_body_json", type_=JSONB))
 
 _COMPLETE_DECISION_DEAD_LETTER = sa.text(
     """
@@ -545,6 +546,7 @@ _COMPLETE_DECISION_DEAD_LETTER = sa.text(
         locked_by = NULL,
         error_stage = :error_stage,
         error_category = :error_category,
+        response_body_json = COALESCE(:response_body_json, response_body_json),
         completed_at = clock_timestamp(),
         updated_at = clock_timestamp()
     WHERE id = :row_id
@@ -553,7 +555,7 @@ _COMPLETE_DECISION_DEAD_LETTER = sa.text(
       AND claimed_fence_version = :claimed_fence_version
     RETURNING id
     """
-)
+).bindparams(sa.bindparam("response_body_json", type_=JSONB))
 
 _LOCK_EXHAUSTED_DECISION_CLAIM = sa.text(
     """
@@ -642,6 +644,7 @@ _COMPLETE_DECISION_RESPONSE = sa.text(
         response_http_status = :response_http_status,
         response_status = :response_status,
         response_reason = :response_reason,
+        response_body_json = :response_body_json,
         skill_call_id = :skill_call_id,
         claim_token = NULL,
         claimed_fence_version = NULL,
@@ -656,6 +659,20 @@ _COMPLETE_DECISION_RESPONSE = sa.text(
       AND claim_token = :claim_token
       AND claimed_fence_version = :claimed_fence_version
     RETURNING id
+    """
+).bindparams(sa.bindparam("response_body_json", type_=JSONB))
+
+_RECORD_DECISION_TOKEN_USAGE = sa.text(
+    """
+    UPDATE llm_gateway_decisions
+    SET input_tokens = :input_tokens,
+        output_tokens = :output_tokens,
+        total_tokens = :total_tokens,
+        model_calls = :model_calls,
+        usage_reported_calls = :usage_reported_calls,
+        usage_missing_calls = :usage_missing_calls,
+        updated_at = clock_timestamp()
+    WHERE source_event_id = :source_event_id
     """
 )
 
@@ -814,7 +831,9 @@ _CLOSE_CYCLE = sa.text(
 _STOP_RUNTIME = sa.text(
     """
     UPDATE llm_gateway_sessions
-    SET status = 'stopped', updated_at = clock_timestamp()
+    SET status = 'stopped',
+        fence_version = fence_version + 1,
+        updated_at = clock_timestamp()
     WHERE id = :runtime_session_id
       AND current_generation = :control_generation
       AND fence_version = :claimed_fence_version
@@ -865,6 +884,43 @@ class OutboxRepository:
                 )
                 row = result.mappings().one_or_none()
             return None if row is None else self._planned_from_row(row, created=False)
+        except SQLAlchemyError:
+            raise DecisionPlanUnavailableError from None
+
+    async def is_event_fence_current(
+        self,
+        event: ClaimedGatewayEvent,
+        context: GatewayV2AgentContext,
+    ) -> bool:
+        try:
+            async with self._session_factory() as session:
+                await acquire_cycle_advisory_lock(session, event.cycle_id)
+                result = await session.execute(
+                    _LOCK_PLAN_SOURCE,
+                    {"source_event_id": event.row_id},
+                )
+                row = result.mappings().one_or_none()
+            return row is not None and self._plan_fence_matches(row, event, context)
+        except SQLAlchemyError:
+            raise DecisionPlanUnavailableError from None
+
+    @retry_database_mutation
+    async def record_decision_token_usage(self, event: ClaimedGatewayEvent, usage: object) -> bool:
+        try:
+            async with self._session_factory() as session, session.begin():
+                result = await session.execute(
+                    _RECORD_DECISION_TOKEN_USAGE,
+                    {
+                        "source_event_id": event.row_id,
+                        "input_tokens": getattr(usage, "input_tokens", None),
+                        "output_tokens": getattr(usage, "output_tokens", None),
+                        "total_tokens": getattr(usage, "total_tokens", None),
+                        "model_calls": getattr(usage, "model_calls", None),
+                        "usage_reported_calls": getattr(usage, "usage_reported_calls", None),
+                        "usage_missing_calls": getattr(usage, "usage_missing_calls", None),
+                    },
+                )
+                return result.rowcount > 0
         except SQLAlchemyError:
             raise DecisionPlanUnavailableError from None
 
@@ -1167,6 +1223,7 @@ class OutboxRepository:
         *,
         error_stage: str,
         error_category: str,
+        response_body_json: Mapping[str, Any] | None = None,
         max_attempts: int,
         retry_base_ms: int,
         retry_max_ms: int,
@@ -1198,6 +1255,9 @@ class OutboxRepository:
                 "claimed_fence_version": decision.claimed_fence_version,
                 "error_stage": error_stage,
                 "error_category": error_category,
+                "response_body_json": (
+                    dict(response_body_json) if response_body_json is not None else None
+                ),
             }
             if int(locked["attempt_count"]) >= max_attempts:
                 completed = await session.execute(_COMPLETE_DECISION_DEAD_LETTER, parameters)
@@ -1309,6 +1369,11 @@ class OutboxRepository:
                     "response_http_status": response.http_status,
                     "response_status": response.status,
                     "response_reason": response.reason[:256],
+                    "response_body_json": (
+                        dict(response.response_body_json)
+                        if response.response_body_json is not None
+                        else None
+                    ),
                     "skill_call_id": skill_call_id,
                     "error_stage": error_stage,
                     "error_category": error_category,
@@ -1342,6 +1407,7 @@ class OutboxRepository:
                         "claimed_fence_version": expired["claimed_fence_version"],
                         "error_stage": "worker",
                         "error_category": "claim_expired",
+                        "response_body_json": None,
                     },
                 )
                 if completed.scalar_one_or_none() is None:

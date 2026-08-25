@@ -6,6 +6,8 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlanProposal,
     ActivityPlanValidationError,
     create_plaza_social_plan,
+    invalidate_move_target,
+    is_target_rejection_reason,
     materialize_activity_plan,
     record_step_terminal,
     should_retry_activity_failure,
@@ -102,6 +104,57 @@ def test_non_retryable_failure_without_parameter_correction_skips_step() -> None
 
     assert failed.current_step_id == "dance"
     assert failed.step("arrival").status == "skipped"
+
+
+def test_target_rejection_invalidates_move_target_without_advancing_plan() -> None:
+    plan = validate_activity_plan(
+        {
+            "planId": "plan-wander",
+            "goalId": "plaza_explore",
+            "goalSummary": "Explore the plaza",
+            "phase": "movement",
+            "status": "active",
+            "version": 1,
+            "currentStepId": "move",
+            "steps": [
+                {
+                    "stepId": "move",
+                    "phase": "movement",
+                    "skillName": "move_to",
+                    "schemaVersion": "v1",
+                    "sceneTargetId": "scene:7:navigation:1",
+                    "intent": "Walk to a plaza point",
+                },
+                {
+                    "stepId": "dance",
+                    "phase": "activity",
+                    "skillName": "dance_auto_schedule",
+                    "schemaVersion": "v1",
+                    "intent": "Dance at the plaza",
+                },
+                {
+                    "stepId": "coffee",
+                    "phase": "activity",
+                    "skillName": "coffee_auto_schedule",
+                    "schemaVersion": "v1",
+                    "intent": "Have coffee",
+                },
+            ],
+        }
+    )
+
+    invalidated = invalidate_move_target(plan, "move")
+
+    assert invalidated.current_step_id == "move"
+    assert invalidated.current_step().scene_target_id is None
+    assert invalidated.current_step().status == "pending"
+    assert invalidated.current_step().attempt_count == 1
+
+
+@pytest.mark.parametrize("reason", ["target_congested", "state_not_allowed", "target_congested: spacing"])
+def test_only_known_target_rejection_reasons_invalidate_move_target(reason: str) -> None:
+    expected = reason.startswith("target_congested") or reason == "state_not_allowed"
+    assert is_target_rejection_reason(reason) is expected
 
 
 def test_plan_rejects_unknown_skill_and_direct_chat_skill() -> None:

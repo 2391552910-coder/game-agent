@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -257,6 +258,77 @@ async def test_new_duplicate_mixed_batch_and_retry_are_durable(session_factory) 
     async with session_factory() as session:
         assert await session.scalar(sa.text("SELECT status FROM llm_gateway_control_cycles")) == "pending"
         assert await session.scalar(sa.text("SELECT status FROM llm_gateway_events LIMIT 1")) == "pending"
+
+
+async def test_stale_event_is_discarded_before_it_can_be_claimed(session_factory) -> None:
+    stale_repository = InboxRepository(session_factory, event_stale_after_seconds=480)
+    stale_event = _event("stale-event").model_copy(
+        update={"occurred_at_ms": int((time.time() - 600) * 1_000)}
+    )
+    await stale_repository.accept_event_batch(IDENTITY, "trace-stale", (stale_event,))
+
+    assert await stale_repository.discard_stale_events(max_age_seconds=480) == 1
+    assert await stale_repository.claim_next_event(
+        worker_id="worker-stale",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    ) is None
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                sa.text(
+                    "SELECT status, error_category FROM llm_gateway_events "
+                    "WHERE event_id='stale-event'"
+                )
+            )
+        ).mappings().one()
+    assert (row["status"], row["error_category"]) == (
+        "superseded",
+        "stale_event_discarded",
+    )
+
+
+async def test_idle_session_is_stopped_and_fenced(session_factory) -> None:
+    repository = InboxRepository(session_factory)
+    await repository.accept_event_batch(IDENTITY, "trace-idle", (_event("idle-start"),))
+    started = await repository.claim_next_event(
+        worker_id="worker-idle",
+        claim_ttl_ms=30_000,
+        max_attempts=5,
+    )
+    assert started is not None
+    assert await repository.complete_event(
+        started,
+        EventProcessResult("succeeded"),
+        max_attempts=5,
+        retry_base_ms=100,
+        retry_max_ms=1_000,
+    )
+    async with session_factory() as session:
+        await session.execute(
+            sa.text(
+                "UPDATE llm_gateway_sessions "
+                "SET last_event_at=clock_timestamp() - interval '601 seconds'"
+            )
+        )
+        await session.commit()
+
+    assert await repository.stop_idle_sessions(idle_timeout_seconds=600) == 1
+
+    async with session_factory() as session:
+        runtime = (
+            await session.execute(
+                sa.text("SELECT status, fence_version FROM llm_gateway_sessions")
+            )
+        ).mappings().one()
+        cycle = (
+            await session.execute(
+                sa.text("SELECT status FROM llm_gateway_control_cycles")
+            )
+        ).mappings().one()
+    assert (runtime["status"], runtime["fence_version"]) == ("stopped", 2)
+    assert cycle["status"] == "stopped"
 
 
 async def test_new_session_start_is_not_starved_by_historical_active_observation(session_factory) -> None:

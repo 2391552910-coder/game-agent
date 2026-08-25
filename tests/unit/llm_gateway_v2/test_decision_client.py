@@ -106,6 +106,21 @@ async def test_client_accepts_non_skill_actions_without_skill_call_id(action: st
     assert result.skill_call_id is None
 
 
+async def test_client_accepts_gateway_response_without_decision_lease_id() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = _accepted_response(skill_call_id=None)
+        payload.pop("decisionLeaseId")
+        return httpx.Response(200, json=payload)
+
+    result = await _client(httpx.MockTransport(handler)).send(
+        action="wait",
+        raw_body=_request_body(),
+    )
+
+    assert result.status == "accepted"
+    assert result.decision_lease_id == "lease-1"
+
+
 async def test_client_rejects_response_with_mismatched_request_identity() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = _accepted_response(skill_call_id=None)
@@ -149,6 +164,20 @@ async def test_client_rejects_non_json_response() -> None:
 
     assert raised.value.category == "response_not_json"
     assert raised.value.http_status == 502
+    assert raised.value.response_body_text == "upstream unavailable"
+
+
+async def test_client_limits_non_json_response_preview() -> None:
+    body = b"x" * 10_000
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, content=body)
+
+    with pytest.raises(DecisionClientProtocolError) as raised:
+        await _client(httpx.MockTransport(handler)).send(action="wait", raw_body=b"{}")
+
+    assert raised.value.response_body_text is not None
+    assert len(raised.value.response_body_text) == 4_096
 
 
 @pytest.mark.parametrize("action", ["call_skill", "stop_hosting"])
@@ -196,6 +225,8 @@ async def test_client_rejects_response_with_extra_gateway_fields() -> None:
         await _client(httpx.MockTransport(handler)).send(action="wait", raw_body=b"{}")
 
     assert raised.value.category == "response_schema_invalid"
+    assert raised.value.response_body_text is not None
+    assert '"extra": "forbidden"' in raised.value.response_body_text
 
 
 async def test_client_maps_timeout_without_exposing_external_exception_text() -> None:

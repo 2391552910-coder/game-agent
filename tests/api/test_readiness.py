@@ -348,30 +348,58 @@ async def test_ready_route_returns_200_or_503_with_fixed_body(client, install_re
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("v2_enabled", "ready"), [(False, True), (True, False)])
-async def test_capabilities_returns_503_when_disabled_or_not_ready(
+async def test_capabilities_returns_503_when_disabled(
     client,
     install_readiness_service,
     _mock_settings,
-    v2_enabled: bool,
-    ready: bool,
 ) -> None:
-    async def failed_probe() -> None:
-        raise RuntimeError("unavailable")
-
-    _mock_settings.llm_gateway_v2_enabled = v2_enabled
+    _mock_settings.llm_gateway_v2_enabled = False
     gateway_v2.settings = _mock_settings
-    install_readiness_service(_service(database_probe=_ready_probe if ready else failed_probe))
+    install_readiness_service(_service())
 
     response = await client.get("/api/gateway/v2/capabilities")
 
     assert response.status_code == 503
-    expected = (
-        {"code": "service_disabled", "message": "service disabled"}
-        if not v2_enabled
-        else {"code": "service_unavailable", "message": "service unavailable"}
-    )
-    assert response.json() == {"error": expected}
+    assert response.json() == {
+        "error": {"code": "service_disabled", "message": "service disabled"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_capabilities_returns_503_when_worker_is_not_running(
+    client,
+    install_readiness_service,
+    _mock_settings,
+) -> None:
+    _mock_settings.llm_gateway_v2_enabled = True
+    gateway_v2.settings = _mock_settings
+    install_readiness_service(_service(event_status=WorkerStatusRegistry()))
+
+    response = await client.get("/api/gateway/v2/capabilities")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {"code": "service_unavailable", "message": "service unavailable"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_capabilities_ignores_full_readiness_dependency_failure(
+    client,
+    install_readiness_service,
+    _mock_settings,
+) -> None:
+    async def failed_probe() -> None:
+        raise RuntimeError("unavailable")
+
+    _mock_settings.llm_gateway_v2_enabled = True
+    gateway_v2.settings = _mock_settings
+    install_readiness_service(_service(database_probe=failed_probe))
+
+    response = await client.get("/api/gateway/v2/capabilities")
+
+    assert response.status_code == 200
+    assert response.json()["contractVersion"] == "llm-gateway-http-v2"
 
 
 @pytest.mark.asyncio

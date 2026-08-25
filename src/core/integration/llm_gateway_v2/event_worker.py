@@ -120,6 +120,10 @@ class EventWorkRepository(Protocol):
 
     async def sweep_expired_claims(self, *, max_attempts: int) -> int: ...
 
+    async def discard_stale_events(self, *, max_age_seconds: float) -> int: ...
+
+    async def stop_idle_sessions(self, *, idle_timeout_seconds: float) -> int: ...
+
     async def count_dead_letters(self) -> int: ...
 
 
@@ -137,6 +141,8 @@ class EventWorker:
         retry_base_ms: int,
         retry_max_ms: int,
         max_parallelism: int,
+        session_idle_timeout_seconds: float | None = None,
+        event_stale_after_seconds: float | None = None,
         hooks: WorkerHooks = NO_OP_WORKER_HOOKS,
         metrics: GatewayV2RuntimeMetrics | None = None,
     ) -> None:
@@ -148,6 +154,8 @@ class EventWorker:
             retry_base_ms=retry_base_ms,
             retry_max_ms=retry_max_ms,
             max_parallelism=max_parallelism,
+            session_idle_timeout_seconds=session_idle_timeout_seconds,
+            event_stale_after_seconds=event_stale_after_seconds,
         )
         self._repository = repository
         self._processor = processor
@@ -159,6 +167,8 @@ class EventWorker:
         self._retry_base_ms = retry_base_ms
         self._retry_max_ms = retry_max_ms
         self._max_parallelism = max_parallelism
+        self._session_idle_timeout_seconds = session_idle_timeout_seconds
+        self._event_stale_after_seconds = event_stale_after_seconds
         self._hooks = hooks
         self._metrics = metrics
         self._stop_requested = asyncio.Event()
@@ -180,6 +190,8 @@ class EventWorker:
         retry_base_ms: int,
         retry_max_ms: int,
         max_parallelism: int,
+        session_idle_timeout_seconds: float,
+        event_stale_after_seconds: float,
     ) -> None:
         if not worker_id.strip():
             raise ValueError("worker_id must not be empty")
@@ -195,6 +207,10 @@ class EventWorker:
                 raise ValueError(f"{name} must be positive")
         if retry_base_ms > retry_max_ms:
             raise ValueError("retry_base_ms must not exceed retry_max_ms")
+        if session_idle_timeout_seconds is not None and session_idle_timeout_seconds <= 0:
+            raise ValueError("session_idle_timeout_seconds must be positive")
+        if event_stale_after_seconds is not None and event_stale_after_seconds <= 0:
+            raise ValueError("event_stale_after_seconds must be positive")
 
     async def start(self) -> None:
         if self._loop_task is not None and not self._loop_task.done():
@@ -293,6 +309,32 @@ class EventWorker:
         return claimed_count
 
     async def _run_maintenance_once(self) -> None:
+        discard_stale_events = getattr(self._repository, "discard_stale_events", None)
+        if callable(discard_stale_events) and self._event_stale_after_seconds is not None:
+            stale_count = await discard_stale_events(
+                max_age_seconds=self._event_stale_after_seconds,
+            )
+            if stale_count:
+                logger.warning(
+                    "LLM Gateway v2 stale events discarded",
+                    extra={
+                        "discarded_count": stale_count,
+                        "error_category": "stale_event_discarded",
+                    },
+                )
+        stop_idle_sessions = getattr(self._repository, "stop_idle_sessions", None)
+        if callable(stop_idle_sessions) and self._session_idle_timeout_seconds is not None:
+            stopped_count = await stop_idle_sessions(
+                idle_timeout_seconds=self._session_idle_timeout_seconds,
+            )
+            if stopped_count:
+                logger.warning(
+                    "LLM Gateway v2 idle sessions stopped",
+                    extra={
+                        "stopped_count": stopped_count,
+                        "error_category": "gateway_session_inactive",
+                    },
+                )
         swept_count = await self._repository.sweep_expired_claims(max_attempts=self._max_attempts)
         if swept_count:
             logger.warning(

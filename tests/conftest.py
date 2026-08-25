@@ -156,6 +156,8 @@ def _mock_settings():
     mock.llm_gateway_v2_shutdown_grace_seconds = 10
     mock.llm_gateway_v2_readiness_timeout_seconds = 3
     mock.llm_gateway_v2_readiness_cache_seconds = 5
+    mock.llm_gateway_v2_session_idle_timeout_seconds = 600.0
+    mock.llm_gateway_v2_event_stale_after_seconds = 480.0
     # Token 配额
     mock.default_monthly_tokens = 100000
     mock.quota_warning_threshold = 0.8

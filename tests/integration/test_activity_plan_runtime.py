@@ -343,7 +343,9 @@ def _second_proposal() -> ActivityPlanProposal:
 
 @dataclass
 class _PlanGenerator:
-    calls: int = 0
+    # Lobby bootstrap uses the deterministic safe plan and intentionally does
+    # not call the model. Start after that implicit bootstrap for replan tests.
+    calls: int = 1
 
     async def generate(self, context: GatewayV2AgentContext, *, recent_actions, recent_failures):
         del context, recent_actions, recent_failures

@@ -18,6 +18,8 @@ from src.core.integration.llm_gateway_v2.activity_plan import (
     ActivityPlan,
     ActivityPlanValidationError,
     complete_social_opportunity,
+    invalidate_move_target,
+    is_target_rejection_reason,
     record_step_started,
     record_step_terminal,
     should_retry_activity_failure,
@@ -61,6 +63,7 @@ class ActivityPlanSnapshot:
     recent_actions: tuple[Mapping[str, Any], ...]
     recent_failures: tuple[Mapping[str, Any], ...]
     version: int = 0
+    last_event_sequence: int = 0
 
 
 class _SessionFactory(Protocol):
@@ -185,7 +188,8 @@ _SELECT_ACTIVITY_CYCLE = sa.text(
     """
     SELECT
         activity_plan,
-        activity_plan_version
+        activity_plan_version,
+        activity_last_event_sequence
     FROM llm_gateway_control_cycles
     WHERE id = :cycle_id
     """
@@ -239,6 +243,7 @@ class ActivityPlanRepository:
                     version=int(row["activity_plan_version"] or 0),
                     recent_actions=actions,
                     recent_failures=failures,
+                    last_event_sequence=int(row["activity_last_event_sequence"] or 0),
                 )
         except ActivityPlanUnavailableError:
             raise
@@ -343,11 +348,13 @@ class ActivityPlanRepository:
         decision_id = str(getattr(payload, "decision_id", ""))
         if not decision_id:
             return True
+        invalidate_target = is_target_rejection_reason(str(getattr(payload, "reason", "")))
         return await self._record_terminal_event(
             event,
             succeeded=False,
             retryable=False,
             decision_id=decision_id,
+            invalidate_target=invalidate_target,
         )
 
     async def record_observation(self, event: ClaimedGatewayEvent) -> bool:
@@ -415,6 +422,7 @@ class ActivityPlanRepository:
         retryable: bool,
         corrected_decision_allowed: bool = False,
         decision_id: str | None = None,
+        invalidate_target: bool = False,
     ) -> bool:
         try:
             async with self._session_factory() as session, session.begin():
@@ -438,6 +446,8 @@ class ActivityPlanRepository:
                     return True
                 if succeeded is None:
                     updated = record_step_started(plan, step_id)
+                elif invalidate_target and plan.current_step().skill_name == "move_to":
+                    updated = invalidate_move_target(plan, step_id)
                 else:
                     updated = record_step_terminal(
                         plan,

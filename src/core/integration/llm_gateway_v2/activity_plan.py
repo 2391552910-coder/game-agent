@@ -72,6 +72,15 @@ def should_retry_activity_failure(
     return retryable and reason not in _ACTIVITY_RETRY_SUPPRESSION_REASONS
 
 
+def is_target_rejection_reason(reason: str) -> bool:
+    normalized = reason.strip().casefold()
+    return (
+        normalized == "target_congested"
+        or normalized.startswith("target_congested:")
+        or normalized == "state_not_allowed"
+    )
+
+
 class _ActivityModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -384,6 +393,37 @@ def record_step_terminal(
         return plan.model_copy(update={"steps": _replace_step(plan, pending)})
     skipped = current.model_copy(update={"status": "skipped", "attempt_count": attempts})
     return _advance_after_terminal(plan, skipped)
+
+
+def invalidate_move_target(plan: ActivityPlan, step_id: str) -> ActivityPlan:
+    current = plan.current_step()
+    if current.step_id != step_id or current.skill_name != "move_to":
+        raise ActivityPlanValidationError("only the current move_to step can lose its target")
+    attempts = min(current.attempt_count + 1, current.max_attempts)
+    replacement = current.model_copy(
+        update={
+            "scene_target_id": None,
+            "status": "pending",
+            "attempt_count": attempts,
+        }
+    )
+    return plan.model_copy(update={"steps": _replace_step(plan, replacement)})
+
+
+def replace_move_target(
+    plan: ActivityPlan,
+    step_id: str,
+    target_id: str | None,
+    *,
+    version: int,
+) -> ActivityPlan:
+    current = plan.current_step()
+    if current.step_id != step_id or current.skill_name != "move_to":
+        raise ActivityPlanValidationError("only the current move_to step can be retargeted")
+    replacement = current.model_copy(update={"scene_target_id": target_id, "status": "pending"})
+    return plan.model_copy(
+        update={"steps": _replace_step(plan, replacement), "version": version}
+    )
 
 
 def complete_social_opportunity(plan: ActivityPlan) -> ActivityPlan:

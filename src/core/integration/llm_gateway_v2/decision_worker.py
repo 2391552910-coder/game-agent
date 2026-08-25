@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from src.core.integration.llm_gateway_v2.decision_client import (
@@ -11,6 +13,7 @@ from src.core.integration.llm_gateway_v2.decision_client import (
     DecisionClientTransportError,
 )
 from src.core.integration.llm_gateway_v2.errors import safe_exception_fields
+from src.core.integration.llm_gateway_v2.monitor_audit import MonitorAuditRepository, MonitorRecord, safe_record
 from src.core.integration.llm_gateway_v2.outbox_repository import ClaimedDecision
 from src.core.integration.llm_gateway_v2.runtime_metrics import GatewayV2RuntimeMetrics
 from src.core.integration.llm_gateway_v2.worker_hooks import NO_OP_WORKER_HOOKS, WorkerHooks
@@ -20,6 +23,26 @@ from src.core.integration.llm_gateway_v2.worker_status import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_json_object(raw_body: bytes) -> dict[str, object] | None:
+    try:
+        value = json.loads(raw_body)
+    except (TypeError, ValueError):
+        return None
+    return dict(value) if isinstance(value, Mapping) else None
+
+
+def _failure_response_body(
+    *,
+    http_status: int | None,
+    response_body_text: str | None,
+) -> dict[str, object] | None:
+    body = {
+        **({"httpStatus": http_status} if http_status is not None else {}),
+        **({"rawBody": response_body_text} if response_body_text else {}),
+    }
+    return body or None
 
 _CALLBACK_REJECTION_REASONS: tuple[str, ...] = (
     "lease_not_found",
@@ -85,6 +108,7 @@ class DecisionWorkRepository(Protocol):
         *,
         error_stage: str,
         error_category: str,
+        response_body_json: Mapping[str, Any] | None = None,
         max_attempts: int,
         retry_base_ms: int,
         retry_max_ms: int,
@@ -122,6 +146,7 @@ class DecisionWorker:
         max_parallelism: int,
         hooks: WorkerHooks = NO_OP_WORKER_HOOKS,
         metrics: GatewayV2RuntimeMetrics | None = None,
+        audit_repository: MonitorAuditRepository | None = None,
     ) -> None:
         self._validate_configuration(
             worker_id=worker_id,
@@ -144,6 +169,7 @@ class DecisionWorker:
         self._max_parallelism = max_parallelism
         self._hooks = hooks
         self._metrics = metrics
+        self._audit_repository = audit_repository
         self._stop_requested = asyncio.Event()
         self._drain_requested = asyncio.Event()
         self._started = asyncio.Event()
@@ -343,6 +369,7 @@ class DecisionWorker:
                     },
                 )
                 await self._complete_failure(decision, error.category)
+                await self._record_audit_failure(decision, error.category)
                 if self._metrics is not None:
                     self._metrics.record_callback_result(
                         "transport_error",
@@ -362,7 +389,21 @@ class DecisionWorker:
                         "worker_id": self._worker_id,
                     },
                 )
-                await self._complete_failure(decision, error.category)
+                response_body_json = _failure_response_body(
+                    http_status=error.http_status,
+                    response_body_text=error.response_body_text,
+                )
+                await self._complete_failure(
+                    decision,
+                    error.category,
+                    response_body_json=response_body_json,
+                )
+                await self._record_audit_failure(
+                    decision,
+                    error.category,
+                    http_status=error.http_status,
+                    response_body_text=error.response_body_text,
+                )
                 if self._metrics is not None:
                     self._metrics.record_callback_result(
                         "protocol_error",
@@ -449,8 +490,59 @@ class DecisionWorker:
                     "elapsed_ms": (time.monotonic() - commit_started) * 1_000,
                     "worker_id": self._worker_id,
                 },
-            )
+                )
+        await self._record_audit_response(decision, response)
         return callback_metric_outcome(response)
+
+    async def _record_audit_response(self, decision: ClaimedDecision, response: DecisionClientResult) -> None:
+        if self._audit_repository is None:
+            return
+        await safe_record(
+            self._audit_repository,
+            MonitorRecord(
+                tenant_id=decision.tenant_id,
+                gateway_id=decision.gateway_id,
+                session_id=decision.session_id,
+                trace_id=decision.trace_id,
+                decision_id=decision.decision_id,
+                record_type="decision",
+                direction="outbound",
+                status=response.status,
+                request_body_json=_decode_json_object(decision.request_body_bytes),
+                response_body_json=response.response_body_json,
+            ),
+        )
+
+    async def _record_audit_failure(
+        self,
+        decision: ClaimedDecision,
+        category: str,
+        *,
+        http_status: int | None = None,
+        response_body_text: str | None = None,
+    ) -> None:
+        if self._audit_repository is None:
+            return
+        await safe_record(
+            self._audit_repository,
+            MonitorRecord(
+                tenant_id=decision.tenant_id,
+                gateway_id=decision.gateway_id,
+                session_id=decision.session_id,
+                trace_id=decision.trace_id,
+                decision_id=decision.decision_id,
+                record_type="error",
+                direction="outbound",
+                status="failed",
+                request_body_json=_decode_json_object(decision.request_body_bytes),
+                error_stage="http",
+                error_category=category,
+                response_body_json=_failure_response_body(
+                    http_status=http_status,
+                    response_body_text=response_body_text,
+                ),
+            ),
+        )
 
     async def _refresh_queue_metrics(self) -> None:
         queue_reader = getattr(self._repository, "queue_metrics", None)
@@ -479,12 +571,19 @@ class DecisionWorker:
         await self._hooks.after_decision_http(decision.decision_id)
         return response
 
-    async def _complete_failure(self, decision: ClaimedDecision, category: str) -> None:
+    async def _complete_failure(
+        self,
+        decision: ClaimedDecision,
+        category: str,
+        *,
+        response_body_json: Mapping[str, Any] | None = None,
+    ) -> None:
         try:
             await self._repository.complete_decision_failure(
                 decision,
                 error_stage="http",
                 error_category=category,
+                response_body_json=response_body_json,
                 max_attempts=self._max_attempts,
                 retry_base_ms=self._retry_base_ms,
                 retry_max_ms=self._retry_max_ms,

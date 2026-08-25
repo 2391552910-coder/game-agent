@@ -1193,7 +1193,8 @@ class GatewayV2DecisionAccepted(_WireModel):
         validation_alias="decisionId",
         serialization_alias="decisionId",
     )
-    decision_lease_id: NonEmptyString128 = Field(
+    decision_lease_id: NonEmptyString128 | None = Field(
+        default=None,
         validation_alias="decisionLeaseId",
         serialization_alias="decisionLeaseId",
     )
