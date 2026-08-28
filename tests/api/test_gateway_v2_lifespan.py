@@ -145,7 +145,7 @@ def _configure(settings, *, v1_enabled: bool, v2_enabled: bool) -> None:
     ("control_enabled", "auto_chat_enabled"),
     [(True, True), (True, False), (False, True), (False, False)],
 )
-def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
+def test_gateway_v2_runtime_wires_hosted_chat_service_with_optional_auto_chat(
     _mock_settings,
     monkeypatch: pytest.MonkeyPatch,
     control_enabled: bool,
@@ -172,11 +172,12 @@ def test_gateway_v2_runtime_wires_optional_hosted_chat_service(
 
     dispatcher = runtime.event_worker._processor
     service = dispatcher.hosted_chat_service
-    expected_enabled = auto_chat_enabled
-    assert isinstance(service, HostedChatService) is expected_enabled
-    if expected_enabled:
+    assert isinstance(service, HostedChatService)
+    if auto_chat_enabled:
         assert isinstance(service._conversation_client, AutoChatClient)
         assert service._identity_resolver is dispatcher.context_repository
+    else:
+        assert service._conversation_client is None
     assert isinstance(dispatcher.activity_repository, ActivityPlanRepository)
     assert isinstance(dispatcher.decision_planner.activity_coordinator, ActivityPlanCoordinator)
     assert (

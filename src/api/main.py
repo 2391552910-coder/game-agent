@@ -266,28 +266,30 @@ def build_gateway_v2_runtime() -> GatewayV2Runtime:
     )
     terminal_repository = TerminalRepository()
     activity_repository = ActivityPlanRepository()
-    hosted_chat_service = None
     auto_chat_base_url = getattr(settings, "auto_chat_base_url", None)
     hosted_chat_enabled = isinstance(auto_chat_base_url, str) and bool(auto_chat_base_url.strip())
-    if hosted_chat_enabled:
-        hosted_chat_service = HostedChatService(
-            conversation_client=AutoChatClient(
+    hosted_chat_service = HostedChatService(
+        conversation_client=(
+            AutoChatClient(
                 base_url=auto_chat_base_url,
                 timeout_seconds=getattr(settings, "auto_chat_timeout_seconds", 45.0),
-            ),
-            identity_resolver=inbox_repository,
-            sender=HostedChatControlClient(
-                base_url=decision_url,
-                app_id=decision_app_id,
-                app_secret=SecretStr(decision_secret),
-                timeout_seconds=getattr(settings, "llm_gateway_decision_timeout_seconds", 10.0),
-                max_retries=getattr(settings, "llm_gateway_decision_max_retries", 1),
-            ),
-            max_queue_size=getattr(settings, "llm_gateway_hosted_chat_queue_size", 100),
-            state_ttl_seconds=getattr(settings, "llm_gateway_hosted_chat_state_ttl_seconds", 300),
-            max_state_entries=getattr(settings, "llm_gateway_hosted_chat_max_state_entries", 10_000),
-            audit_recorder=audit_repository.record_hosted_chat,
-        )
+            )
+            if hosted_chat_enabled
+            else None
+        ),
+        identity_resolver=inbox_repository,
+        sender=HostedChatControlClient(
+            base_url=decision_url,
+            app_id=decision_app_id,
+            app_secret=SecretStr(decision_secret),
+            timeout_seconds=getattr(settings, "llm_gateway_decision_timeout_seconds", 10.0),
+            max_retries=getattr(settings, "llm_gateway_decision_max_retries", 1),
+        ),
+        max_queue_size=getattr(settings, "llm_gateway_hosted_chat_queue_size", 100),
+        state_ttl_seconds=getattr(settings, "llm_gateway_hosted_chat_state_ttl_seconds", 300),
+        max_state_entries=getattr(settings, "llm_gateway_hosted_chat_max_state_entries", 10_000),
+        audit_recorder=audit_repository.record_hosted_chat,
+    )
     scene_catalog = load_default_scene_catalog()
     decision_planner = GatewayV2DecisionPlanner(
         decision_service=GatewayV2DecisionService(

@@ -64,20 +64,8 @@ class _RoleResolver:
 
 
 @pytest.mark.asyncio
-async def test_nearby_friend_request_calls_auto_chat_with_opening_question() -> None:
-    class ConversationClient:
-        calls: list[tuple[int, int, str, str]] = []
-
-        async def generate(
-            self,
-            *,
-            speaker_role_id: int,
-            target_role_id: int,
-            event_id: str,
-            question: str,
-        ) -> AutoChatMessage:
-            self.calls.append((speaker_role_id, target_role_id, event_id, question))
-            return _message(speaker_role_id, target_role_id, event_id, "你好，很高兴见到你。")
+async def test_nearby_friend_request_uses_fixed_phrase_without_auto_chat() -> None:
+    phrase = "你好"
 
     class Sender:
         requests: list[HostedChatSendRequest] = []
@@ -91,12 +79,12 @@ async def test_nearby_friend_request_calls_auto_chat_with_opening_question() -> 
             self.requests.append(request)
             return HostedChatSendReceipt(request_id or "request-opening", "message-opening")
 
-    conversation_client = ConversationClient()
     sender = Sender()
     service = HostedChatService(
-        conversation_client=conversation_client,
+        conversation_client=None,
         identity_resolver=_RoleResolver("100"),
         sender=sender,
+        opening_phrase_selector=lambda: phrase,
     )
     event = SimpleNamespace(
         event_id="opening-1",
@@ -109,8 +97,57 @@ async def test_nearby_friend_request_calls_auto_chat_with_opening_question() -> 
 
     await service.handle_nearby_friend_request("gateway-1", event)
 
-    assert conversation_client.calls == [(100, 200, "opening-1", "生成一条打招呼的消息")]
-    assert [request.content for request in sender.requests] == ["你好，很高兴见到你。"]
+    assert [request.content for request in sender.requests] == [phrase]
+
+
+@pytest.mark.asyncio
+async def test_nearby_friend_retry_reuses_first_selected_phrase() -> None:
+    selected_phrases = iter(("你好", "不应再次选择"))
+    selector_calls = 0
+
+    def select_phrase() -> str:
+        nonlocal selector_calls
+        selector_calls += 1
+        return next(selected_phrases)
+
+    class Sender:
+        requests: list[HostedChatSendRequest] = []
+        calls = 0
+
+        async def send(
+            self,
+            request: HostedChatSendRequest,
+            *,
+            request_id: str | None = None,
+        ) -> HostedChatSendReceipt:
+            self.calls += 1
+            self.requests.append(request)
+            if self.calls == 1:
+                raise HostedChatRetryableError("upstream_server_error")
+            return HostedChatSendReceipt(request_id or "request-opening", "message-opening")
+
+    sender = Sender()
+    service = HostedChatService(
+        conversation_client=None,
+        identity_resolver=_RoleResolver("100"),
+        sender=sender,
+        opening_phrase_selector=select_phrase,
+    )
+    event = SimpleNamespace(
+        event_id="opening-retry-1",
+        session_id="session-1",
+        payload=SimpleNamespace(
+            target=SimpleNamespace(avatar_id="300", role_id="200"),
+            conversation=None,
+        ),
+    )
+
+    with pytest.raises(HostedChatRetryableError):
+        await service.handle_nearby_friend_request("gateway-1", event)
+    await service.handle_nearby_friend_request("gateway-1", event)
+
+    assert selector_calls == 1
+    assert [request.content for request in sender.requests] == ["你好", "你好"]
 
 
 @pytest.mark.asyncio

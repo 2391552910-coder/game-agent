@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import random
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -27,6 +28,19 @@ logger = logging.getLogger(__name__)
 PositiveInt64String = Annotated[str, Field(min_length=1, max_length=19, pattern=r"[1-9][0-9]*")]
 HostedChatType = Literal["friend", "private"]
 HostedChatResultStatus = Literal["sent", "failed", "cancelled", "delivery_unknown"]
+NEARBY_OPENING_PHRASES: tuple[str, ...] = (
+    "嘿，在干嘛呢",
+    "最近怎么样啊",
+    "今天心情如何",
+    "忙不忙现在？",
+    "你好",
+    "在吗？聊两句？",
+    "你最近在玩什么呢？",
+    "今天过得咋样？",
+    "hello",
+    "有空没？一起玩会儿啊？",
+)
+OpeningPhraseSelector = Callable[[], str]
 
 
 class _HostedChatModel(BaseModel):
@@ -240,6 +254,7 @@ class HostedChatService:
         state_ttl_seconds: float = 300.0,
         max_state_entries: int = 10_000,
         audit_recorder: Callable[[dict[str, object]], object] | None = None,
+        opening_phrase_selector: OpeningPhraseSelector | None = None,
     ) -> None:
         if (
             max_queue_size <= 0
@@ -256,6 +271,9 @@ class HostedChatService:
         self._queued_count = 0
         self._state_ttl_seconds = state_ttl_seconds
         self._max_state_entries = max_state_entries
+        self._opening_phrase_selector = opening_phrase_selector or (
+            lambda: random.choice(NEARBY_OPENING_PHRASES)
+        )
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._key_refcounts: dict[tuple[str, str, str], int] = {}
         self._processed_events: OrderedDict[tuple[str, str], float] = OrderedDict()
@@ -489,9 +507,6 @@ class HostedChatService:
         chat_type: HostedChatType,
         incoming_text: str | None,
     ) -> HostedChatSendRequest:
-        question = incoming_text if incoming_text is not None else "生成一条打招呼的消息"
-        if self._conversation_client is None:
-            raise HostedChatPermanentError("conversation_client_not_configured")
         if self._identity_resolver is None:
             raise HostedChatPermanentError("hosted_role_identity_resolver_not_configured")
         hosted_role_id = await self._identity_resolver.resolve_role_id(gateway_id, session_id)
@@ -501,33 +516,41 @@ class HostedChatService:
         parsed_target_role_id = _parse_role_id(target_role_id, category="target_role_id_invalid")
         if speaker_role_id == parsed_target_role_id:
             raise HostedChatPermanentError("hosted_role_identity_conflict")
-        try:
-            message = await self._conversation_client.generate(
-                speaker_role_id=speaker_role_id,
-                target_role_id=parsed_target_role_id,
-                event_id=event_id,
-                question=question,
+        if incoming_text is None:
+            content = self._opening_phrase_selector()
+            if content not in NEARBY_OPENING_PHRASES:
+                raise HostedChatPermanentError("opening_phrase_invalid")
+        else:
+            if self._conversation_client is None:
+                raise HostedChatPermanentError("conversation_client_not_configured")
+            try:
+                message = await self._conversation_client.generate(
+                    speaker_role_id=speaker_role_id,
+                    target_role_id=parsed_target_role_id,
+                    event_id=event_id,
+                    question=incoming_text,
+                )
+            except AutoChatRetryableError as error:
+                raise HostedChatRetryableError(error.category) from None
+            except AutoChatPermanentError as error:
+                raise HostedChatPermanentError(error.category) from None
+            expected_pair_key = (
+                f"{min(speaker_role_id, parsed_target_role_id)}:"
+                f"{max(speaker_role_id, parsed_target_role_id)}:{event_id}"
             )
-        except AutoChatRetryableError as error:
-            raise HostedChatRetryableError(error.category) from None
-        except AutoChatPermanentError as error:
-            raise HostedChatPermanentError(error.category) from None
-        expected_pair_key = (
-            f"{min(speaker_role_id, parsed_target_role_id)}:"
-            f"{max(speaker_role_id, parsed_target_role_id)}:{event_id}"
-        )
-        if (
-            message.speaker_role_id != speaker_role_id
-            or message.target_role_id != parsed_target_role_id
-            or message.pair_key != expected_pair_key
-        ):
-            raise HostedChatPermanentError("response_identity_mismatch")
+            if (
+                message.speaker_role_id != speaker_role_id
+                or message.target_role_id != parsed_target_role_id
+                or message.pair_key != expected_pair_key
+            ):
+                raise HostedChatPermanentError("response_identity_mismatch")
+            content = message.content
         return HostedChatSendRequest(
             sessionId=session_id,
             targetAvatarId=target_avatar_id,
             targetRoleId=target_role_id,
             chatType=chat_type,
-            content=message.content,
+            content=content,
         )
 
     async def _claim_event(self, gateway_id: str, event_id: str) -> bool:

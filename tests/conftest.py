@@ -133,6 +133,9 @@ def _mock_settings():
     mock.llm_gateway_v2_retry_max_ms = 300_000
     mock.llm_gateway_v2_claim_ttl_ms = 30_000
     mock.llm_gateway_v2_agent_timeout_seconds = 30.0
+    mock.llm_gateway_v2_force_action = None
+    mock.llm_gateway_v2_force_wait_ms = 10_000
+    mock.llm_gateway_v2_force_skills = ()
     mock.llm_gateway_v2_agent_max_concurrency = 16
     mock.llm_gateway_v2_agent_acquire_timeout_seconds = 0.25
     mock.llm_gateway_v2_event_admission_max_concurrency = 32
