@@ -828,7 +828,7 @@ _CANCEL_STALE_SKILL_CALLS = sa.text(
     """
     UPDATE llm_gateway_skill_calls AS call
     SET status = 'cancelled',
-        failure_category = 'stale_event_discarded',
+        failure_category = NULL,
         reason = 'stale_event_discarded',
         retryable = false,
         completed_at = COALESCE(call.completed_at, clock_timestamp()),
@@ -932,7 +932,7 @@ _CANCEL_IDLE_SKILL_CALLS = sa.text(
     """
     UPDATE llm_gateway_skill_calls AS call
     SET status = 'cancelled',
-        failure_category = 'gateway_session_inactive',
+        failure_category = NULL,
         reason = 'gateway_session_inactive',
         retryable = false,
         completed_at = COALESCE(call.completed_at, clock_timestamp()),

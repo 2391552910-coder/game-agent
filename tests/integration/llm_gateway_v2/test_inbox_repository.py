@@ -210,6 +210,8 @@ async def session_factory(verified_test_postgres_url: URL) -> AsyncIterator[asyn
     engine = create_async_engine(verified_test_postgres_url, poolclass=sa.pool.NullPool)
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     async with engine.begin() as connection:
+        await connection.execute(sa.text("DELETE FROM llm_gateway_skill_calls"))
+        await connection.execute(sa.text("DELETE FROM llm_gateway_decisions"))
         await connection.execute(sa.text("DELETE FROM llm_gateway_events"))
         await connection.execute(sa.text("DELETE FROM llm_gateway_control_cycles"))
         await connection.execute(sa.text("DELETE FROM llm_gateway_sessions"))
@@ -225,6 +227,8 @@ async def session_factory(verified_test_postgres_url: URL) -> AsyncIterator[asyn
         yield factory
     finally:
         async with engine.begin() as connection:
+            await connection.execute(sa.text("DELETE FROM llm_gateway_skill_calls"))
+            await connection.execute(sa.text("DELETE FROM llm_gateway_decisions"))
             await connection.execute(sa.text("DELETE FROM llm_gateway_events"))
             await connection.execute(sa.text("DELETE FROM llm_gateway_control_cycles"))
             await connection.execute(sa.text("DELETE FROM llm_gateway_sessions"))
@@ -266,6 +270,61 @@ async def test_stale_event_is_discarded_before_it_can_be_claimed(session_factory
         update={"occurred_at_ms": int((time.time() - 600) * 1_000)}
     )
     await stale_repository.accept_event_batch(IDENTITY, "trace-stale", (stale_event,))
+    async with session_factory() as session:
+        event_row = (
+            await session.execute(
+                sa.text(
+                    "SELECT id, cycle_id FROM llm_gateway_events WHERE event_id='stale-event'"
+                )
+            )
+        ).mappings().one()
+        decision_row_id = uuid4()
+        await session.execute(
+            sa.text(
+                """
+                INSERT INTO llm_gateway_decisions (
+                    id, tenant_id, cycle_id, source_event_id,
+                    gateway_id, session_id, decision_id, decision_lease_id,
+                    control_generation, state_version, action, request_body_json,
+                    request_body_bytes, body_hash, status
+                ) VALUES (
+                    :id, :tenant_id, :cycle_id, :source_event_id,
+                    :gateway_id, 'session-1', 'stale-decision', 'stale-lease',
+                    1, 1, 'call_skill', CAST(:request_body_json AS jsonb),
+                    :request_body_bytes, :body_hash, 'planned'
+                )
+                """
+            ),
+            {
+                "id": decision_row_id,
+                "tenant_id": TENANT_ID,
+                "cycle_id": event_row["cycle_id"],
+                "source_event_id": event_row["id"],
+                "gateway_id": IDENTITY.gateway_id,
+                "request_body_json": '{"action":"call_skill","skillName":"jump"}',
+                "request_body_bytes": b"{}",
+                "body_hash": "d" * 64,
+            },
+        )
+        await session.execute(
+            sa.text(
+                """
+                INSERT INTO llm_gateway_skill_calls (
+                    tenant_id, decision_row_id, gateway_id, session_id,
+                    decision_id, skill_call_id, skill_name, status
+                ) VALUES (
+                    :tenant_id, :decision_row_id, :gateway_id, 'session-1',
+                    'stale-decision', 'stale-call', 'jump', 'pending'
+                )
+                """
+            ),
+            {
+                "tenant_id": TENANT_ID,
+                "decision_row_id": decision_row_id,
+                "gateway_id": IDENTITY.gateway_id,
+            },
+        )
+        await session.commit()
 
     assert await stale_repository.discard_stale_events(max_age_seconds=480) == 1
     assert await stale_repository.claim_next_event(
@@ -283,9 +342,22 @@ async def test_stale_event_is_discarded_before_it_can_be_claimed(session_factory
                 )
             )
         ).mappings().one()
+        skill_call = (
+            await session.execute(
+                sa.text(
+                    "SELECT status, reason, failure_category "
+                    "FROM llm_gateway_skill_calls WHERE skill_call_id='stale-call'"
+                )
+            )
+        ).mappings().one()
     assert (row["status"], row["error_category"]) == (
         "superseded",
         "stale_event_discarded",
+    )
+    assert (skill_call["status"], skill_call["reason"], skill_call["failure_category"]) == (
+        "cancelled",
+        "stale_event_discarded",
+        None,
     )
 
 
@@ -305,6 +377,53 @@ async def test_idle_session_is_stopped_and_fenced(session_factory) -> None:
         retry_base_ms=100,
         retry_max_ms=1_000,
     )
+    decision_row_id = uuid4()
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            sa.text(
+                """
+                INSERT INTO llm_gateway_decisions (
+                    id, tenant_id, cycle_id, source_event_id,
+                    gateway_id, session_id, decision_id, decision_lease_id,
+                    control_generation, state_version, action, request_body_json,
+                    request_body_bytes, body_hash, status
+                ) VALUES (
+                    :id, :tenant_id, :cycle_id, :source_event_id,
+                    :gateway_id, 'session-1', 'idle-decision', 'idle-lease',
+                    1, 1, 'call_skill', CAST(:request_body_json AS jsonb),
+                    :request_body_bytes, :body_hash, 'planned'
+                )
+                """
+            ),
+            {
+                "id": decision_row_id,
+                "tenant_id": TENANT_ID,
+                "cycle_id": started.cycle_id,
+                "source_event_id": started.row_id,
+                "gateway_id": IDENTITY.gateway_id,
+                "request_body_json": '{"action":"call_skill","skillName":"jump"}',
+                "request_body_bytes": b"{}",
+                "body_hash": "c" * 64,
+            },
+        )
+        await session.execute(
+            sa.text(
+                """
+                INSERT INTO llm_gateway_skill_calls (
+                    tenant_id, decision_row_id, gateway_id, session_id,
+                    decision_id, skill_call_id, skill_name, status
+                ) VALUES (
+                    :tenant_id, :decision_row_id, :gateway_id, 'session-1',
+                    'idle-decision', 'idle-call', 'jump', 'pending'
+                )
+                """
+            ),
+            {
+                "tenant_id": TENANT_ID,
+                "decision_row_id": decision_row_id,
+                "gateway_id": IDENTITY.gateway_id,
+            },
+        )
     async with session_factory() as session:
         await session.execute(
             sa.text(
@@ -327,8 +446,21 @@ async def test_idle_session_is_stopped_and_fenced(session_factory) -> None:
                 sa.text("SELECT status FROM llm_gateway_control_cycles")
             )
         ).mappings().one()
+        skill_call = (
+            await session.execute(
+                sa.text(
+                    "SELECT status, reason, failure_category "
+                    "FROM llm_gateway_skill_calls WHERE skill_call_id='idle-call'"
+                )
+            )
+        ).mappings().one()
     assert (runtime["status"], runtime["fence_version"]) == ("stopped", 2)
     assert cycle["status"] == "stopped"
+    assert (skill_call["status"], skill_call["reason"], skill_call["failure_category"]) == (
+        "cancelled",
+        "gateway_session_inactive",
+        None,
+    )
 
 
 async def test_new_session_start_is_not_starved_by_historical_active_observation(session_factory) -> None:

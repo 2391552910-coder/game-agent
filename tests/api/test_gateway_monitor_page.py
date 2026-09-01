@@ -12,6 +12,7 @@ async def test_gateway_monitor_page_and_assets_are_public(client) -> None:
     assert "Gateway 调用监控" in page.text
     assert "托管 Agent" in page.text
     assert "当前已加载" in page.text
+    assert '/gateway/assets/app.css?v=20260828' in page.text
     assert 'id="timeline"' in page.text
     assert 'id="detail-panel"' in page.text
     assert 'id="conversation-panel"' in page.text
@@ -52,3 +53,12 @@ def test_gateway_monitor_styles_include_responsive_and_accessible_states() -> No
     assert "--color-error" in stylesheet
     assert "--color-chat" in stylesheet
     assert ".topbar { padding: 12px 16px; flex-wrap: wrap; }" in stylesheet
+    assert ".detail-panel { position: sticky; top: 18px;" in stylesheet
+    assert "max-height: calc(100vh - 36px);" in stylesheet
+
+
+def test_gateway_monitor_keeps_details_in_right_column_until_narrow_layout() -> None:
+    stylesheet = Path("src/api/static/gateway_monitor/app.css").read_text(encoding="utf-8")
+
+    assert "@media (max-width: 980px)" in stylesheet
+    assert "@media (max-width: 1180px)" not in stylesheet
