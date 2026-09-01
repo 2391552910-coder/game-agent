@@ -181,4 +181,5 @@ async def embed_texts(
         model=model,
         api_key=api_key,
         base_url=base_url,
+        embedding_dim=embedding_dim,
     )

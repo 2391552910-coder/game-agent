@@ -5,6 +5,7 @@ import pytest
 
 from src.core.engine.embedding import (
     dashscope_multimodal_embed,
+    embed_texts,
     is_dashscope_multimodal_embedding_model,
     is_ollama_embedding_base_url,
     ollama_embed,
@@ -145,3 +146,27 @@ async def test_ollama_embed_posts_dimensions_and_returns_numpy():
     }
     assert isinstance(result, np.ndarray)
     np.testing.assert_allclose(result, np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32))
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_embed_forwards_configured_dimension(monkeypatch):
+    expected = np.array([[0.1, 0.2]], dtype=np.float32)
+    openai_embed_func = AsyncMock(return_value=expected)
+    monkeypatch.setattr("src.core.engine.embedding.openai_embed.func", openai_embed_func)
+
+    result = await embed_texts(
+        ["测试"],
+        model="text-embedding-3-small",
+        api_key="sk-test",
+        base_url="https://embedding.example/v1",
+        embedding_dim=1024,
+    )
+
+    openai_embed_func.assert_awaited_once_with(
+        ["测试"],
+        model="text-embedding-3-small",
+        api_key="sk-test",
+        base_url="https://embedding.example/v1",
+        embedding_dim=1024,
+    )
+    np.testing.assert_array_equal(result, expected)
